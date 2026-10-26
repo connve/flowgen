@@ -5,6 +5,7 @@
 	import StateMessage from '$lib/StateMessage.svelte';
 	import { apiUrl, errorMessage, failure, type ConfigInfo } from '$lib/api';
 	import { m } from '$lib/paraglide/messages.js';
+	import { pageTitle } from '$lib/pageTitle';
 
 	let yaml = $state('');
 	let loading = $state(true);
@@ -25,7 +26,7 @@
 </script>
 
 <svelte:head>
-	<title>{m.system_page_title()}</title>
+	<title>{pageTitle(m.nav_system())}</title>
 </svelte:head>
 
 <section class="flex h-[calc(100vh-4rem)] min-w-0 flex-col overflow-hidden">

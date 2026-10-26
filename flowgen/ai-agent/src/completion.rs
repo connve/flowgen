@@ -4,6 +4,8 @@
 //! multiple AI providers through the Rig framework, RAG (Retrieval-Augmented
 //! Generation), and multi-turn agent conversations.
 
+/// Images sent with the prompt, fetched from public addresses only.
+pub mod image;
 /// Tool-passthrough request building and response mapping.
 pub mod passthrough;
 
@@ -13,8 +15,9 @@ use flowgen_core::event::{Event, EventBuilder, EventData, EventExt, SharedComple
 use flowgen_core::resource::Source;
 use flowgen_core::task::TaskConfig;
 use futures_util::StreamExt;
-use rig::tool::server::ToolServerHandle;
-use rig::tool::{rmcp::McpClientHandler, server::ToolServer};
+use rig_agent::tool::server::{ToolServer, ToolServerHandle};
+use rig_core::message::{Message, UserContent};
+use rig_rmcp::{McpClientHandler, McpConnection};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -104,8 +107,10 @@ pub struct Completion {
     /// Can be inline strings or external files via resource loader.
     #[serde(default)]
     pub static_context: Option<Vec<Source>>,
-    /// Maximum agent turns (one model call each). Must be non-zero for tool
-    /// use: an agent needs a turn to call the tool and another to answer.
+    /// Most model calls one event may make, tool calls included; defaults to
+    /// 10. At least 1, and at least 2 with `mcp_servers`: one call to use a
+    /// tool and one to answer.
+    /// Example: `max_turns: 5`.
     #[serde(default = "default_max_turns")]
     pub max_turns: usize,
     /// Enable streaming mode (sends chunks as separate events).
@@ -136,10 +141,6 @@ pub struct Completion {
     /// ```
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
-    /// Optional sandbox configuration for agent tool execution.
-    /// When Some, tools are sandboxed for security. When None, tools run without sandbox.
-    #[serde(default)]
-    pub sandbox: Option<flowgen_core::nsjail::SandboxConfig>,
     /// Optional list of upstream task names this task depends on.
     /// When set, this task only receives events from the named tasks.
     /// When not set, the task receives from the previous task in the list (linear chain).
@@ -154,6 +155,32 @@ pub struct Completion {
     /// Optional extended-thinking / reasoning configuration.
     #[serde(default)]
     pub thinking: Option<ThinkingConfig>,
+    /// JSON Schema the answer must match; the answer stays JSON text in `text`.
+    /// Example: `{ type: object, properties: { summary: { type: string } } }`.
+    #[serde(default)]
+    pub output_schema: Option<schemars::Schema>,
+    /// Images sent with the prompt, for models that read images: http or https
+    /// URLs on public addresses, or base64 `data:` URLs.
+    /// Example: `["{{event.data.image_url}}"]`.
+    #[serde(default)]
+    pub images: Vec<String>,
+    /// How long fetching one image may take; defaults to 30s.
+    /// Example: `image_timeout: 10s`.
+    #[serde(default = "default_image_timeout", with = "humantime_serde")]
+    pub image_timeout: std::time::Duration,
+    /// Largest image sent to the model, in bytes; defaults to 20 MiB, the
+    /// limit most providers accept.
+    /// Example: `image_max_bytes: 5242880`.
+    #[serde(default = "default_image_max_bytes")]
+    pub image_max_bytes: usize,
+}
+
+fn default_image_timeout() -> std::time::Duration {
+    std::time::Duration::from_secs(30)
+}
+
+fn default_image_max_bytes() -> usize {
+    20 * 1024 * 1024
 }
 
 /// Extended-thinking / reasoning configuration.
@@ -173,7 +200,7 @@ fn default_include_trace() -> bool {
     true
 }
 
-/// Non-zero default so tool-using agents work out of the box (rig defaults to 0).
+/// Default above one so tool-using agents work out of the box (rig defaults to a single call).
 fn default_max_turns() -> usize {
     10
 }
@@ -420,8 +447,8 @@ pub enum Error {
     },
     #[error("Rig client error: {}", _0)]
     RigClient(String),
-    #[error("Completion generation failed: {}", _0)]
-    CompletionFailed(String),
+    #[error("Completion generation failed: {message}")]
+    CompletionFailed { message: String, retryable: bool },
     #[error("Agent client creation failed: {source}")]
     AgentClient {
         #[source]
@@ -487,6 +514,42 @@ pub enum Error {
         #[source]
         source: passthrough::Error,
     },
+    #[error(transparent)]
+    Image { source: image::Error },
+    #[error(
+        "Invalid max_turns {max_turns}: it counts model calls, so it must be at least 1, or 2 with mcp_servers (one call to use a tool, one to answer)"
+    )]
+    TooFewTurns { max_turns: usize },
+}
+
+impl Error {
+    /// Whether handling the event again may succeed. Upstream failures follow
+    /// rig's verdict, which retries transport failures, 408, 425, 429 and 5xx.
+    fn is_retryable(&self) -> bool {
+        match self {
+            Error::McpUserRequired { .. } | Error::McpUserUnauthorized { .. } => false,
+            Error::CompletionFailed { retryable, .. } => *retryable,
+            Error::AgentClient { source } => source.is_retryable(),
+            Error::Image { source } => source.is_retryable(),
+            _ => true,
+        }
+    }
+}
+
+impl Completion {
+    /// Checks that `max_turns` leaves room for the model calls the task needs.
+    pub fn validate(&self) -> Result<(), Error> {
+        let min_turns = match self.mcp_servers.is_empty() {
+            true => 1,
+            false => 2,
+        };
+        if self.max_turns < min_turns {
+            return Err(Error::TooFewTurns {
+                max_turns: self.max_turns,
+            });
+        }
+        Ok(())
+    }
 }
 
 /// Response structure for completion events.
@@ -549,12 +612,18 @@ pub struct CompletionUsage {
     pub total_tokens: u64,
 }
 
-impl From<rig::completion::Usage> for CompletionUsage {
-    fn from(u: rig::completion::Usage) -> Self {
+/// Counters the provider omits count as zero.
+impl From<rig_core::completion::Usage> for CompletionUsage {
+    fn from(u: rig_core::completion::Usage) -> Self {
+        let prompt_tokens = u.input_tokens.unwrap_or_default();
+        let completion_tokens = u.output_tokens.unwrap_or_default();
         Self {
-            prompt_tokens: u.input_tokens,
-            completion_tokens: u.output_tokens,
-            total_tokens: u.total_tokens,
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: match u.total_tokens {
+                Some(total) => total,
+                None => prompt_tokens + completion_tokens,
+            },
         }
     }
 }
@@ -594,12 +663,11 @@ struct McpServerConnection {
     on_behalf_of_user: bool,
     /// Header value the connection was opened with, for change detection.
     active_header: Option<String>,
-    _service: rmcp::service::RunningService<rmcp::service::RoleClient, McpClientHandler>,
+    _connection: McpConnection,
 }
 
-/// Tool server handle plus the `RunningService` connections backing it. The
-/// services must stay alive as long as tools are used — dropping a service
-/// closes its connection. Never reconnected in place: rmcp bakes the
+/// Tool server handle plus the MCP connections backing it. The connections
+/// must stay alive as long as tools are used — dropping one closes it. Never reconnected in place: rmcp bakes the
 /// `Authorization` header in at connect time and reconnecting would register
 /// every tool on the handle again.
 struct McpTools {
@@ -664,14 +732,16 @@ async fn connect_mcp_tools(
     user_token: Option<&str>,
 ) -> Result<McpTools, Error> {
     let handle = ToolServer::new().run();
-    let client_info = rmcp::model::ClientInfo::new(
+    let client_info = rmcp::model::ClientConfig::new(
         rmcp::model::ClientCapabilities::default(),
         rmcp::model::Implementation::from_build_env(),
     );
 
     let mut connections = Vec::with_capacity(config.mcp_servers.len());
     for mcp_config in &config.mcp_servers {
-        let handler = McpClientHandler::new(client_info.clone(), handle.clone());
+        let handler = McpClientHandler::new(client_info.clone(), handle.clone())
+            .with_timeout(None)
+            .with_call_meta(crate::tool_runs::ToolRuns::call_meta);
 
         let mut oauth_creds = None;
         let mut header_value = None;
@@ -733,8 +803,8 @@ async fn connect_mcp_tools(
         }
         let transport = build_mcp_transport(&mcp_config.url, headers.clone());
 
-        let service = match handler.connect(transport).await {
-            Ok(service) => service,
+        let connection = match handler.connect(transport).await {
+            Ok(connection) => connection,
             Err(e) => {
                 let rejected =
                     mcp_config.on_behalf_of_user && rejects(&mcp_config.url, headers).await;
@@ -757,7 +827,7 @@ async fn connect_mcp_tools(
             creds: oauth_creds,
             on_behalf_of_user: mcp_config.on_behalf_of_user,
             active_header: header_value,
-            _service: service,
+            _connection: connection,
         });
     }
 
@@ -883,7 +953,7 @@ async fn build_agent_client(
                 .resolve(task_context.resource_loader.as_ref())
                 .await
                 .map_err(|source| Error::ResourceLoad { source })?;
-            builder = builder.static_context_document(rig::completion::Document {
+            builder = builder.static_context_document(rig_core::completion::Document {
                 id: format!("context_{idx}"),
                 text: resolved_text,
                 additional_props: std::collections::HashMap::new(),
@@ -891,11 +961,15 @@ async fn build_agent_client(
         }
     }
 
-    // Always set: rig defaults max_turns to 0, which breaks tool use.
+    // Always set: rig defaults to a single model call, which breaks tool use.
     builder = builder.max_turns(config.max_turns);
 
     if let Some(handle) = tool_server_handle {
         builder = builder.tool_server_handle(handle);
+    }
+
+    if let Some(schema) = config.output_schema {
+        builder = builder.output_schema(schema);
     }
 
     if let Some(thinking) = &config.thinking {
@@ -910,14 +984,6 @@ async fn build_agent_client(
     builder
         .build()
         .map_err(|source| Error::AgentClient { source })
-}
-
-/// True if `err` represents an upstream HTTP 4xx (treated as permanent).
-///
-/// Rig surfaces provider errors as opaque strings; matched textually since
-/// the typed enum doesn't carry the status. Replace once rig exposes it.
-fn is_upstream_client_error(err: &Error) -> bool {
-    err.to_string().contains("Invalid status code 4")
 }
 
 /// Loads credentials from a JSON file.
@@ -951,6 +1017,8 @@ pub struct EventHandler {
     toolset: ToolsetSlot,
     /// Toolsets per user, when a server acts on behalf of the user.
     users: UserToolsets,
+    /// Fetches prompt images from public addresses only.
+    image_client: reqwest::Client,
 }
 
 /// How long a user's MCP connections stay open without a request.
@@ -1129,7 +1197,30 @@ impl UserToolsets {
 /// An agent client, with the toolset its tools run on kept open.
 struct Agent {
     client: Arc<crate::agent::AgentClient>,
+    images: Vec<String>,
     _toolset: Arc<Toolset>,
+}
+
+/// Images go as base64, since some providers don't fetch URLs.
+async fn user_message(
+    image_client: &reqwest::Client,
+    config: &Completion,
+    prompt: String,
+    images: Vec<String>,
+) -> Result<Message, Error> {
+    let mut content = vec![UserContent::text(prompt)];
+    for url in images {
+        let image = image::user_content(
+            image_client,
+            url,
+            config.image_timeout,
+            config.image_max_bytes,
+        )
+        .await
+        .map_err(|source| Error::Image { source })?;
+        content.push(image);
+    }
+    Ok(Message::User { content })
 }
 
 #[async_trait::async_trait]
@@ -1140,13 +1231,11 @@ impl flowgen_core::task::runner::Handler for EventHandler {
         self.tx.as_ref()
     }
 
-    /// Retrying doesn't help with upstream 4xx errors or a missing or rejected user token.
+    /// Rate limits, timeouts, server errors and transport failures are retried;
+    /// other upstream client errors, a missing or rejected user token, and an
+    /// image that can't be used are not.
     fn is_retryable(&self, error: &Error) -> bool {
-        !(is_upstream_client_error(error)
-            || matches!(
-                error,
-                Error::McpUserRequired { .. } | Error::McpUserUnauthorized { .. }
-            ))
+        error.is_retryable()
     }
 
     /// Includes the provider and model, so it's clear which backend failed.
@@ -1195,6 +1284,7 @@ impl EventHandler {
             .render_for_event(event)
             .map_err(|source| Error::ConfigRender { source })?;
 
+        let images = rendered.images.clone();
         let toolset = match user_mcp_server(&self.config) {
             Some(url) => {
                 self.users
@@ -1212,6 +1302,7 @@ impl EventHandler {
             .await?;
         Ok(Agent {
             client,
+            images,
             _toolset: toolset,
         })
     }
@@ -1220,7 +1311,11 @@ impl EventHandler {
     #[tracing::instrument(skip(self, event), name = "task.handle", fields(duration_ms = tracing::field::Empty))]
     async fn handle_non_streaming(&self, event: Event) -> Result<(), Error> {
         let started_at = std::time::Instant::now();
-        let Agent { client, _toolset } = self.resolve_client(&event).await?;
+        let Agent {
+            client,
+            images,
+            _toolset,
+        } = self.resolve_client(&event).await?;
         let event = Arc::new(event);
         let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
 
@@ -1240,7 +1335,10 @@ impl EventHandler {
             }
 
             let completion = client
-                .complete(&rendered_prompt, rendered_system_prompt.as_deref())
+                .complete(
+                    user_message(&self.image_client, &self.config, rendered_prompt, images).await?,
+                    rendered_system_prompt.as_deref(),
+                )
                 .await
                 .map_err(|source| Error::AgentClient { source })?;
 
@@ -1436,7 +1534,12 @@ impl EventHandler {
                     final_usage = usage.map(Into::into);
                     break;
                 }
-                Err(source) => return Err(Error::CompletionFailed(source.to_string())),
+                Err(source) => {
+                    return Err(Error::CompletionFailed {
+                        message: source.to_string(),
+                        retryable: source.is_retryable(),
+                    })
+                }
             }
         }
 
@@ -1519,7 +1622,11 @@ impl EventHandler {
             .and_then(|v| v.as_str())
             .map(String::from);
 
-        let Agent { client, _toolset } = self.resolve_client(&event).await?;
+        let Agent {
+            client,
+            images,
+            _toolset,
+        } = self.resolve_client(&event).await?;
 
         flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
             let (rendered_prompt, rendered_system_prompt) = self.render_prompts(&event).await?;
@@ -1539,7 +1646,10 @@ impl EventHandler {
             }
 
             let mut stream = client
-                .complete_stream(&rendered_prompt, rendered_system_prompt.as_deref())
+                .complete_stream(
+                    user_message(&self.image_client, &self.config, rendered_prompt, images).await?,
+                    rendered_system_prompt.as_deref(),
+                )
                 .await;
 
             let mut index: usize = 0;
@@ -1626,7 +1736,11 @@ impl EventHandler {
                             .map_err(|source| Error::SendMessage { source })?;
                         index += 1;
                     }
-                    AgentChunk::ToolCall { name, arguments } => {
+                    AgentChunk::ToolCall {
+                        name,
+                        arguments,
+                        run,
+                    } => {
                         // Surface as a progress step on the same channel as text
                         // deltas so it stays ordered relative to them.
                         if let (Some(cid), Some(registry)) =
@@ -1641,6 +1755,7 @@ impl EventHandler {
                                         tool: Some(flowgen_core::registry::ToolStep {
                                             name,
                                             arguments,
+                                            run: Some(run),
                                         }),
                                     },
                                 )
@@ -1651,9 +1766,9 @@ impl EventHandler {
                         accumulated_text = text;
                         final_usage = Some(usage.into());
                     }
-                    AgentChunk::Error(err) => {
+                    AgentChunk::Error { message, retryable } => {
                         // Logging only would hang the source until ack_timeout.
-                        return Err(Error::CompletionFailed(err.to_string()));
+                        return Err(Error::CompletionFailed { message, retryable });
                     }
                 }
             }
@@ -1866,6 +1981,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                 connecting: Default::default(),
             },
             users: UserToolsets::default(),
+            image_client: image::client().map_err(|source| Error::Image { source })?,
         })
     }
 
@@ -2073,12 +2189,202 @@ mod tests {
             stream: false,
             tool_passthrough: false,
             mcp_servers: vec![server],
-            sandbox: Default::default(),
             depends_on: None,
             retry: None,
             max_in_flight: None,
             thinking: None,
+            output_schema: None,
+            images: Vec::new(),
+            image_timeout: default_image_timeout(),
+            image_max_bytes: default_image_max_bytes(),
         }
+    }
+
+    async fn chat_server() -> (
+        std::net::SocketAddr,
+        Arc<std::sync::Mutex<Option<serde_json::Value>>>,
+    ) {
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let recorded = Arc::clone(&seen);
+        let post = move |body: axum::Json<serde_json::Value>| {
+            let recorded = Arc::clone(&recorded);
+            async move {
+                *recorded.lock().unwrap() = Some(body.0);
+                axum::Json(json!({
+                    "id": "c",
+                    "object": "chat.completion",
+                    "created": 0,
+                    "model": "m",
+                    "choices": [{
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "{\"ok\":true}"}
+                    }],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                }))
+            }
+        };
+        let app = axum::Router::new()
+            .route("/v1/chat/completions", axum::routing::post(post))
+            .route(
+                "/a.png",
+                axum::routing::get(|| async { ([("content-type", "image/png")], "png") }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        (address, seen)
+    }
+
+    fn task_context() -> flowgen_core::task::context::TaskContext {
+        flowgen_core::task::context::TaskContextBuilder::new()
+            .flow_name("f".to_string())
+            .task_manager(Arc::new(
+                flowgen_core::task::manager::TaskManagerBuilder::new()
+                    .build()
+                    .unwrap(),
+            ))
+            .cache(Arc::new(flowgen_core::cache::memory::MemoryCache::new()))
+            .build()
+            .unwrap()
+    }
+
+    async fn request_for(
+        output_schema: Option<schemars::Schema>,
+        image_paths: &[&str],
+    ) -> serde_json::Value {
+        let (address, seen) = chat_server().await;
+        let images = image_paths
+            .iter()
+            .map(|path| format!("http://images.test:{}{path}", address.port()))
+            .collect();
+        let image_client = image::client_builder()
+            .resolve("images.test", address)
+            .build()
+            .unwrap();
+        let mut config = agent(user_server("http://unused"));
+        config.mcp_servers = Vec::new();
+        config.endpoint = Some(format!("http://{address}/v1"));
+        config.output_schema = output_schema;
+        let client = build_agent_client(config.clone(), None, &task_context(), None)
+            .await
+            .unwrap();
+        let message = user_message(&image_client, &config, "p".to_string(), images)
+            .await
+            .unwrap();
+        client.complete(message, None).await.unwrap();
+        let body = seen.lock().unwrap().clone();
+        body.unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_output_schema_is_sent_as_the_response_format() {
+        let schema = serde_json::from_value(json!({
+            "type": "object",
+            "properties": {"a": {"type": "string"}},
+            "required": ["a"]
+        }))
+        .unwrap();
+        let body = request_for(Some(schema), &[]).await;
+        assert_eq!(body["response_format"]["type"], "json_schema");
+        assert_eq!(
+            body["response_format"]["json_schema"]["schema"]["required"],
+            json!(["a"])
+        );
+    }
+
+    #[tokio::test]
+    async fn images_are_sent_with_the_prompt_as_base64() {
+        let body = request_for(None, &["/a.png"]).await;
+        let parts = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["role"] == "user")
+            .unwrap()["content"]
+            .clone();
+        assert_eq!(parts[0]["text"], "p");
+        assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,cG5n");
+    }
+
+    #[tokio::test]
+    async fn an_image_on_a_private_address_fails_the_event_without_retrying() {
+        let (address, _) = chat_server().await;
+
+        let error = user_message(
+            &image::client().unwrap(),
+            &agent(user_server("http://unused")),
+            "p".to_string(),
+            vec![format!("http://{address}/a.png")],
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(
+                error,
+                Error::Image {
+                    source: image::Error::Refused { .. }
+                }
+            ),
+            "{error}"
+        );
+        assert!(!error.is_retryable());
+    }
+
+    fn provider_failure(status: u16) -> Error {
+        Error::AgentClient {
+            source: crate::agent::Error::CompletionPassthrough {
+                source: Box::new(rig_core::ProviderError::from_http_response(
+                    http::StatusCode::from_u16(status).unwrap(),
+                    "",
+                )),
+            },
+        }
+    }
+
+    #[test]
+    fn rate_limits_timeouts_and_server_errors_are_retried_and_other_client_errors_are_not() {
+        for status in [408, 425, 429, 500, 503] {
+            assert!(provider_failure(status).is_retryable(), "{status}");
+        }
+        for status in [400, 401, 403, 404, 422] {
+            assert!(!provider_failure(status).is_retryable(), "{status}");
+        }
+    }
+
+    #[test]
+    fn a_transport_failure_is_retried() {
+        let error = Error::AgentClient {
+            source: crate::agent::Error::CompletionPassthrough {
+                source: Box::new(rig_core::ProviderError::Http(Arc::new(
+                    rig_core::http_client::Error::Instance(Box::new(std::io::Error::from(
+                        std::io::ErrorKind::ConnectionRefused,
+                    ))),
+                ))),
+            },
+        };
+
+        assert!(error.is_retryable());
+    }
+
+    #[test]
+    fn max_turns_is_at_least_one_and_at_least_two_with_mcp_servers() {
+        let mut config = agent(user_server("http://127.0.0.1:9/mcp"));
+        config.max_turns = 2;
+        assert!(config.validate().is_ok());
+        config.max_turns = 1;
+        assert!(matches!(
+            config.validate(),
+            Err(Error::TooFewTurns { max_turns: 1 })
+        ));
+        config.mcp_servers = Vec::new();
+        assert!(config.validate().is_ok());
+        config.max_turns = 0;
+        assert!(matches!(
+            config.validate(),
+            Err(Error::TooFewTurns { max_turns: 0 })
+        ));
     }
 
     fn user_server(url: &str) -> McpServerConfig {
@@ -2109,7 +2415,7 @@ mod tests {
 
     async fn tool_count(toolset: &Toolset) -> usize {
         match &toolset.mcp {
-            Some(mcp) => mcp.handle.get_tool_defs(None).await.unwrap().len(),
+            Some(mcp) => mcp.handle.tool_defs(None).await.unwrap().len(),
             None => 0,
         }
     }
@@ -2565,11 +2871,14 @@ mod tests {
             stream: false,
             tool_passthrough: false,
             mcp_servers: vec![],
-            sandbox: Default::default(),
             depends_on: None,
             retry: None,
             max_in_flight: None,
             thinking: None,
+            output_schema: None,
+            images: Vec::new(),
+            image_timeout: default_image_timeout(),
+            image_max_bytes: default_image_max_bytes(),
         };
 
         assert_eq!(config.name, "test");
@@ -2608,11 +2917,14 @@ mod tests {
             stream: true,
             tool_passthrough: false,
             mcp_servers: vec![],
-            sandbox: Default::default(),
             depends_on: None,
             retry: None,
             max_in_flight: None,
             thinking: None,
+            output_schema: None,
+            images: Vec::new(),
+            image_timeout: default_image_timeout(),
+            image_max_bytes: default_image_max_bytes(),
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -2657,11 +2969,14 @@ mod tests {
             stream: false,
             tool_passthrough: false,
             mcp_servers: vec![],
-            sandbox: Default::default(),
             depends_on: None,
             retry: None,
             max_in_flight: None,
             thinking: None,
+            output_schema: None,
+            images: Vec::new(),
+            image_timeout: default_image_timeout(),
+            image_max_bytes: default_image_max_bytes(),
         };
         let _: &dyn ConfigExt = &config;
     }
@@ -2684,11 +2999,14 @@ mod tests {
             stream: true,
             tool_passthrough: false,
             mcp_servers: vec![],
-            sandbox: Default::default(),
             depends_on: None,
             retry: None,
             max_in_flight: None,
             thinking: None,
+            output_schema: None,
+            images: Vec::new(),
+            image_timeout: default_image_timeout(),
+            image_max_bytes: default_image_max_bytes(),
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -2718,11 +3036,14 @@ mod tests {
             stream: false,
             tool_passthrough: false,
             mcp_servers: vec![],
-            sandbox: Default::default(),
             depends_on: None,
             retry: None,
             max_in_flight: None,
             thinking: None,
+            output_schema: None,
+            images: Vec::new(),
+            image_timeout: default_image_timeout(),
+            image_max_bytes: default_image_max_bytes(),
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -2756,11 +3077,14 @@ mod tests {
             stream: false,
             tool_passthrough: false,
             mcp_servers: vec![],
-            sandbox: Default::default(),
             depends_on: None,
             retry: None,
             max_in_flight: None,
             thinking: None,
+            output_schema: None,
+            images: Vec::new(),
+            image_timeout: default_image_timeout(),
+            image_max_bytes: default_image_max_bytes(),
         };
 
         let json = serde_json::to_string(&config).unwrap();

@@ -124,6 +124,8 @@ pub struct WebState {
     /// Bucket the synced flow sources are read from, when flows load from the
     /// cache (`flows.cache`).
     pub flows_cache: Option<Arc<dyn flowgen_core::cache::Cache>>,
+    /// Agent replies this pod is writing.
+    pub replies: Arc<crate::agent_reply::Replies>,
 }
 
 /// Who an `/api/*` request authenticated as, when `web.auth` is set.
@@ -280,17 +282,35 @@ fn router(path: &str, mut state: WebState) -> Router {
         .with_state(Arc::clone(&state));
 
     let agents = Router::new()
-        .route(&format!("{api_prefix}/agents/chat"), post(proxy_chat))
         .route(&format!("{api_prefix}/agents/models"), get(proxy_models))
+        .route(
+            &format!("{api_prefix}/agents/tools"),
+            get(crate::connections::list_agent_tools),
+        )
         .route(
             &format!("{api_prefix}/agents/conversations"),
             get(list_conversations),
         )
         .route(
+            &format!("{api_prefix}/agents/conversations/stream"),
+            get(stream_conversations),
+        )
+        .route(
             &format!("{api_prefix}/agents/conversations/{{id}}"),
             get(get_conversation)
                 .put(put_conversation)
+                .patch(update_conversation)
                 .delete(delete_conversation),
+        )
+        .route(
+            &format!("{api_prefix}/agents/conversations/{{id}}/reply"),
+            post(crate::agent_reply::start_reply)
+                .get(crate::agent_reply::follow_reply)
+                .delete(crate::agent_reply::stop_reply),
+        )
+        .route(
+            &format!("{api_prefix}/agents/conversations/{{id}}/read"),
+            axum::routing::put(mark_conversation_read).delete(mark_conversation_unread),
         )
         .route_layer(axum::middleware::from_fn_with_state(
             Arc::clone(&state),
@@ -374,7 +394,73 @@ fn router(path: &str, mut state: WebState) -> Router {
         .merge(auth_routes)
         .merge(api)
         .fallback(serve_embedded)
+        .layer(axum::middleware::map_response(security_headers))
         .with_state(state)
+}
+
+async fn security_headers(mut response: axum::response::Response) -> axum::response::Response {
+    let headers = response.headers_mut();
+    headers.insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        axum::http::header::REFERRER_POLICY,
+        axum::http::HeaderValue::from_static("strict-origin-when-cross-origin"),
+    );
+    response
+}
+
+/// The page's Content-Security-Policy: scripts only from the app and the
+/// page's own inline scripts, by hash, so injected markup can't run code.
+/// Icons load from the Iconify API.
+fn content_security_policy(html: &[u8], frame_ancestors: &[String]) -> String {
+    use base64::Engine as _;
+    use sha2::Digest as _;
+    let hashes: String = inline_scripts(html)
+        .iter()
+        .map(|script| {
+            let digest = sha2::Sha256::digest(script);
+            format!(
+                " 'sha256-{}'",
+                base64::engine::general_purpose::STANDARD.encode(digest)
+            )
+        })
+        .collect();
+    format!(
+        "default-src 'self'; script-src 'self'{hashes}; style-src 'self' 'unsafe-inline'; \
+         img-src 'self' data:; font-src 'self' data:; \
+         connect-src 'self' https://api.iconify.design https://api.simplesvg.com https://api.unisvg.com; \
+         object-src 'none'; base-uri 'self'; frame-ancestors {}",
+        frame_ancestors.join(" ")
+    )
+}
+
+/// The bodies of a page's `<script>` elements without `src`.
+fn inline_scripts(html: &[u8]) -> Vec<&[u8]> {
+    let mut scripts = Vec::new();
+    let mut rest = html;
+    while let Some(start) = find(rest, b"<script") {
+        let Some(tag_end) = find(&rest[start..], b">") else {
+            break;
+        };
+        let tag = &rest[start..start + tag_end];
+        let body_start = start + tag_end + 1;
+        let Some(body_len) = find(&rest[body_start..], b"</script>") else {
+            break;
+        };
+        if find(tag, b"src=").is_none() {
+            scripts.push(&rest[body_start..body_start + body_len]);
+        }
+        rest = &rest[body_start + body_len..];
+    }
+    scripts
+}
+
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 // No server-side session store (see `crate::login`): the browser's cookie
@@ -910,7 +996,7 @@ fn ms_to_datetime(ms: u64) -> Option<chrono::DateTime<chrono::Utc>> {
 
 /// Current wall-clock time in epoch milliseconds, for stamping conversation
 /// writes. Saturates to 0 before the epoch, which never happens in practice.
-fn now_millis() -> i64 {
+pub(crate) fn now_millis() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -1088,6 +1174,17 @@ impl LogsQuery {
     }
 }
 
+/// The wire level of a stored record's tracing level.
+pub(crate) fn wire_level(level: &str) -> api::LogLevel {
+    match level {
+        "warn" | "warning" => api::LogLevel::Warn,
+        "error" => api::LogLevel::Error,
+        "debug" => api::LogLevel::Debug,
+        "trace" => api::LogLevel::Trace,
+        _ => api::LogLevel::Info,
+    }
+}
+
 /// Converts an internal `StoredLog` to the OpenAPI wire shape.
 fn stored_to_wire(record: flowgen_core::telemetry::StoredLog) -> api::LogRecord {
     let spans = record
@@ -1105,16 +1202,9 @@ fn stored_to_wire(record: flowgen_core::telemetry::StoredLog) -> api::LogRecord 
             Err(_) => None,
         },
     };
-    let level = match record.level.as_str() {
-        "warn" | "warning" => api::LogLevel::Warn,
-        "error" => api::LogLevel::Error,
-        "debug" => api::LogLevel::Debug,
-        "trace" => api::LogLevel::Trace,
-        _ => api::LogLevel::Info,
-    };
     api::LogRecord {
         body: record.body,
-        level,
+        level: wire_level(&record.level),
         timestamp,
         target: record.target,
         spans,
@@ -1320,7 +1410,7 @@ async fn require_agents(
 /// Resolves the base URL the built-in Agents chat proxies to. Prefers the
 /// explicit `web.ai_gateway_url`; otherwise targets the same-process AI
 /// gateway on loopback. Returns `None` when no gateway is configured.
-fn gateway_base_url(state: &WebState) -> Option<String> {
+pub(crate) fn gateway_base_url(state: &WebState) -> Option<String> {
     if let Some(url) = state
         .app_config
         .web
@@ -1355,29 +1445,19 @@ fn outbound_gateway_headers(state: &WebState) -> reqwest::header::HeaderMap {
     headers
 }
 
-/// Proxies a chat-completion request to the AI gateway, streaming the
-/// response body straight back. The browser stays same-origin with the web
-/// server, so no gateway-side CORS is required and the gateway need not be
-/// publicly reachable.
-async fn proxy_chat(
-    State(state): State<Arc<WebState>>,
-    session: Option<axum::Extension<Arc<flowgen_core::auth::UserSession>>>,
-    body: axum::body::Bytes,
-) -> axum::response::Response {
-    let Some(base) = gateway_base_url(&state) else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "AI gateway is not configured",
-        )
-            .into_response();
-    };
-    let mut headers = outbound_gateway_headers(&state);
+/// The headers for a request to the AI gateway: `web.headers`, and the
+/// user's token when `web.agents.on_behalf_of_user` is set.
+pub(crate) fn gateway_headers(
+    state: &WebState,
+    session: Option<&flowgen_core::auth::UserSession>,
+) -> reqwest::header::HeaderMap {
+    let mut headers = outbound_gateway_headers(state);
     if let (
         Some(crate::config::AgentsOptions {
             on_behalf_of_user: true,
             ..
         }),
-        Some(axum::Extension(session)),
+        Some(session),
     ) = (&state.agents, session)
     {
         if let Some(token) = &session.token {
@@ -1396,40 +1476,7 @@ async fn proxy_chat(
             }
         }
     }
-    let upstream = reqwest::Client::new()
-        .post(format!("{base}/chat/completions"))
-        .header(axum::http::header::CONTENT_TYPE, "application/json")
-        .headers(headers)
-        .body(body)
-        .send()
-        .await;
-    match upstream {
-        Ok(resp) => {
-            let status = resp.status();
-            let content_type = resp
-                .headers()
-                .get(reqwest::header::CONTENT_TYPE)
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("application/json")
-                .to_string();
-            let mut headers = HeaderMap::new();
-            if let Ok(value) = axum::http::HeaderValue::from_str(&content_type) {
-                headers.insert(axum::http::header::CONTENT_TYPE, value);
-            }
-            let stream = resp.bytes_stream();
-            let body = axum::body::Body::from_stream(stream);
-            (
-                StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
-                headers,
-                body,
-            )
-                .into_response()
-        }
-        Err(source) => {
-            warn!(error = %source, "Failed to reach AI gateway from Agents chat proxy");
-            (StatusCode::BAD_GATEWAY, "Failed to reach AI gateway").into_response()
-        }
-    }
+    headers
 }
 
 /// Proxies the gateway model list so the Agents chat can populate its model
@@ -1460,7 +1507,7 @@ async fn proxy_models(State(state): State<Arc<WebState>>) -> axum::response::Res
             (status, headers, text).into_response()
         }
         Err(source) => {
-            warn!(error = %source, "Failed to list AI gateway models from Agents chat proxy");
+            warn!(error = %source, "Failed to list AI gateway models for the Agents tab");
             (StatusCode::BAD_GATEWAY, "Failed to reach AI gateway").into_response()
         }
     }
@@ -1472,32 +1519,316 @@ async fn proxy_models(State(state): State<Arc<WebState>>) -> axum::response::Res
 // user-script reach. A persistence flow can later copy these into a database.
 // Types (`api::Conversation`, etc.) are generated from openapi.yaml.
 
-/// Key prefix for conversations in the system cache. The bucket name already
-/// carries "flowgen", so keys stay unprefixed (matching `lease.`/`peers.`).
-const CONVERSATION_KEY_PREFIX: &str = "agents.conversations.";
+/// What a key under `web.agents.cache_prefix` holds.
+#[derive(Clone, Copy)]
+pub(crate) enum AgentsKeys {
+    Conversations,
+    Reads,
+    Folders,
+}
+
+pub(crate) fn key_prefix(state: &WebState, keys: AgentsKeys) -> String {
+    let root = match &state.agents {
+        Some(agents) => agents.cache_prefix.clone(),
+        None => crate::config::default_agents_cache_prefix(),
+    };
+    let segment = match keys {
+        AgentsKeys::Conversations => "conversations",
+        AgentsKeys::Reads => "reads",
+        AgentsKeys::Folders => "folders",
+    };
+    format!("{root}.{segment}.")
+}
+
+pub(crate) fn reply_save_interval(state: &WebState) -> Duration {
+    match &state.agents {
+        Some(agents) => agents.reply_save_interval,
+        None => crate::config::default_reply_save_interval(),
+    }
+}
+
+pub(crate) fn reply_idle_timeout(state: &WebState) -> Duration {
+    match &state.agents {
+        Some(agents) => agents.reply_idle_timeout,
+        None => crate::config::default_reply_idle_timeout(),
+    }
+}
 
 /// Validates a client-supplied conversation id: `[A-Za-z0-9_-]+`, non-empty.
 /// Anything else is rejected rather than silently sanitized — the id is the
 /// client's own handle, and `.` would break the dotted KV key namespace.
-fn valid_conversation_id(id: &str) -> bool {
+/// `stream` is taken by the route of the conversation stream.
+pub(crate) fn valid_conversation_id(id: &str) -> bool {
     !id.is_empty()
+        && id != "stream"
         && id
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
-fn conversation_key(id: &str) -> String {
-    format!("{CONVERSATION_KEY_PREFIX}{id}")
+/// The signed-in user's key segment: the hex SHA-256 of their id, so a flow
+/// can derive it from `event.meta.auth.user_id` with the script `sha256` and
+/// keys don't show who the user is. Without `web.auth`, or for a machine key,
+/// there is none and conversations are shared.
+pub(crate) fn conversation_owner(
+    user: Option<&axum::Extension<flowgen_core::auth::UserContext>>,
+) -> Option<String> {
+    use sha2::Digest;
+    user.map(|axum::Extension(user)| format!("{:x}", sha2::Sha256::digest(&user.user_id)))
 }
 
-/// Lists stored conversations (summaries only), newest first.
-async fn list_conversations(State(state): State<Arc<WebState>>) -> axum::response::Response {
-    let keys = match state
+/// `agents.conversations.<owner>.<id>` for a user's own conversation, and
+/// `agents.conversations.<id>` for a shared one, such as a thread a flow opened.
+pub(crate) fn conversation_key(state: &WebState, owner: Option<&str>, id: &str) -> String {
+    user_key(&key_prefix(state, AgentsKeys::Conversations), owner, id)
+}
+
+/// Whether a stored conversation is the caller's own or shared.
+fn visible_to(prefix: &str, owner: Option<&str>, key: &str) -> bool {
+    match key.strip_prefix(prefix).map(|rest| rest.split_once('.')) {
+        Some(None) => true,
+        Some(Some((key_owner, _))) => owner == Some(key_owner),
+        None => false,
+    }
+}
+
+/// Conversation `id` as the caller sees it: their own, else the shared one.
+pub(crate) async fn find_conversation(
+    state: &WebState,
+    owner: Option<&str>,
+    id: &str,
+) -> Result<Option<(String, bytes::Bytes)>, flowgen_core::cache::Error> {
+    let own = owner.map(|owner| conversation_key(state, Some(owner), id));
+    for key in own.into_iter().chain([conversation_key(state, None, id)]) {
+        if let Some(bytes) = state.conversation_cache.get(&key).await? {
+            return Ok(Some((key, bytes)));
+        }
+    }
+    Ok(None)
+}
+
+/// The conversation id in a stored key, without the prefix and owner.
+fn conversation_id_of<'a>(prefix: &str, key: &'a str) -> Option<&'a str> {
+    let rest = key.strip_prefix(prefix)?;
+    match rest.split_once('.') {
+        Some((_, id)) => Some(id),
+        None => Some(rest),
+    }
+}
+
+/// `<prefix><user>.<id>` for a signed-in user's own key, `<prefix><id>`
+/// without `web.auth`, where everyone shares one.
+fn user_key(prefix: &str, owner: Option<&str>, id: &str) -> String {
+    match owner {
+        Some(owner) => format!("{prefix}{owner}.{id}"),
+        None => format!("{prefix}{id}"),
+    }
+}
+
+/// Read state lives apart from the conversation, so reading it doesn't
+/// change it for anyone else.
+fn read_key(state: &WebState, owner: Option<&str>, id: &str) -> String {
+    user_key(&key_prefix(state, AgentsKeys::Reads), owner, id)
+}
+
+fn folder_key(state: &WebState, owner: Option<&str>, id: &str) -> String {
+    user_key(&key_prefix(state, AgentsKeys::Folders), owner, id)
+}
+
+/// The conversation id in a per-user key of `owner`, if the key is theirs.
+fn user_key_id<'a>(prefix: &str, owner: Option<&str>, key: &'a str) -> Option<&'a str> {
+    let rest = key.strip_prefix(prefix)?;
+    match (owner, rest.split_once('.')) {
+        (Some(owner), Some((user, id))) if user == owner => Some(id),
+        (None, None) => Some(rest),
+        _ => None,
+    }
+}
+
+async fn user_value(state: &WebState, key: &str) -> Option<String> {
+    match state.conversation_cache.get(key).await {
+        Ok(Some(bytes)) => String::from_utf8(bytes.to_vec()).ok(),
+        Ok(None) => None,
+        Err(source) => {
+            warn!(key = %key, error = %source, "Failed to read conversation state");
+            None
+        }
+    }
+}
+
+/// The conversation's `updatedAt` when the reader last read it; `0` marks it
+/// unread, none falls back to the conversation's own `unread`.
+async fn read_at(state: &WebState, owner: Option<&str>, id: &str) -> Option<i64> {
+    user_value(state, &read_key(state, owner, id))
+        .await?
+        .parse()
+        .ok()
+}
+
+/// The folder the user filed the conversation in; empty means none, and
+/// missing falls back to the folder a flow gave it.
+async fn folder_of(state: &WebState, owner: Option<&str>, id: &str) -> Option<String> {
+    user_value(state, &folder_key(state, owner, id)).await
+}
+
+/// A folder path as `a/b`: segments trimmed, empty ones dropped.
+fn normalize_folder(folder: &str) -> String {
+    folder
+        .split('/')
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// How long conversations and their read state live, from `web.agents`.
+pub(crate) fn conversation_ttl(state: &WebState) -> Option<u64> {
+    match &state.agents {
+        Some(crate::config::AgentsOptions {
+            conversation_history_ttl: Some(ttl),
+            ..
+        }) if ttl.as_secs() > 0 => Some(ttl.as_secs()),
+        _ => None,
+    }
+}
+
+pub(crate) async fn write_read_at(
+    state: &WebState,
+    owner: Option<&str>,
+    id: &str,
+    at: i64,
+) -> Result<(), flowgen_core::cache::Error> {
+    state
         .conversation_cache
-        .list_keys(CONVERSATION_KEY_PREFIX)
+        .put(
+            &read_key(state, owner, id),
+            at.to_string().into(),
+            conversation_ttl(state),
+        )
         .await
+}
+
+/// A stored conversation as the reader sees it: unread when it changed since
+/// they last read it. A corrupt entry is skipped, not fatal.
+pub(crate) async fn conversation_for(
+    state: &WebState,
+    owner: Option<&str>,
+    key: &str,
+    bytes: &[u8],
+) -> Option<api::Conversation> {
+    let mut conversation = match serde_json::from_slice::<api::Conversation>(bytes) {
+        Ok(conversation) => conversation,
+        Err(source) => {
+            warn!(key = %key, error = %source, "Skipping unparseable conversation");
+            return None;
+        }
+    };
+    let unread = match read_at(state, owner, &conversation.id).await {
+        Some(at) => at < conversation.updated_at,
+        None => conversation.unread == Some(true),
+    };
+    conversation.unread = unread.then_some(true);
+    if let Some(folder) = folder_of(state, owner, &conversation.id).await {
+        conversation.folder = Some(folder).filter(|folder| !folder.is_empty());
+    }
+    crate::agent_reply::settle_interrupted(&mut conversation, reply_save_interval(state));
+    Some(conversation)
+}
+
+fn summary_of(c: api::Conversation) -> api::ConversationSummary {
+    api::ConversationSummary {
+        id: c.id,
+        title: c.title,
+        updated_at: c.updated_at,
+        message_count: c.messages.len() as i64,
+        origin: c.origin,
+        unread: c.unread,
+        folder: c.folder,
+    }
+}
+
+/// The caller's own and the shared conversations, newest first.
+async fn conversation_summaries(
+    state: &WebState,
+    owner: Option<&str>,
+) -> Result<Vec<api::ConversationSummary>, flowgen_core::cache::Error> {
+    let prefix = key_prefix(state, AgentsKeys::Conversations);
+    let keys = state.conversation_cache.list_keys(&prefix).await?;
+    let mut summaries = Vec::with_capacity(keys.len());
+    for key in keys
+        .into_iter()
+        .filter(|key| visible_to(&prefix, owner, key))
     {
-        Ok(keys) => keys,
+        match state.conversation_cache.get(&key).await {
+            Ok(Some(bytes)) => summaries.extend(
+                conversation_for(state, owner, &key, &bytes)
+                    .await
+                    .map(summary_of),
+            ),
+            Ok(None) => {}
+            Err(source) => warn!(key = %key, error = %source, "Failed to read conversation"),
+        }
+    }
+    summaries.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
+    Ok(summaries)
+}
+
+/// Lists the caller's own and the shared conversations (summaries only),
+/// newest first.
+async fn list_conversations(
+    State(state): State<Arc<WebState>>,
+    user: Option<axum::Extension<flowgen_core::auth::UserContext>>,
+) -> axum::response::Response {
+    let owner = conversation_owner(user.as_ref());
+    match conversation_summaries(&state, owner.as_deref()).await {
+        Ok(summaries) => Json(serde_json::json!({ "conversations": summaries })).into_response(),
+        Err(source) => {
+            warn!(error = %source, "Failed to list conversations from cache");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Conversation store unavailable",
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Streams the caller's own and the shared conversations: the list on
+/// connect, then each change. The watch starts before the list is read, so
+/// no change is missed; one may arrive twice.
+async fn stream_conversations(
+    State(state): State<Arc<WebState>>,
+    user: Option<axum::Extension<flowgen_core::auth::UserContext>>,
+) -> axum::response::Response {
+    let owner = conversation_owner(user.as_ref());
+    let conversations = key_prefix(&state, AgentsKeys::Conversations);
+    let reads = key_prefix(&state, AgentsKeys::Reads);
+    let folders = key_prefix(&state, AgentsKeys::Folders);
+    let watch = |prefix: String| {
+        let state = Arc::clone(&state);
+        async move {
+            match state
+                .conversation_cache
+                .watch(prefix.trim_end_matches('.'), false)
+                .await
+            {
+                Ok(stream) => stream,
+                Err(source) => {
+                    warn!(error = %source, "Conversation watch subscription failed");
+                    futures_util::stream::empty().boxed()
+                }
+            }
+        }
+    };
+    let live = futures_util::stream::select_all([
+        watch(conversations.clone()).await,
+        watch(reads.clone()).await,
+        watch(folders.clone()).await,
+    ]);
+    let initial = match conversation_summaries(&state, owner.as_deref()).await {
+        Ok(summaries) => SseEvent::default()
+            .event("conversations")
+            .json_data(&summaries),
         Err(source) => {
             warn!(error = %source, "Failed to list conversations from cache");
             return (
@@ -1508,46 +1839,83 @@ async fn list_conversations(State(state): State<Arc<WebState>>) -> axum::respons
         }
     };
 
-    let mut summaries = Vec::with_capacity(keys.len());
-    for key in keys {
-        match state.conversation_cache.get(&key).await {
-            Ok(Some(bytes)) => match serde_json::from_slice::<api::Conversation>(&bytes) {
-                Ok(c) => summaries.push(api::ConversationSummary {
-                    id: c.id,
-                    title: c.title,
-                    updated_at: c.updated_at,
-                    message_count: c.messages.len() as i64,
-                }),
-                // A single corrupt entry shouldn't sink the whole list.
+    let changes = live.filter_map(move |event| {
+        let owner = owner.clone();
+        let state = Arc::clone(&state);
+        let (conversations, reads, folders) =
+            (conversations.clone(), reads.clone(), folders.clone());
+        async move {
+            let event = match event {
+                Ok(event) => event,
                 Err(source) => {
-                    warn!(key = %key, error = %source, "Skipping unparseable conversation")
+                    warn!(error = %source, "Conversation watch failed");
+                    return None;
                 }
-            },
-            Ok(None) => {}
-            Err(source) => warn!(key = %key, error = %source, "Failed to read conversation"),
+            };
+            let owner = owner.as_deref();
+            let changed = |summary: api::ConversationSummary| {
+                SseEvent::default()
+                    .event("conversation")
+                    .json_data(&summary)
+            };
+            let conversation_key = |key: &str| {
+                key.starts_with(&conversations) && visible_to(&conversations, owner, key)
+            };
+            match event {
+                flowgen_core::cache::WatchEvent::Put { key, value } if conversation_key(&key) => {
+                    let conversation = conversation_for(&state, owner, &key, &value).await?;
+                    Some(changed(summary_of(conversation)))
+                }
+                flowgen_core::cache::WatchEvent::Delete { key } if conversation_key(&key) => {
+                    let id = conversation_id_of(&conversations, &key)?;
+                    Some(Ok(SseEvent::default().event("removed").data(id)))
+                }
+                flowgen_core::cache::WatchEvent::Put { key, .. }
+                | flowgen_core::cache::WatchEvent::Delete { key } => {
+                    let id = user_key_id(&reads, owner, &key)
+                        .or_else(|| user_key_id(&folders, owner, &key))?;
+                    let (key, bytes) = match find_conversation(&state, owner, id).await {
+                        Ok(Some(found)) => found,
+                        Ok(None) => return None,
+                        Err(source) => {
+                            warn!(id = %id, error = %source, "Failed to read conversation from cache");
+                            return None;
+                        }
+                    };
+                    let conversation = conversation_for(&state, owner, &key, &bytes).await?;
+                    Some(changed(summary_of(conversation)))
+                }
+            }
         }
-    }
-    summaries.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
+    });
 
-    Json(serde_json::json!({ "conversations": summaries })).into_response()
+    let stream = tokio_stream::once(initial).chain(changes);
+    Sse::new(stream)
+        .keep_alive(
+            KeepAlive::new()
+                .interval(Duration::from_secs(15))
+                .text("keep-alive"),
+        )
+        .into_response()
 }
 
 /// Returns a single conversation with its full message history.
 async fn get_conversation(
     State(state): State<Arc<WebState>>,
     AxumPath(id): AxumPath<String>,
+    user: Option<axum::Extension<flowgen_core::auth::UserContext>>,
 ) -> axum::response::Response {
     if !valid_conversation_id(&id) {
         return (StatusCode::BAD_REQUEST, "Invalid conversation id").into_response();
     }
-    match state.conversation_cache.get(&conversation_key(&id)).await {
-        Ok(Some(bytes)) => match serde_json::from_slice::<api::Conversation>(&bytes) {
-            Ok(c) => Json(c).into_response(),
-            Err(source) => {
-                warn!(id = %id, error = %source, "Stored conversation is unparseable");
-                (StatusCode::INTERNAL_SERVER_ERROR, "Corrupt conversation").into_response()
+    let owner = conversation_owner(user.as_ref());
+    match find_conversation(&state, owner.as_deref(), &id).await {
+        Ok(Some((key, bytes))) => {
+            match conversation_for(&state, owner.as_deref(), &key, &bytes).await {
+                Some(c) => Json(c).into_response(),
+                None => (StatusCode::INTERNAL_SERVER_ERROR, "Corrupt conversation").into_response(),
             }
-        },
+        }
         Ok(None) => (StatusCode::NOT_FOUND, "Conversation not found").into_response(),
         Err(source) => {
             warn!(id = %id, error = %source, "Failed to read conversation from cache");
@@ -1562,23 +1930,52 @@ async fn get_conversation(
 
 /// Creates or overwrites a conversation. The path id is authoritative and the
 /// `updated_at` is server-stamped; the TTL is refreshed on every write, so the
-/// expiry window counts from the last activity.
+/// expiry window counts from the last activity. An existing shared
+/// conversation stays shared; a new one is the signed-in user's own. The
+/// writer has read it; for everyone else it is unread if a flow marked it so.
 async fn put_conversation(
     State(state): State<Arc<WebState>>,
     AxumPath(id): AxumPath<String>,
+    user: Option<axum::Extension<flowgen_core::auth::UserContext>>,
     Json(body): Json<api::ConversationUpsert>,
 ) -> axum::response::Response {
     if !valid_conversation_id(&id) {
         return (StatusCode::BAD_REQUEST, "Invalid conversation id").into_response();
     }
+    let owner = conversation_owner(user.as_ref());
+    let (key, stored) = match find_conversation(&state, owner.as_deref(), &id).await {
+        Ok(Some((key, bytes))) => match serde_json::from_slice::<api::Conversation>(&bytes) {
+            Ok(stored) => (key, Some(stored)),
+            Err(source) => {
+                warn!(id = %id, error = %source, "Overwriting an unparseable conversation");
+                (key, None)
+            }
+        },
+        Ok(None) => (conversation_key(&state, owner.as_deref(), &id), None),
+        Err(source) => {
+            warn!(id = %id, error = %source, "Failed to read conversation from cache");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Conversation store unavailable",
+            )
+                .into_response();
+        }
+    };
 
     let conversation = api::Conversation {
         id: id.clone(),
         title: body.title,
         messages: body.messages,
         model: body.model,
+        origin: body.origin,
+        unread: stored.as_ref().and_then(|c| c.unread),
+        folder: stored.and_then(|c| c.folder),
         updated_at: now_millis(),
     };
+    if let Err(source) = write_read_at(&state, owner.as_deref(), &id, conversation.updated_at).await
+    {
+        warn!(id = %id, error = %source, "Failed to mark the conversation read");
+    }
     let bytes = match serde_json::to_vec(&conversation) {
         Ok(bytes) => bytes,
         Err(source) => {
@@ -1591,16 +1988,9 @@ async fn put_conversation(
         }
     };
 
-    let ttl_secs = match &state.agents {
-        Some(crate::config::AgentsOptions {
-            conversation_history_ttl: Some(ttl),
-            ..
-        }) if ttl.as_secs() > 0 => Some(ttl.as_secs()),
-        _ => None,
-    };
     match state
         .conversation_cache
-        .put(&conversation_key(&id), bytes.into(), ttl_secs)
+        .put(&key, bytes.into(), conversation_ttl(&state))
         .await
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
@@ -1615,22 +2005,195 @@ async fn put_conversation(
     }
 }
 
-/// Deletes a conversation. Idempotent — deleting a missing id still succeeds.
+/// Renames a conversation or moves it to one of the caller's folders,
+/// keeping `updated_at`, so it neither moves up the list nor turns unread
+/// for anyone.
+async fn update_conversation(
+    State(state): State<Arc<WebState>>,
+    AxumPath(id): AxumPath<String>,
+    user: Option<axum::Extension<flowgen_core::auth::UserContext>>,
+    Json(body): Json<api::ConversationUpdate>,
+) -> axum::response::Response {
+    let title = body.title.as_deref().map(str::trim);
+    if !valid_conversation_id(&id) || title == Some("") {
+        return (StatusCode::BAD_REQUEST, "Invalid conversation id or title").into_response();
+    }
+    let owner = conversation_owner(user.as_ref());
+    let (key, bytes) = match find_conversation(&state, owner.as_deref(), &id).await {
+        Ok(Some(found)) => found,
+        Ok(None) => return (StatusCode::NOT_FOUND, "Conversation not found").into_response(),
+        Err(source) => {
+            warn!(id = %id, error = %source, "Failed to read conversation from cache");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Conversation store unavailable",
+            )
+                .into_response();
+        }
+    };
+    let mut conversation = match serde_json::from_slice::<api::Conversation>(&bytes) {
+        Ok(conversation) => conversation,
+        Err(_) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Corrupt conversation").into_response()
+        }
+    };
+    let unavailable = |source: flowgen_core::cache::Error| {
+        warn!(id = %id, error = %source, "Failed to write conversation to cache");
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Conversation store unavailable",
+        )
+            .into_response()
+    };
+    if let Some(folder) = &body.folder {
+        let key = folder_key(&state, owner.as_deref(), &id);
+        let folder = normalize_folder(folder);
+        if let Err(source) = state
+            .conversation_cache
+            .put(&key, folder.into(), conversation_ttl(&state))
+            .await
+        {
+            return unavailable(source);
+        }
+    }
+    if let Some(title) = title {
+        conversation.title = title.to_string();
+        let bytes = match serde_json::to_vec(&conversation) {
+            Ok(bytes) => bytes,
+            Err(source) => {
+                warn!(id = %id, error = %source, "Failed to serialize conversation");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to store conversation",
+                )
+                    .into_response();
+            }
+        };
+        if let Err(source) = state
+            .conversation_cache
+            .put(&key, bytes.into(), conversation_ttl(&state))
+            .await
+        {
+            return unavailable(source);
+        }
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// Deletes a conversation with the caller's read state and folder, and with
+/// everyone's for a shared one. Idempotent — deleting a missing id still
+/// succeeds.
 async fn delete_conversation(
     State(state): State<Arc<WebState>>,
     AxumPath(id): AxumPath<String>,
+    user: Option<axum::Extension<flowgen_core::auth::UserContext>>,
 ) -> axum::response::Response {
     if !valid_conversation_id(&id) {
         return (StatusCode::BAD_REQUEST, "Invalid conversation id").into_response();
     }
-    match state
-        .conversation_cache
-        .delete(&conversation_key(&id))
-        .await
-    {
+    let owner = conversation_owner(user.as_ref());
+    let (deleted, shared) = match find_conversation(&state, owner.as_deref(), &id).await {
+        Ok(Some((key, _))) => (
+            state.conversation_cache.delete(&key).await,
+            key == conversation_key(&state, None, &id),
+        ),
+        Ok(None) => (Ok(()), false),
+        Err(source) => (Err(source), false),
+    };
+    let mut keys = vec![
+        read_key(&state, owner.as_deref(), &id),
+        folder_key(&state, owner.as_deref(), &id),
+    ];
+    if shared {
+        for prefix in [
+            key_prefix(&state, AgentsKeys::Reads),
+            key_prefix(&state, AgentsKeys::Folders),
+        ] {
+            match state.conversation_cache.list_keys(&prefix).await {
+                Ok(found) => keys.extend(
+                    found
+                        .into_iter()
+                        .filter(|key| conversation_id_of(&prefix, key) == Some(id.as_str())),
+                ),
+                Err(source) => {
+                    warn!(prefix = %prefix, error = %source, "Failed to list conversation state")
+                }
+            }
+        }
+    }
+    keys.sort();
+    keys.dedup();
+    for key in keys {
+        if let Err(source) = state.conversation_cache.delete(&key).await {
+            warn!(key = %key, error = %source, "Failed to delete conversation state");
+        }
+    }
+    match deleted {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(source) => {
             warn!(id = %id, error = %source, "Failed to delete conversation from cache");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Conversation store unavailable",
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Marks a conversation read for the caller only.
+async fn mark_conversation_read(
+    State(state): State<Arc<WebState>>,
+    AxumPath(id): AxumPath<String>,
+    user: Option<axum::Extension<flowgen_core::auth::UserContext>>,
+) -> axum::response::Response {
+    set_conversation_read(&state, &id, user.as_ref(), true).await
+}
+
+/// Marks a conversation unread for the caller only.
+async fn mark_conversation_unread(
+    State(state): State<Arc<WebState>>,
+    AxumPath(id): AxumPath<String>,
+    user: Option<axum::Extension<flowgen_core::auth::UserContext>>,
+) -> axum::response::Response {
+    set_conversation_read(&state, &id, user.as_ref(), false).await
+}
+
+async fn set_conversation_read(
+    state: &WebState,
+    id: &str,
+    user: Option<&axum::Extension<flowgen_core::auth::UserContext>>,
+    read: bool,
+) -> axum::response::Response {
+    if !valid_conversation_id(id) {
+        return (StatusCode::BAD_REQUEST, "Invalid conversation id").into_response();
+    }
+    let owner = conversation_owner(user);
+    let updated_at = match find_conversation(state, owner.as_deref(), id).await {
+        Ok(Some((_, bytes))) => match serde_json::from_slice::<api::Conversation>(&bytes) {
+            Ok(c) => c.updated_at,
+            Err(_) => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Corrupt conversation").into_response()
+            }
+        },
+        Ok(None) => return (StatusCode::NOT_FOUND, "Conversation not found").into_response(),
+        Err(source) => {
+            warn!(id = %id, error = %source, "Failed to read conversation from cache");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Conversation store unavailable",
+            )
+                .into_response();
+        }
+    };
+    let at = match read {
+        true => updated_at,
+        false => 0,
+    };
+    match write_read_at(state, owner.as_deref(), id, at).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(source) => {
+            warn!(id = %id, error = %source, "Failed to mark the conversation read");
             (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "Conversation store unavailable",
@@ -1692,6 +2255,20 @@ async fn serve_embedded(State(state): State<Arc<WebState>>, uri: Uri) -> axum::r
         None => content.data.into_owned(),
     };
 
+    if asset_path.ends_with(".html") {
+        let default_ancestors = crate::config::default_frame_ancestors();
+        let frame_ancestors = match &state.app_config.web {
+            Some(web) => &web.frame_ancestors,
+            None => &default_ancestors,
+        };
+        match axum::http::HeaderValue::from_str(&content_security_policy(&body, frame_ancestors)) {
+            Ok(policy) => {
+                headers.insert(axum::http::header::CONTENT_SECURITY_POLICY, policy);
+            }
+            Err(source) => warn!(error = %source, "Skipping an invalid Content-Security-Policy"),
+        }
+    }
+
     (StatusCode::OK, headers, body).into_response()
 }
 
@@ -1721,7 +2298,7 @@ fn rewrite_base_path(asset_path: &str, bytes: &[u8], prefix: &str) -> Option<Vec
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::collections::HashMap;
 
@@ -1731,7 +2308,7 @@ mod tests {
         assert_eq!(DEFAULT_WEB_PATH, "/");
     }
 
-    fn test_state() -> WebState {
+    pub(crate) fn test_state() -> WebState {
         let app_config = Arc::new(crate::config::AppConfig {
             cache: None,
             flows: crate::config::FlowOptions {
@@ -1768,6 +2345,7 @@ mod tests {
             authoring: None,
             inproc: Arc::new(flowgen_core::task::inproc::registry::InprocRegistry::new()),
             flows_cache: None,
+            replies: Default::default(),
         }
     }
 
@@ -2565,73 +3143,46 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn the_agents_chat_sends_the_users_token_only_when_told_to() {
-        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let recorded = Arc::clone(&seen);
-        let gateway = serve(Router::new().route(
-            "/chat/completions",
-            post(move |headers: HeaderMap| {
-                let recorded = Arc::clone(&recorded);
-                async move {
-                    let header = headers
-                        .get(axum::http::header::AUTHORIZATION)
-                        .map(|value| value.to_str().unwrap().to_string());
-                    recorded.lock().unwrap().push(header);
-                    "{}"
-                }
-            }),
-        ))
-        .await;
-        let session = Arc::new(flowgen_core::auth::UserSession {
+    fn agents_options() -> crate::config::AgentsOptions {
+        crate::config::AgentsOptions {
+            enabled: true,
+            conversation_history_ttl: None,
+            on_behalf_of_user: false,
+            cache_prefix: crate::config::default_agents_cache_prefix(),
+            reply_save_interval: crate::config::default_reply_save_interval(),
+            reply_idle_timeout: crate::config::default_reply_idle_timeout(),
+        }
+    }
+
+    #[test]
+    fn the_gateway_gets_the_users_token_only_when_told_to() {
+        let session = flowgen_core::auth::UserSession {
             user: flowgen_core::auth::UserContext {
                 user_id: "u1".to_string(),
                 claims: Default::default(),
             },
             token: Some(secrecy::SecretString::from("id-token")),
-        });
-        let chat = |on_behalf_of_user: bool| {
+        };
+        let authorization = |on_behalf_of_user: bool| {
             let mut state = test_state();
-            state.app_config = Arc::new(crate::config::AppConfig {
-                web: Some(
-                    serde_json::from_value(serde_json::json!({
-                        "enabled": true,
-                        "ai_gateway_url": gateway.clone(),
-                    }))
-                    .unwrap(),
-                ),
-                ..(*state.app_config).clone()
-            });
             state.agents = Some(crate::config::AgentsOptions {
-                enabled: true,
-                conversation_history_ttl: None,
                 on_behalf_of_user,
+                ..agents_options()
             });
-            proxy_chat(
-                State(Arc::new(state)),
-                Some(axum::Extension(Arc::clone(&session))),
-                axum::body::Bytes::from_static(b"{}"),
-            )
+            gateway_headers(&state, Some(&session))
+                .get(reqwest::header::AUTHORIZATION)
+                .map(|value| value.to_str().unwrap().to_string())
         };
 
-        chat(false).await;
-        chat(true).await;
-
-        assert_eq!(
-            *seen.lock().unwrap(),
-            vec![None, Some("Bearer id-token".to_string())]
-        );
+        assert_eq!(authorization(false), None);
+        assert_eq!(authorization(true), Some("Bearer id-token".to_string()));
     }
 
     #[tokio::test]
     async fn agents_routes_answer_404_unless_web_agents_is_enabled() {
         let off = serve(router("/flowgen", test_state())).await;
         let mut state = test_state();
-        state.agents = Some(crate::config::AgentsOptions {
-            enabled: true,
-            conversation_history_ttl: None,
-            on_behalf_of_user: false,
-        });
+        state.agents = Some(agents_options());
         let on = serve(router("/flowgen", state)).await;
 
         let status = |base: String| async move {
@@ -2642,6 +3193,828 @@ mod tests {
         };
         assert_eq!(status(off).await, StatusCode::NOT_FOUND);
         assert_eq!(status(on).await, StatusCode::OK);
+    }
+
+    fn signed_in(user_id: &str) -> Option<axum::Extension<flowgen_core::auth::UserContext>> {
+        Some(axum::Extension(flowgen_core::auth::UserContext {
+            user_id: user_id.to_string(),
+            claims: Default::default(),
+        }))
+    }
+
+    fn upsert(title: &str) -> Json<api::ConversationUpsert> {
+        Json(api::ConversationUpsert {
+            title: title.to_string(),
+            messages: Vec::new(),
+            model: None,
+            origin: None,
+        })
+    }
+
+    async fn write_flow_thread(state: &WebState, id: &str) {
+        let written_by_flow = serde_json::json!({
+            "id": id,
+            "title": "a",
+            "messages": [],
+            "origin": "agent",
+            "unread": true,
+            "updatedAt": 1
+        });
+        state
+            .conversation_cache
+            .put(
+                &conversation_key(state, None, id),
+                serde_json::to_vec(&written_by_flow).unwrap().into(),
+                None,
+            )
+            .await
+            .unwrap();
+    }
+
+    async fn unread_for(
+        state: &Arc<WebState>,
+        user: Option<axum::Extension<flowgen_core::auth::UserContext>>,
+    ) -> serde_json::Value {
+        let listed = listed_conversations(state, user).await;
+        listed["conversations"][0]["unread"].clone()
+    }
+
+    async fn listed_conversations(
+        state: &Arc<WebState>,
+        user: Option<axum::Extension<flowgen_core::auth::UserContext>>,
+    ) -> serde_json::Value {
+        let response = list_conversations(State(Arc::clone(state)), user).await;
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    async fn listed_titles(
+        state: &Arc<WebState>,
+        user: Option<axum::Extension<flowgen_core::auth::UserContext>>,
+    ) -> Vec<String> {
+        let listed = listed_conversations(state, user).await;
+        let mut titles: Vec<String> = listed["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["title"].as_str().unwrap().to_string())
+            .collect();
+        titles.sort();
+        titles
+    }
+
+    #[tokio::test]
+    async fn signed_in_users_see_their_own_and_the_shared_conversations() {
+        let state = Arc::new(test_state());
+        put_conversation(
+            State(Arc::clone(&state)),
+            AxumPath("s".into()),
+            None,
+            upsert("shared"),
+        )
+        .await;
+        put_conversation(
+            State(Arc::clone(&state)),
+            AxumPath("a".into()),
+            signed_in("ann"),
+            upsert("ann's"),
+        )
+        .await;
+        put_conversation(
+            State(Arc::clone(&state)),
+            AxumPath("b".into()),
+            signed_in("bob"),
+            upsert("bob's"),
+        )
+        .await;
+
+        let ann = listed_titles(&state, signed_in("ann")).await;
+        let bob_opens_ann = get_conversation(
+            State(Arc::clone(&state)),
+            AxumPath("a".into()),
+            signed_in("bob"),
+        )
+        .await;
+
+        assert_eq!(ann, vec!["ann's", "shared"]);
+        assert_eq!(bob_opens_ann.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_reply_to_a_shared_conversation_keeps_it_shared() {
+        let state = Arc::new(test_state());
+        put_conversation(
+            State(Arc::clone(&state)),
+            AxumPath("s".into()),
+            None,
+            upsert("shared"),
+        )
+        .await;
+
+        put_conversation(
+            State(Arc::clone(&state)),
+            AxumPath("s".into()),
+            signed_in("ann"),
+            upsert("shared, replied"),
+        )
+        .await;
+
+        assert_eq!(
+            listed_titles(&state, signed_in("bob")).await,
+            vec!["shared, replied"]
+        );
+    }
+
+    async fn move_to(state: &Arc<WebState>, user: &str, folder: &str) {
+        update_conversation(
+            State(Arc::clone(state)),
+            AxumPath("a1".into()),
+            signed_in(user),
+            Json(api::ConversationUpdate {
+                title: None,
+                folder: Some(folder.to_string()),
+            }),
+        )
+        .await;
+    }
+
+    async fn folder_for(state: &Arc<WebState>, user: &str) -> serde_json::Value {
+        listed_conversations(state, signed_in(user)).await["conversations"][0]["folder"].clone()
+    }
+
+    #[tokio::test]
+    async fn each_user_files_a_shared_conversation_in_their_own_folder() {
+        let state = Arc::new(test_state());
+        write_flow_thread(&state, "a1").await;
+
+        move_to(&state, "ann", " a / b/ ").await;
+        move_to(&state, "bob", "").await;
+
+        assert_eq!(folder_for(&state, "ann").await, "a/b");
+        assert_eq!(folder_for(&state, "bob").await, serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn without_auth_everyone_shares_the_folders() {
+        let state = Arc::new(test_state());
+        write_flow_thread(&state, "a1").await;
+
+        update_conversation(
+            State(Arc::clone(&state)),
+            AxumPath("a1".into()),
+            None,
+            Json(api::ConversationUpdate {
+                title: None,
+                folder: Some("a".to_string()),
+            }),
+        )
+        .await;
+
+        let listed = listed_conversations(&state, None).await;
+        assert_eq!(listed["conversations"][0]["folder"], "a");
+    }
+
+    #[tokio::test]
+    async fn renaming_keeps_the_conversation_where_it_was() {
+        let state = Arc::new(test_state());
+        write_flow_thread(&state, "a1").await;
+
+        let renamed = update_conversation(
+            State(Arc::clone(&state)),
+            AxumPath("a1".into()),
+            signed_in("ann"),
+            Json(api::ConversationUpdate {
+                title: Some("  b ".to_string()),
+                folder: None,
+            }),
+        )
+        .await;
+
+        let listed = listed_conversations(&state, signed_in("bob")).await;
+        assert_eq!(renamed.status(), StatusCode::NO_CONTENT);
+        assert_eq!(listed["conversations"][0]["title"], "b");
+        assert_eq!(listed["conversations"][0]["updatedAt"], 1);
+        assert_eq!(listed["conversations"][0]["unread"], true);
+    }
+
+    #[tokio::test]
+    async fn a_flow_thread_is_unread_for_each_user_until_they_read_it() {
+        let state = Arc::new(test_state());
+        write_flow_thread(&state, "a1").await;
+
+        mark_conversation_read(
+            State(Arc::clone(&state)),
+            AxumPath("a1".into()),
+            signed_in("ann"),
+        )
+        .await;
+
+        assert_eq!(
+            unread_for(&state, signed_in("ann")).await,
+            serde_json::Value::Null
+        );
+        assert_eq!(unread_for(&state, signed_in("bob")).await, true);
+    }
+
+    #[tokio::test]
+    async fn a_flow_thread_keyed_by_the_hash_of_a_user_id_is_only_theirs() {
+        use sha2::Digest;
+        let state = Arc::new(test_state());
+        let ann = format!("{:x}", sha2::Sha256::digest("ann"));
+        let thread = serde_json::json!({
+            "id": "a1", "title": "a", "messages": [], "updatedAt": 1
+        });
+        state
+            .conversation_cache
+            .put(
+                &conversation_key(&state, Some(&ann), "a1"),
+                serde_json::to_vec(&thread).unwrap().into(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(listed_titles(&state, signed_in("ann")).await, vec!["a"]);
+        assert!(listed_titles(&state, signed_in("bob")).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn marking_unread_affects_only_the_caller() {
+        let state = Arc::new(test_state());
+        write_flow_thread(&state, "a1").await;
+        for user in ["ann", "bob"] {
+            mark_conversation_read(
+                State(Arc::clone(&state)),
+                AxumPath("a1".into()),
+                signed_in(user),
+            )
+            .await;
+        }
+
+        mark_conversation_unread(
+            State(Arc::clone(&state)),
+            AxumPath("a1".into()),
+            signed_in("ann"),
+        )
+        .await;
+
+        assert_eq!(unread_for(&state, signed_in("ann")).await, true);
+        assert_eq!(
+            unread_for(&state, signed_in("bob")).await,
+            serde_json::Value::Null
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reply_marks_a_shared_thread_unread_for_the_others() {
+        let state = Arc::new(test_state());
+        write_flow_thread(&state, "a1").await;
+        for user in ["ann", "bob"] {
+            mark_conversation_read(
+                State(Arc::clone(&state)),
+                AxumPath("a1".into()),
+                signed_in(user),
+            )
+            .await;
+        }
+
+        put_conversation(
+            State(Arc::clone(&state)),
+            AxumPath("a1".into()),
+            signed_in("ann"),
+            upsert("a"),
+        )
+        .await;
+
+        assert_eq!(
+            unread_for(&state, signed_in("ann")).await,
+            serde_json::Value::Null
+        );
+        assert_eq!(unread_for(&state, signed_in("bob")).await, true);
+    }
+
+    #[tokio::test]
+    async fn without_auth_everyone_reads_a_conversation_as_one() {
+        let state = Arc::new(test_state());
+        write_flow_thread(&state, "a1").await;
+        let before = unread_for(&state, None).await;
+
+        mark_conversation_read(State(Arc::clone(&state)), AxumPath("a1".into()), None).await;
+
+        assert_eq!(before, true);
+        assert_eq!(unread_for(&state, None).await, serde_json::Value::Null);
+    }
+
+    async fn gateway() -> String {
+        let frames = [
+            r#"{"choices":[{"delta":{"content":"Checking."}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"tool","arguments":"{}"}}]}}]}"#,
+            r#"{"choices":[{"delta":{"content":"Done."}}]}"#,
+        ];
+        let body: String = frames
+            .iter()
+            .map(|frame| format!("data: {frame}\n\n"))
+            .chain(["data: [DONE]\n\n".to_string()])
+            .collect();
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let body = body.clone();
+                async move {
+                    (
+                        [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                        body,
+                    )
+                }
+            }),
+        );
+        format!("{}/v1", serve(app).await)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reply_runs_on_the_server_and_lands_in_the_conversation() {
+        let mut state = test_state();
+        let mut config = (*state.app_config).clone();
+        config.web = Some(
+            serde_yaml::from_str(&format!(
+                "enabled: true\nai_gateway_url: {}",
+                gateway().await
+            ))
+            .unwrap(),
+        );
+        state.app_config = Arc::new(config);
+        state.agents = Some(agents_options());
+        let base = serve(router("/f", state)).await;
+
+        let started = reqwest::Client::new()
+            .post(format!("{base}/f/api/agents/conversations/c1/reply"))
+            .json(&serde_json::json!({"content": "hi", "model": "agent/model"}))
+            .send()
+            .await
+            .unwrap();
+        let mut done = None;
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let conversation: serde_json::Value =
+                reqwest::get(format!("{base}/f/api/agents/conversations/c1"))
+                    .await
+                    .unwrap()
+                    .json()
+                    .await
+                    .unwrap();
+            if conversation["messages"][1]["pending"].is_null() {
+                done = Some(conversation);
+                break;
+            }
+        }
+
+        assert_eq!(started.status(), StatusCode::ACCEPTED);
+        let conversation = done.expect("the reply ends");
+        assert_eq!(conversation["title"], "hi");
+        assert_eq!(conversation["messages"][0]["content"], "hi");
+        assert_eq!(conversation["messages"][1]["content"], "Checking.\n\nDone.");
+        assert_eq!(conversation["messages"][1]["steps"][0]["name"], "tool");
+    }
+
+    #[tokio::test]
+    async fn the_conversation_stream_sends_the_list_then_each_change() {
+        let mut state = test_state();
+        state.agents = Some(agents_options());
+        let cache = Arc::clone(&state.conversation_cache);
+        let key = conversation_key(&state, None, "a1");
+        let conversation = |title: &str| {
+            serde_json::to_vec(&serde_json::json!({
+                "id": "a1", "title": title, "messages": [], "updatedAt": 1
+            }))
+            .unwrap()
+        };
+        cache
+            .put(&key, conversation("first").into(), None)
+            .await
+            .unwrap();
+        let base = serve(router("/flowgen", state)).await;
+        let response = reqwest::get(format!("{base}/flowgen/api/agents/conversations/stream"))
+            .await
+            .unwrap();
+        let mut body = response.bytes_stream();
+        let mut received = String::new();
+        let mut read_until = async |text: &str| {
+            while !received.contains(text) {
+                let chunk = tokio::time::timeout(Duration::from_secs(5), body.next())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                received.push_str(&String::from_utf8_lossy(&chunk));
+            }
+        };
+
+        read_until("\"first\"").await;
+        cache
+            .put(&key, conversation("second").into(), None)
+            .await
+            .unwrap();
+        read_until("\"second\"").await;
+        cache.delete(&key).await.unwrap();
+        read_until("event: removed\ndata: a1").await;
+
+        assert!(received.starts_with("event: conversations\n"));
+        assert!(received.contains("event: conversation\n"));
+    }
+
+    #[derive(Debug)]
+    struct UnavailableCache;
+
+    #[async_trait::async_trait]
+    impl flowgen_core::cache::Cache for UnavailableCache {
+        async fn put(
+            &self,
+            _: &str,
+            _: bytes::Bytes,
+            _: Option<u64>,
+        ) -> Result<(), flowgen_core::cache::Error> {
+            Err(flowgen_core::cache::Error::StoreNotInitialized)
+        }
+        async fn get(&self, _: &str) -> Result<Option<bytes::Bytes>, flowgen_core::cache::Error> {
+            Err(flowgen_core::cache::Error::StoreNotInitialized)
+        }
+        async fn delete(&self, _: &str) -> Result<(), flowgen_core::cache::Error> {
+            Err(flowgen_core::cache::Error::StoreNotInitialized)
+        }
+        async fn create(
+            &self,
+            _: &str,
+            _: bytes::Bytes,
+            _: Option<u64>,
+        ) -> Result<u64, flowgen_core::cache::Error> {
+            Err(flowgen_core::cache::Error::StoreNotInitialized)
+        }
+        async fn update(
+            &self,
+            _: &str,
+            _: bytes::Bytes,
+            _: u64,
+            _: Option<u64>,
+        ) -> Result<u64, flowgen_core::cache::Error> {
+            Err(flowgen_core::cache::Error::StoreNotInitialized)
+        }
+        async fn get_with_revision(
+            &self,
+            _: &str,
+        ) -> Result<Option<(bytes::Bytes, u64)>, flowgen_core::cache::Error> {
+            Err(flowgen_core::cache::Error::StoreNotInitialized)
+        }
+        async fn delete_with_revision(
+            &self,
+            _: &str,
+            _: u64,
+        ) -> Result<(), flowgen_core::cache::Error> {
+            Err(flowgen_core::cache::Error::StoreNotInitialized)
+        }
+        async fn get_revision(&self, _: &str) -> Result<Option<u64>, flowgen_core::cache::Error> {
+            Err(flowgen_core::cache::Error::StoreNotInitialized)
+        }
+        async fn list_keys(&self, _: &str) -> Result<Vec<String>, flowgen_core::cache::Error> {
+            Err(flowgen_core::cache::Error::StoreNotInitialized)
+        }
+    }
+
+    #[tokio::test]
+    async fn the_conversation_stream_answers_503_while_the_store_is_unavailable() {
+        let mut state = test_state();
+        state.agents = Some(agents_options());
+        state.conversation_cache = Arc::new(UnavailableCache);
+
+        let response = stream_conversations(State(Arc::new(state)), None).await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn stream_is_not_a_conversation_id() {
+        assert!(valid_conversation_id("a1"));
+        assert!(!valid_conversation_id("stream"));
+        assert!(!valid_conversation_id("a.b"));
+    }
+
+    async fn fed_gateway() -> (String, tokio::sync::mpsc::UnboundedSender<bytes::Bytes>) {
+        let (frames, receiver) = tokio::sync::mpsc::unbounded_channel::<bytes::Bytes>();
+        let receiver = Arc::new(std::sync::Mutex::new(Some(receiver)));
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let receiver = receiver.lock().unwrap().take();
+                async move {
+                    let body = match receiver {
+                        Some(receiver) => axum::body::Body::from_stream(
+                            tokio_stream::wrappers::UnboundedReceiverStream::new(receiver)
+                                .map(Ok::<_, std::io::Error>),
+                        ),
+                        None => axum::body::Body::empty(),
+                    };
+                    (
+                        [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                        body,
+                    )
+                }
+            }),
+        );
+        (format!("{}/v1", serve(app).await), frames)
+    }
+
+    fn data(json: &str) -> bytes::Bytes {
+        format!("data: {json}\n\n").into()
+    }
+
+    fn replying_state(gateway: &str) -> WebState {
+        let mut state = test_state();
+        let mut config = (*state.app_config).clone();
+        config.web = Some(
+            serde_yaml::from_str(&format!("enabled: true\nai_gateway_url: {gateway}")).unwrap(),
+        );
+        state.app_config = Arc::new(config);
+        state.agents = Some(crate::config::AgentsOptions {
+            reply_save_interval: Duration::from_millis(20),
+            reply_idle_timeout: Duration::from_secs(2),
+            ..agents_options()
+        });
+        state
+    }
+
+    async fn start(
+        state: &Arc<WebState>,
+        user: Option<axum::Extension<flowgen_core::auth::UserContext>>,
+        id: &str,
+        content: &str,
+    ) -> StatusCode {
+        crate::agent_reply::start_reply(
+            State(Arc::clone(state)),
+            AxumPath(id.to_string()),
+            user,
+            None,
+            Json(api::ReplyRequest {
+                content: content.to_string(),
+                model: "a/b".to_string(),
+            }),
+        )
+        .await
+        .status()
+    }
+
+    async fn stored(state: &WebState, id: &str) -> Option<api::Conversation> {
+        let (_, bytes) = find_conversation(state, None, id).await.unwrap()?;
+        Some(serde_json::from_slice(&bytes).unwrap())
+    }
+
+    async fn reply_ended(state: &WebState, id: &str) -> api::ConversationMessage {
+        for _ in 0..100 {
+            let last = match stored(state, id).await {
+                Some(conversation) => conversation.messages.last().cloned(),
+                None => None,
+            };
+            if let Some(last) = last.filter(|last| last.pending.is_none()) {
+                return last;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("the reply did not end");
+    }
+
+    async fn store_pending(state: &WebState, id: &str, updated_at: i64) {
+        let conversation = serde_json::json!({
+            "id": id,
+            "title": "a",
+            "messages": [
+                {"role": "user", "content": "a", "at": 1},
+                {"role": "assistant", "content": "", "at": 1, "pending": true}
+            ],
+            "updatedAt": updated_at
+        });
+        state
+            .conversation_cache
+            .put(
+                &conversation_key(state, None, id),
+                serde_json::to_vec(&conversation).unwrap().into(),
+                None,
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_gateway_error_frame_ends_the_reply_with_its_message() {
+        let (gateway, frames) = fed_gateway().await;
+        let state = Arc::new(replying_state(&gateway));
+
+        let started = start(&state, None, "a1", "a").await;
+        frames
+            .send(data(r#"{"choices":[{"delta":{"content":"b"}}]}"#))
+            .unwrap();
+        frames
+            .send(data(r#"{"error":{"message":"c","type":"server_error"}}"#))
+            .unwrap();
+        frames.send("data: [DONE]\n\n".into()).unwrap();
+        let reply = reply_ended(&state, "a1").await;
+
+        assert_eq!(started, StatusCode::ACCEPTED);
+        assert_eq!(reply.content, "b");
+        assert_eq!(reply.error.as_deref(), Some("The agent failed: c"));
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_ends_before_done_ends_the_reply_with_an_error() {
+        let (gateway, frames) = fed_gateway().await;
+        let state = Arc::new(replying_state(&gateway));
+
+        start(&state, None, "a1", "a").await;
+        frames
+            .send(data(r#"{"choices":[{"delta":{"content":"b"}}]}"#))
+            .unwrap();
+        drop(frames);
+        let reply = reply_ended(&state, "a1").await;
+
+        assert_eq!(reply.content, "b");
+        assert_eq!(
+            reply.error.as_deref(),
+            Some("The reply ended before the agent finished")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_gateway_silent_for_the_idle_timeout_fails_the_reply() {
+        let (gateway, _frames) = fed_gateway().await;
+        let mut state = replying_state(&gateway);
+        state.agents = Some(crate::config::AgentsOptions {
+            reply_idle_timeout: Duration::from_millis(100),
+            ..agents_options()
+        });
+        let state = Arc::new(state);
+
+        start(&state, None, "a1", "a").await;
+        let reply = reply_ended(&state, "a1").await;
+
+        assert_eq!(
+            reply.error.as_deref(),
+            Some("The agent sent nothing for 100ms")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_message_or_the_stream_id_starts_no_reply() {
+        let (gateway, _frames) = fed_gateway().await;
+        let state = Arc::new(replying_state(&gateway));
+
+        assert_eq!(
+            start(&state, None, "a1", " \n").await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            start(&state, None, "stream", "a").await,
+            StatusCode::BAD_REQUEST
+        );
+        assert!(stored(&state, "a1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_reply_waits_for_one_in_progress_but_settles_an_interrupted_one() {
+        let (gateway, _frames) = fed_gateway().await;
+        let state = Arc::new(replying_state(&gateway));
+        store_pending(&state, "a1", now_millis()).await;
+        store_pending(&state, "a2", 1).await;
+
+        let busy = start(&state, None, "a1", "b").await;
+        let settled = start(&state, None, "a2", "b").await;
+
+        let a1 = stored(&state, "a1").await.unwrap();
+        let a2 = stored(&state, "a2").await.unwrap();
+        assert_eq!(busy, StatusCode::CONFLICT);
+        assert_eq!(a1.messages.len(), 2);
+        assert_eq!(settled, StatusCode::ACCEPTED);
+        assert_eq!(a2.messages.len(), 4);
+        assert_eq!(a2.messages[1].pending, None);
+        assert_eq!(
+            a2.messages[1].error.as_deref(),
+            Some("The reply was interrupted")
+        );
+        assert_eq!(a2.messages[2].content, "b");
+        assert_eq!(a2.messages[3].pending, Some(true));
+    }
+
+    #[tokio::test]
+    async fn a_reply_another_pod_writes_is_stopped_through_the_store() {
+        let (gateway, frames) = fed_gateway().await;
+        let writing = Arc::new(replying_state(&gateway));
+        let mut other = replying_state(&gateway);
+        other.conversation_cache = Arc::clone(&writing.conversation_cache);
+        let other = Arc::new(other);
+        let stop = || {
+            crate::agent_reply::stop_reply(
+                State(Arc::clone(&other)),
+                AxumPath("a1".to_string()),
+                None,
+            )
+        };
+
+        start(&writing, None, "a1", "a").await;
+        frames
+            .send(data(r#"{"choices":[{"delta":{"content":"b"}}]}"#))
+            .unwrap();
+        let stopped = stop().await;
+        let mut released = false;
+        for _ in 0..50 {
+            let follow = crate::agent_reply::follow_reply(
+                State(Arc::clone(&writing)),
+                AxumPath("a1".to_string()),
+                None,
+            )
+            .await;
+            if follow.status() == StatusCode::NOT_FOUND {
+                released = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let again = stop().await;
+
+        let last = stored(&writing, "a1")
+            .await
+            .unwrap()
+            .messages
+            .pop()
+            .unwrap();
+        assert_eq!(stopped.status(), StatusCode::NO_CONTENT);
+        assert!(released, "the writing pod stops at its next save");
+        assert_eq!(last.pending, None);
+        assert_eq!(last.error, None);
+        assert_eq!(again.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn only_the_owner_follows_or_stops_their_reply() {
+        let (gateway, _frames) = fed_gateway().await;
+        let state = Arc::new(replying_state(&gateway));
+        let follow = |user: &str| {
+            crate::agent_reply::follow_reply(
+                State(Arc::clone(&state)),
+                AxumPath("a1".to_string()),
+                signed_in(user),
+            )
+        };
+        let stop = |user: &str| {
+            crate::agent_reply::stop_reply(
+                State(Arc::clone(&state)),
+                AxumPath("a1".to_string()),
+                signed_in(user),
+            )
+        };
+
+        start(&state, signed_in("ann"), "a1", "a").await;
+
+        assert_eq!(follow("bob").await.status(), StatusCode::NOT_FOUND);
+        assert_eq!(stop("bob").await.status(), StatusCode::NOT_FOUND);
+        assert_eq!(follow("ann").await.status(), StatusCode::OK);
+        assert_eq!(stop("ann").await.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn deleting_a_shared_conversation_removes_everyones_read_state_and_folder() {
+        let state = Arc::new(test_state());
+        write_flow_thread(&state, "a1").await;
+        write_flow_thread(&state, "a2").await;
+        for user in ["ann", "bob"] {
+            for id in ["a1", "a2"] {
+                mark_conversation_read(
+                    State(Arc::clone(&state)),
+                    AxumPath(id.into()),
+                    signed_in(user),
+                )
+                .await;
+            }
+            move_to(&state, user, "f").await;
+        }
+
+        let deleted = delete_conversation(
+            State(Arc::clone(&state)),
+            AxumPath("a1".into()),
+            signed_in("ann"),
+        )
+        .await;
+
+        let mut left = Vec::new();
+        for keys in [AgentsKeys::Reads, AgentsKeys::Folders] {
+            left.extend(
+                state
+                    .conversation_cache
+                    .list_keys(&key_prefix(&state, keys))
+                    .await
+                    .unwrap(),
+            );
+        }
+        assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+        assert_eq!(left.len(), 2);
+        assert!(left.iter().all(|key| key.ends_with(".a2")), "{left:?}");
     }
 
     #[cfg(unix)]
@@ -2713,6 +4086,57 @@ mod tests {
         assert_eq!(status.pods[0].identity, "test-pod");
         assert_eq!(status.pods[0].flows, Some(1));
         assert_eq!(status.pods[0].unreachable_reason, None);
+    }
+
+    #[test]
+    fn the_policy_lets_only_the_pages_own_inline_scripts_run() {
+        use base64::Engine as _;
+        use sha2::Digest as _;
+        let html = br#"<script>a()</script><script src="b.js"></script><script type="module">c()</script>"#;
+
+        let policy = content_security_policy(html, &["'self'".to_string()]);
+
+        for script in ["a()", "c()"] {
+            let hash = base64::engine::general_purpose::STANDARD
+                .encode(sha2::Sha256::digest(script.as_bytes()));
+            assert!(policy.contains(&format!("'sha256-{hash}'")), "{policy}");
+        }
+        assert_eq!(policy.matches("'sha256-").count(), 2, "{policy}");
+        assert!(policy.ends_with("frame-ancestors 'self'"), "{policy}");
+    }
+
+    #[tokio::test]
+    async fn the_ui_page_carries_its_policy_and_every_response_nosniff() {
+        let base = serve(router("/flowgen", test_state())).await;
+
+        let page = reqwest::get(format!("{base}/flowgen/")).await.unwrap();
+        let api = reqwest::get(format!("{base}/flowgen/api/version"))
+            .await
+            .unwrap();
+
+        let policy = page.headers()["content-security-policy"].to_str().unwrap();
+        assert!(policy.contains("script-src 'self' 'sha256-"), "{policy}");
+        assert!(policy.contains("frame-ancestors 'self'"), "{policy}");
+        for response in [&page, &api] {
+            assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+        }
+        assert!(api.headers().get("content-security-policy").is_none());
+    }
+
+    #[test]
+    fn a_frame_ancestor_that_would_break_the_policy_is_rejected() {
+        let config = |frame_ancestors: &str| -> crate::config::AppConfig {
+            serde_json::from_value(serde_json::json!({
+                "flows": {},
+                "web": { "enabled": true, "frame_ancestors": [frame_ancestors] }
+            }))
+            .unwrap()
+        };
+
+        assert!(config("https://console.example.com").validate().is_ok());
+        for broken in ["", "a b", "'self'; script-src *", "a,b"] {
+            assert!(config(broken).validate().is_err(), "{broken:?}");
+        }
     }
 
     #[test]

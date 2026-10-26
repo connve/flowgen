@@ -3,10 +3,11 @@
 	import StateMessage from '$lib/StateMessage.svelte';
 	import { cluster } from '$lib/clusterStatus.svelte';
 	import { m } from '$lib/paraglide/messages.js';
+	import { pageTitle } from '$lib/pageTitle';
 </script>
 
 <svelte:head>
-	<title>{m.pods_page_title()}</title>
+	<title>{pageTitle(m.monitor_tab_pods(), m.nav_monitor())}</title>
 </svelte:head>
 
 <div class="flex min-h-0 flex-1 flex-col overflow-y-auto p-6">

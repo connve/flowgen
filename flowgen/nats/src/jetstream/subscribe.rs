@@ -19,10 +19,10 @@ use tracing::{error, warn, Instrument};
 /// consumer's ack wait is unknown.
 const DEFAULT_PROGRESS_INTERVAL: Duration = Duration::from_secs(15);
 
-/// `nats_jetstream_subscriber` task config.
+/// `nats_jetstream_subscribe` task config.
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, TaskConfig)]
 #[serde(transparent)]
-pub struct Subscriber(pub super::config::Config);
+pub struct Subscribe(pub super::config::Config);
 
 /// Errors that can occur during NATS JetStream subscription operations.
 #[derive(thiserror::Error, Debug)]

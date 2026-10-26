@@ -2,10 +2,11 @@
 	import { page } from '$app/state';
 	import StateMessage from '$lib/StateMessage.svelte';
 	import { m } from '$lib/paraglide/messages.js';
+	import { pageTitle } from '$lib/pageTitle';
 </script>
 
 <svelte:head>
-	<title>{page.status} | Flowgen</title>
+	<title>{pageTitle(String(page.status))}</title>
 </svelte:head>
 
 <div class="flex h-full flex-col p-6">

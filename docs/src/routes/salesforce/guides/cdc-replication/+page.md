@@ -40,7 +40,7 @@ flow:
   require_leader_election: true
   tasks:
 
-    - salesforce_pubsubapi_subscriber:
+    - salesforce_pubsubapi_subscribe:
         name: start_subscription
         credentials_path: /etc/sfdc/credentials.json
         topic:
@@ -50,7 +50,7 @@ flow:
             managed_subscription: false
             name: salesforce_account_subscriber
 
-    - nats_jetstream_publisher:
+    - nats_jetstream_publish:
         name: publish_events
         credentials_path: /etc/nats/credentials.json
         url: "{{env.NATS_URL}}"
@@ -84,7 +84,7 @@ Consumes from the NATS stream and branches to multiple destinations. Both sinks 
 flow:
   tasks:
 
-    - nats_jetstream_subscriber:
+    - nats_jetstream_subscribe:
         name: start_subscription
         credentials_path: /etc/nats/credentials.json
         url: "{{env.NATS_URL}}"
@@ -174,7 +174,7 @@ See [Credentials](/docs/flowgen/concepts/credentials) for format details.
 To replay from the start of the Salesforce retention window, set `replay_preset: earliest` on the subscriber:
 
 ```yaml
-    - salesforce_pubsubapi_subscriber:
+    - salesforce_pubsubapi_subscribe:
         name: start_subscription
         credentials_path: /etc/sfdc/credentials.json
         topic:

@@ -86,7 +86,7 @@ sudo mv flowgen /usr/local/bin/
 
 ## From source
 
-Requires [Rust](https://rustup.rs) 1.88+, a C compiler, `protoc` (the Protocol Buffers compiler), and Node.js with npm for the embedded web UI. On Linux, `pkg-config` and the OpenSSL headers are needed as well.
+Requires [Rust](https://rustup.rs) 1.97.1+, a C compiler, `protoc` (the Protocol Buffers compiler), and Node.js with npm for the embedded web UI. On Linux, `pkg-config` and the OpenSSL headers are needed as well.
 
 ```bash
 # macOS

@@ -5,27 +5,23 @@ export const prerender = true;
 
 const SITE_ORIGIN = 'https://connve.com';
 const BASE_PATH = '/docs/flowgen';
-const DEFAULT_TITLE = 'Flowgen documentation | CONNVE';
+const SITE_TITLE = 'Flowgen Docs';
 const DEFAULT_DESCRIPTION =
 	'Flowgen is a real-time data activation platform. Author flows in YAML, run them on Kubernetes, and connect to your existing infrastructure.';
 
-const SECTION_LABELS: Record<string, string> = {
-	'getting-started': 'Flowgen getting started',
-	concepts: 'Flowgen concepts',
-	core: 'Flowgen core tasks',
-	ai: 'Flowgen AI',
-	braze: 'Flowgen Braze',
-	git: 'Flowgen Git',
-	gcp: 'Flowgen Google Cloud',
-	http: 'Flowgen HTTP',
-	kafka: 'Flowgen Kafka',
-	mongodb: 'Flowgen MongoDB',
-	mssql: 'Flowgen MSSQL',
-	nats: 'Flowgen NATS JetStream',
-	'object-store': 'Flowgen Object Store',
-	oci: 'Flowgen OCI',
-	salesforce: 'Flowgen Salesforce'
-};
+// Tab titles like the web UI's: most specific first, then the section, then
+// the site, e.g. `KV Store · NATS JetStream · Flowgen Docs`.
+function titleOf(route: string, heading: string | undefined): string {
+	for (const section of navigation) {
+		const items = [...section.items, ...(section.subsections ?? []).flatMap((sub) => sub.items)];
+		const item = items.find((candidate) => candidate.href === route);
+		if (item) {
+			const page = item.title === 'Overview' ? [] : [item.title];
+			return [...page, section.title, SITE_TITLE].join(' · ');
+		}
+	}
+	return heading ? `${heading} · ${SITE_TITLE}` : SITE_TITLE;
+}
 
 const rawPages = import.meta.glob('./**/+page.md', { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
 
@@ -72,22 +68,7 @@ export const load: LayoutLoad = ({ url }) => {
 	const lookup = relativePath.replace(/\/$/, '') || '/';
 	const meta = pageMetaByPath.get(lookup);
 
-	const segments = lookup.split('/').filter(Boolean);
-	const sectionLabel = segments.length >= 2 ? SECTION_LABELS[segments[0]] : undefined;
-
-	let displayTitle = meta?.title ?? '';
-	if (sectionLabel && displayTitle) {
-		const lastWord = sectionLabel.split(' ').pop() ?? '';
-		if (lastWord && displayTitle.toLowerCase().startsWith(lastWord.toLowerCase() + ' ')) {
-			displayTitle = displayTitle.slice(lastWord.length + 1);
-		}
-	}
-
-	const pageTitle = displayTitle
-		? sectionLabel
-			? `${sectionLabel} - ${displayTitle} | CONNVE`
-			: `${displayTitle} | CONNVE`
-		: DEFAULT_TITLE;
+	const pageTitle = titleOf(lookup, meta?.title);
 	const pageDescription = meta?.description || DEFAULT_DESCRIPTION;
 	const canonicalPath = lookup === '/' ? '/getting-started/why-flowgen' : lookup;
 	const canonical = `${SITE_ORIGIN}${BASE_PATH}${canonicalPath}`;

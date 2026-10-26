@@ -687,25 +687,28 @@ impl StreamWriter for OpenAiStreamWriter {
         frames
     }
 
-    fn tool_step(&mut self, name: String, arguments: serde_json::Value) -> Vec<String> {
+    fn tool_step(&mut self, step: flowgen_core::registry::ToolStep) -> Vec<String> {
         // Informational: emit standard tool_call delta frames but leave
         // `emitted_tool_calls` unset so the turn closes with a normal `stop`.
         let idx = self.tool_step_index;
         self.tool_step_index += 1;
         let mut frames = Vec::new();
+        let id = match step.run {
+            Some(run) => run,
+            None => format!("step_{idx}"),
+        };
         let open = ChatCompletionChunk::tool_call_open(
             &self.request_id,
             self.created,
             &self.model,
             idx,
-            // Steps carry no provider call id; index correlates open + args.
-            format!("step_{idx}"),
-            name,
+            id,
+            step.name,
         );
         if let Some(f) = self.frame(&open) {
             frames.push(f);
         }
-        let args = serde_json::to_string(&arguments).unwrap_or_default();
+        let args = serde_json::to_string(&step.arguments).unwrap_or_default();
         let args_chunk = ChatCompletionChunk::tool_call_arguments(
             &self.request_id,
             self.created,
@@ -942,10 +945,11 @@ mod tests {
             tool_step_index: 0,
         };
 
-        let frames = writer.tool_step(
-            "bigquery_query".to_string(),
-            serde_json::json!({ "project_id": "p", "query": "SELECT 1" }),
-        );
+        let frames = writer.tool_step(flowgen_core::registry::ToolStep {
+            name: "bigquery_query".to_string(),
+            arguments: serde_json::json!({ "project_id": "p", "query": "SELECT 1" }),
+            run: Some("r1".to_string()),
+        });
         // Open frame (name) + arguments frame.
         assert_eq!(frames.len(), 2);
         let open: serde_json::Value =
@@ -954,6 +958,7 @@ mod tests {
             open["choices"][0]["delta"]["tool_calls"][0]["function"]["name"],
             "bigquery_query"
         );
+        assert_eq!(open["choices"][0]["delta"]["tool_calls"][0]["id"], "r1");
         // Informational only: no tool-calls finish reason on the frames.
         assert!(open["choices"][0]["finish_reason"].is_null());
 
@@ -967,7 +972,11 @@ mod tests {
         assert_eq!(last["choices"][0]["finish_reason"], FINISH_REASON_STOP);
 
         // A second step gets a distinct tool_calls index.
-        let frames2 = writer.tool_step("other".to_string(), serde_json::json!({}));
+        let frames2 = writer.tool_step(flowgen_core::registry::ToolStep {
+            name: "other".to_string(),
+            arguments: serde_json::json!({}),
+            run: None,
+        });
         let open2: serde_json::Value =
             serde_json::from_str(frames2[0].strip_prefix("data: ").unwrap().trim()).unwrap();
         assert_eq!(open2["choices"][0]["delta"]["tool_calls"][0]["index"], 1);

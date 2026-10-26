@@ -26,7 +26,7 @@ To load flowgen's own flows and resources from a repository, see [Loading flows 
 | `name` | string | required | Task name. |
 | `repository_url` | string | required | Git repository URL (HTTPS). Supports `{{env.VAR_NAME}}` templates. |
 | `branch` | string | `main` | Branch to track. |
-| `path` | string | | Directory within the repo to scan. All files under this path are emitted. |
+| `path` | string | | Directory within the repo to scan. All regular files under this path are emitted; symlinks are skipped. |
 | `clone_path` | string | `<temp>/<flow_name>/<task_name>` | Local path to clone into. Defaults to a per-task subdirectory of the system temp directory so multiple `git_sync` tasks in one worker do not collide. Override only when you need a stable path on a persistent volume. Paths containing `..` are rejected. |
 | `credentials_path` | string | | Path to [credentials JSON file](/docs/flowgen/git#credentials). |
 | `force_pull` | bool | `false` | Bypass the HEAD-commit cache and re-walk the working tree every tick. Use only to re-seed a downstream cache mutated out of band; leave off in steady state. |

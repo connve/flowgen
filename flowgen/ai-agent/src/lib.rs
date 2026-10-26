@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 pub mod agent;
 pub mod meta;
+pub mod tool_runs;
 
 /// AI completion task for generating responses using LLMs.
 pub mod completion;
@@ -28,7 +29,6 @@ pub mod ai_gateway {
 pub use agent::{AgentClient, ClientBuilder, CompletionChunk};
 pub use completion::Processor;
 pub use completion::Provider;
-pub use flowgen_core::nsjail;
 
 /// The connector of this crate's task types.
 pub const CONNECTOR: Connector = Connector {
@@ -56,6 +56,10 @@ impl TaskMeta for completion::Completion {
             }
         }));
         connections
+    }
+
+    fn validate(&self) -> Result<(), TaskError> {
+        Ok(completion::Completion::validate(self)?)
     }
 }
 

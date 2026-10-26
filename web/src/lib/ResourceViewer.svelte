@@ -1,6 +1,6 @@
 <script lang="ts">
-	import { marked } from 'marked';
 	import { highlight, prismLanguage } from '$lib/highlight';
+	import { renderMarkdown } from '$lib/markdown';
 
 	interface Props {
 		content: string;
@@ -17,7 +17,7 @@
 	let { content, extension, onResourceClick, anchorTaskNames }: Props = $props();
 
 	let isMarkdown = $derived(extension?.toLowerCase() === 'md');
-	let renderedMarkdown = $derived(isMarkdown ? (marked.parse(content) as string) : '');
+	let renderedMarkdown = $derived(isMarkdown ? renderMarkdown(content) : '');
 
 	let lang = $derived(prismLanguage(extension));
 	let rawHighlighted = $derived(isMarkdown ? null : highlight(content, extension));

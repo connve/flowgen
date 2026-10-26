@@ -12,6 +12,10 @@
 	import { activitiesFor, allMetrics, releaseFlowSubscription } from '$lib/activityStore.svelte';
 	import Icon from '@iconify/svelte';
 	import { m } from '$lib/paraglide/messages.js';
+	import PaneResizer from '$lib/PaneResizer.svelte';
+	import { PaneWidth } from '$lib/paneWidth.svelte';
+	import { isMobile, PANE_OVER_PAGE } from '$lib/mobile';
+	import { pageTitle } from '$lib/pageTitle';
 	import { connectorByName } from '$lib/connectors';
 	import type {
 		AuthoringTarget,
@@ -48,7 +52,6 @@
 	let error = $state<string | null>(null);
 	let nowTick = $state(Date.now());
 
-	let search = $state('');
 	let selectedTags = $state<Set<string>>(new Set());
 	let statusFilter = $state<Record<FlowStatus, boolean>>({
 		idle: true,
@@ -134,6 +137,7 @@
 	onMount(() => {
 		const pane = localStorage.getItem('flowgen-folders-pane');
 		if (pane !== null) foldersPaneOpen = pane === '1';
+		if (isMobile()) foldersPaneOpen = false;
 		const exp = localStorage.getItem('flowgen-folders-expanded');
 		if (exp) {
 			try {
@@ -306,19 +310,11 @@
 	}
 
 	let filtered = $derived.by(() => {
-		const term = search.toLowerCase();
 		const requiredTags = selectedTags;
 		const matched = flowsView.filter((flow) => {
 			if (!statusFilter[flow.status]) return false;
 			for (const t of requiredTags) if (!flow.tags.includes(t)) return false;
-			if (term.length === 0) return true;
-			return (
-				flow.path.toLowerCase().includes(term) ||
-				flow.name.toLowerCase().includes(term) ||
-				(flow.display_name?.toLowerCase().includes(term) ?? false) ||
-				(flow.description?.toLowerCase().includes(term) ?? false) ||
-				flow.tags.some((tag) => tag.toLowerCase().includes(term))
-			);
+			return true;
 		});
 		const sign = sortDir === 'asc' ? 1 : -1;
 		return matched.slice().sort((a, b) => sign * compareFlows(a, b, sortKey));
@@ -330,19 +326,18 @@
 	let expandedFolders = $state(new SvelteSet<string>());
 	let selectedFolder = $state<string | null>(null);
 	let foldersPaneOpen = $state(true);
+	const paneWidth = new PaneWidth('flows');
 
 	// Modal breadcrumb parts derived from `selected` (the currently open flow path).
 	let selectedSegments = $derived(selected ? selected.split('/') : []);
 	let selectedFolders = $derived(selectedSegments.slice(0, -1));
 	let selectedLeaf = $derived(selectedSegments[selectedSegments.length - 1] ?? '');
-	let searchActive = $derived(search.trim().length > 0);
 	let sidebarTree = $derived(buildTree<Flow>(scopedFlows, (f) => f.path));
 
-	// Table rows: `filtered` (already respects status/tag/search) further
-	// narrowed to `selectedFolder` when set. Search overrides folder scope
-	// so hits from any folder surface.
+	// Table rows: `filtered` (already respects status and tags) further
+	// narrowed to `selectedFolder` when set.
 	let visibleFlows = $derived.by(() => {
-		if (searchActive || selectedFolder === null) return filtered;
+		if (selectedFolder === null) return filtered;
 		const prefix = selectedFolder + '/';
 		return filtered.filter((f) => f.path.startsWith(prefix));
 	});
@@ -358,6 +353,12 @@
 
 	function selectFolder(path: string | null) {
 		selectedFolder = path;
+		closePaneOnMobile();
+	}
+
+	// On mobile the pane covers the list, so it closes once a folder is picked.
+	function closePaneOnMobile() {
+		if (isMobile()) foldersPaneOpen = false;
 	}
 
 	function toggleFoldersPane() {
@@ -380,17 +381,24 @@
 </script>
 
 <svelte:head>
-	<title>{m.flows_page_title()}</title>
+	<title>{pageTitle(m.nav_flows())}</title>
 </svelte:head>
 
 <svelte:window on:keydown={onKeydown} />
 
-<section class="flex h-[calc(100vh-4rem)]">
+<section class="relative flex h-[calc(100vh-4rem)]">
+	{#if foldersPaneOpen}
+		<div class="absolute inset-0 z-20 bg-black/30 md:hidden" aria-hidden="true" onclick={closePaneOnMobile}></div>
+	{/if}
 	<aside
-		class="flex shrink-0 flex-col border-r border-base-300 bg-base-100 transition-[width] duration-200 ease-out {foldersPaneOpen
-			? 'w-64'
-			: 'w-16'}"
+		class="relative flex shrink-0 flex-col border-r border-base-300 bg-base-100 {paneWidth.dragging
+			? ''
+			: 'transition-[width] duration-200 ease-out'} {foldersPaneOpen ? PANE_OVER_PAGE : 'w-16'}"
+		style:width={foldersPaneOpen ? `${paneWidth.width}px` : undefined}
 	>
+		{#if foldersPaneOpen}
+			<PaneResizer pane={paneWidth} />
+		{/if}
 		{#if !foldersPaneOpen}
 			<div class="flex flex-1 flex-col items-center py-2">
 				<div class="tooltip tooltip-right" data-tip={m.flows_folders()}>
@@ -681,34 +689,6 @@
 				</div>
 			{/if}
 		{/if}
-		<div class="flex-1"></div>
-		<label
-			class="input input-sm flex items-center gap-2 border border-base-300 bg-base-100 outline-none focus-within:border-primary"
-		>
-			<svg
-				class="h-4 w-4 opacity-50"
-				viewBox="0 0 24 24"
-				fill="none"
-				stroke="currentColor"
-				stroke-width="2"
-			>
-				<circle cx="11" cy="11" r="8" />
-				<path d="M21 21l-4.35-4.35" />
-			</svg>
-			<input type="text" placeholder={m.flows_search_placeholder()} bind:value={search} />
-			{#if search}
-				<div class="tooltip tooltip-left" data-tip={m.common_clear_search()}>
-					<button
-						type="button"
-						class="opacity-50 hover:opacity-100"
-						aria-label={m.common_clear_search()}
-						onclick={() => (search = '')}
-					>
-						<Icon icon="tabler:x" class="h-5 w-5" />
-					</button>
-				</div>
-			{/if}
-		</label>
 	</div>
 	</div>
 

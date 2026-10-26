@@ -1,6 +1,6 @@
 # AI Completion
 
-Run LLM completions from multiple providers within a flow. Supports custom OpenAI-compatible endpoints, tool calling via MCP servers, streaming, RAG via static context, and sandboxed agent execution.
+Run LLM completions from multiple providers within a flow. Supports custom OpenAI-compatible endpoints, tool calling via MCP servers, streaming, and RAG via static context.
 
 ## Configuration
 
@@ -29,12 +29,15 @@ Run LLM completions from multiple providers within a flow. Supports custom OpenA
 | `temperature` | float | | Sampling temperature (0.0–1.0). |
 | `stream` | bool | `false` | Stream response as separate events instead of one final event. |
 | `static_context` | list | | RAG documents (inline strings or `resource:` references) always available to the agent. |
-| `max_turns` | int | unlimited | Maximum recursive agent turns. Prevents runaway tool-calling loops. |
+| `max_turns` | int | `10` | Most model calls one event may make, tool calls included. At least 1, and at least 2 with `mcp_servers`: one call to use a tool and one to answer. |
 | `mcp_servers` | list | | MCP server URLs for tool discovery. The agent connects to each, discovers tools, and makes them callable during completion. |
 | `tool_passthrough` | bool | `false` | Skip rig's agent loop and forward caller-supplied `tools` verbatim to the upstream provider. See [Tool-use passthrough](#tool-use-passthrough). |
-| `sandbox` | object | | Sandbox config for tool execution (nsjail). |
+| `output_schema` | object | | JSON Schema the answer must match. The answer stays JSON text in `text`; parse it with `parse_json` in a `script`. |
+| `images` | list of string | | Images sent with the prompt, for models that read images: http(s) URLs, downloaded and sent as base64, or base64 `data:` URLs. Each must be a PNG, JPEG, GIF, WebP, HEIC, HEIF or SVG image of at most `image_max_bytes`. A URL must reach a public address: loopback, private, link-local and other non-public addresses are refused, also after a redirect, and proxy settings are not used. A refused, empty or malformed URL fails the event without a retry. Supports handlebars templating. |
+| `image_timeout` | duration | `30s` | How long fetching one image may take. |
+| `image_max_bytes` | integer | `20971520` | Largest image sent to the model, in bytes. |
 | `depends_on` | list | | Upstream task names. |
-| `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
+| `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). A provider error is retried on 408, 425, 429, a 5xx or a failed connection; other 4xx fail at once. |
 
 ## Providers
 
@@ -113,6 +116,30 @@ For endpoints without auth, omit `credentials_path`:
       - resource: "docs/pricing.md"
       - "Support contact: support@example.com"
     max_turns: 3
+```
+
+## Example: structured answer with an image
+
+The model answers JSON matching `output_schema`.
+
+```yaml
+- ai_completion:
+    name: describe_image
+    provider: openai
+    model: gpt-4.1
+    credentials_path: /etc/flowgen/credentials/openai.json
+    prompt: "Describe the image."
+    images: ["{{event.data.image_url}}"]
+    output_schema:
+      type: object
+      properties:
+        summary: { type: string }
+        tags: { type: array, items: { type: string } }
+      required: [summary, tags]
+
+- script:
+    name: read_answer
+    code: parse_json(event.data.text)
 ```
 
 ## Example: MCP tool calling
@@ -203,23 +230,6 @@ Use this mode when flowgen is the AI gateway for a tool-executing client. Leave 
 Passthrough is a no-op when the request omits `tools`: the flow follows the normal completion path so a single `ai_completion` task can serve both tool-using and plain chat clients without a second flow.
 
 Works across every provider flowgen supports (OpenAI, Anthropic, Cohere, Gemini, Mistral, Groq, Together, xAI, OpenRouter, Perplexity, HuggingFace, VertexAI, and any OpenAI-compatible endpoint via `provider: custom`). Provider-native quirks in the tool schema — Anthropic's `tool_use` block, Google's parallel-call ordering — are handled by the underlying rig client without any per-provider config here.
-
-## Sandbox
-
-Optional sandboxing for MCP tool execution via nsjail. Rhai scripts do not need sandboxing (safe by design).
-
-```yaml
-- ai_completion:
-    name: agent
-    provider: google
-    model: gemini-2.5-flash-lite
-    prompt: "{{event.data}}"
-    sandbox:
-      memory_limit_mb: 512
-      time_limit_seconds: 30
-      max_pids: 10
-      allow_network: false
-```
 
 ## Output
 

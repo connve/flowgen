@@ -48,7 +48,7 @@ Failed events are not silently dropped. The error event carries `event.error` wi
 
 ### Infinite reconnect (subscribers)
 
-Subscribers — `nats_jetstream_subscriber`, `salesforce_pubsubapi_subscriber`, and other long-lived consumers — must maintain connectivity indefinitely. They use the retry config differently:
+Subscribers — `nats_jetstream_subscribe`, `salesforce_pubsubapi_subscribe`, and other long-lived consumers — must maintain connectivity indefinitely. They use the retry config differently:
 
 - **Initialization** is wrapped in the circuit-breaker strategy. If credentials are wrong or the broker is unreachable for the full retry window, the task fails fast so the operator notices.
 - **Connection loss** during the consume loop reconnects forever with exponential backoff (capped at 5 minutes). Each successful reconnect resets the backoff to `initial_backoff`.

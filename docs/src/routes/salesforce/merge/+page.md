@@ -83,7 +83,7 @@ flow:
 ```yaml
 flow:
   tasks:
-    - nats_jetstream_subscriber:
+    - nats_jetstream_subscribe:
         name: duplicates
         stream:
           name: salesforce_duplicates

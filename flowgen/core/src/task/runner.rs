@@ -156,7 +156,7 @@ async fn handle_with_retry<H: Handler>(
             Ok(()) => return,
             Err(error) => error,
         };
-        error!(error = %error, "Failed to handle event");
+        error!(error = %error, correlation_id = %event.correlation_id(), "Failed to handle event");
         let delay = match (handler.is_retryable(&error), cancellation.is_cancelled()) {
             (true, false) => delays.next(),
             _ => None,
@@ -170,7 +170,11 @@ async fn handle_with_retry<H: Handler>(
             None => false,
         };
         if !retried {
-            error!(error = %error, "Event failed after all retry attempts");
+            error!(
+                error = %error,
+                correlation_id = %event.correlation_id(),
+                "Event failed after all retry attempts"
+            );
             let message = handler.failure_message(&event, &error);
             event.forward_failure(handler.sender(), message).await;
             return;

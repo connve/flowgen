@@ -10,6 +10,10 @@
 	import StateMessage from '$lib/StateMessage.svelte';
 	import Icon from '@iconify/svelte';
 	import { m } from '$lib/paraglide/messages.js';
+	import PaneResizer from '$lib/PaneResizer.svelte';
+	import { PaneWidth } from '$lib/paneWidth.svelte';
+	import { isMobile, PANE_OVER_PAGE } from '$lib/mobile';
+	import { pageTitle } from '$lib/pageTitle';
 	import {
 		apiUrl,
 		encodePath,
@@ -36,13 +40,13 @@
 	let pending = $state<ChangeSummary[]>([]);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
-	let search = $state('');
 
 	// Folder pane state — mirrors the Flows page: collapsible sidebar with
 	// per-folder expand/collapse, all persisted in localStorage.
 	let expandedFolders = $state(new SvelteSet<string>());
 	let selectedFolder = $state<string | null>(null);
 	let foldersPaneOpen = $state(true);
+	const paneWidth = new PaneWidth('resources');
 
 	let selected = $state<string | null>(null);
 	let selectedContent = $state<ResourceContent | null>(null);
@@ -57,6 +61,7 @@
 	onMount(async () => {
 		const pane = localStorage.getItem('flowgen-resources-pane');
 		if (pane !== null) foldersPaneOpen = pane === '1';
+		if (isMobile()) foldersPaneOpen = false;
 		const exp = localStorage.getItem('flowgen-resources-expanded');
 		if (exp) {
 			try {
@@ -92,6 +97,12 @@
 
 	function selectFolder(path: string | null) {
 		selectedFolder = path;
+		closePaneOnMobile();
+	}
+
+	// On mobile the pane covers the list, so it closes once a folder is picked.
+	function closePaneOnMobile() {
+		if (isMobile()) foldersPaneOpen = false;
 	}
 
 	function toggleFoldersPane() {
@@ -104,19 +115,12 @@
 	}
 
 
-	let searchActive = $derived(search.trim().length > 0);
 	let sidebarTree = $derived(buildTree<Resource>(resources, (r) => r.key));
 
-	let filteredResources = $derived.by(() => {
-		if (!searchActive) return resources;
-		const term = search.toLowerCase();
-		return resources.filter((r) => r.key.toLowerCase().includes(term));
-	});
-
 	let visibleResources = $derived.by(() => {
-		if (searchActive || selectedFolder === null) return filteredResources;
+		if (selectedFolder === null) return resources;
 		const prefix = selectedFolder + '/';
-		return filteredResources.filter((r) => r.key.startsWith(prefix));
+		return resources.filter((r) => r.key.startsWith(prefix));
 	});
 
 	// Same anti-flash pattern as the flows page: only surface the modal once
@@ -188,17 +192,24 @@
 </script>
 
 <svelte:head>
-	<title>{m.resources_page_title()}</title>
+	<title>{pageTitle(m.nav_resources())}</title>
 </svelte:head>
 
 <svelte:window on:keydown={onKeydown} />
 
-<section class="flex h-[calc(100vh-4rem)]">
+<section class="relative flex h-[calc(100vh-4rem)]">
+	{#if foldersPaneOpen}
+		<div class="absolute inset-0 z-20 bg-black/30 md:hidden" aria-hidden="true" onclick={closePaneOnMobile}></div>
+	{/if}
 	<aside
-		class="flex shrink-0 flex-col border-r border-base-300 bg-base-100 transition-[width] duration-200 ease-out {foldersPaneOpen
-			? 'w-64'
-			: 'w-16'}"
+		class="relative flex shrink-0 flex-col border-r border-base-300 bg-base-100 {paneWidth.dragging
+			? ''
+			: 'transition-[width] duration-200 ease-out'} {foldersPaneOpen ? PANE_OVER_PAGE : 'w-16'}"
+		style:width={foldersPaneOpen ? `${paneWidth.width}px` : undefined}
 	>
+		{#if foldersPaneOpen}
+			<PaneResizer pane={paneWidth} />
+		{/if}
 		{#if !foldersPaneOpen}
 			<div class="flex flex-1 flex-col items-center py-2">
 				<div class="tooltip tooltip-right" data-tip={m.resources_folders()}>
@@ -356,35 +367,6 @@
 					</div>
 				{/if}
 			</div>
-			<div class="flex items-center justify-end gap-2">
-				<label
-					class="input input-sm flex items-center gap-2 border border-base-300 bg-base-100 outline-none focus-within:border-primary"
-				>
-					<svg
-						class="h-4 w-4 opacity-50"
-						viewBox="0 0 24 24"
-						fill="none"
-						stroke="currentColor"
-						stroke-width="2"
-					>
-						<circle cx="11" cy="11" r="8" />
-						<path d="M21 21l-4.35-4.35" />
-					</svg>
-					<input type="text" placeholder={m.resources_search_placeholder()} bind:value={search} />
-					{#if search}
-						<div class="tooltip tooltip-left" data-tip={m.common_clear_search()}>
-							<button
-								type="button"
-								class="opacity-50 hover:opacity-100"
-								aria-label={m.common_clear_search()}
-								onclick={() => (search = '')}
-							>
-								<Icon icon="tabler:x" class="h-5 w-5" />
-							</button>
-						</div>
-					{/if}
-				</label>
-			</div>
 		</div>
 
 		<div class="flex min-h-0 flex-1 flex-col overflow-y-auto p-6">
@@ -397,12 +379,8 @@
 		{:else if visibleResources.length === 0}
 			<StateMessage
 				tone="notice"
-				title={searchActive ? m.resources_no_match_title() : m.resources_empty_title()}
-				message={searchActive
-					? m.resources_no_match_message({ search })
-					: authoring
-						? m.resources_empty_message_authoring()
-						: m.resources_empty_message()}
+				title={m.resources_empty_title()}
+				message={authoring ? m.resources_empty_message_authoring() : m.resources_empty_message()}
 			/>
 		{:else}
 			<div class="shrink-0 overflow-x-auto rounded-lg border border-base-300 bg-base-100">

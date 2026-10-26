@@ -38,7 +38,7 @@ A task's static YAML thus becomes a per-event configuration. Connectors that loa
 **Routing key derived from event metadata:**
 
 ```yaml
-- nats_jetstream_publisher:
+- nats_jetstream_publish:
     name: publish
     subject: "orders.{{event.meta.region}}.created"
 ```
@@ -68,7 +68,7 @@ A task's static YAML thus becomes a per-event configuration. Connectors that loa
 When a template is exactly `{{ path }}` (no surrounding text, no helpers), flowgen reads the value from the data tree directly instead of converting it to a string. This means objects, arrays, booleans, and numbers retain their original types:
 
 ```yaml
-- nats_jetstream_publisher:
+- nats_jetstream_publish:
     name: forward
     # The whole event.data object is published as-is, not stringified.
     payload:
@@ -102,6 +102,7 @@ Numeric and boolean fields (such as `port`, `enabled`, `max_results`) accept tem
 
 - It does not run on every field — fields excluded from rendering (binary blobs, sensitive secrets, raw bytes) stay as-is. Most string and structured fields are rendered.
 - It does not loop or iterate. Use the `iterate` task for fan-out over arrays.
+- It does not see `ctx`. `ctx.cache` and `ctx.resource` exist only in `script` code, and Validate reports `{{ctx...}}` in other tasks.
 - It does not call functions or helpers (no `{{#if}}`, `{{#each}}`, etc.). For conditional logic, use a `script` task to compute the value, then template against the script's output.
 - It does not silently default missing variables — referencing a missing path produces a runtime error.
 

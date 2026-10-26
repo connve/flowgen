@@ -55,6 +55,7 @@ export type VersionInfo = Schemas['VersionInfo'];
 export type ClusterStatus = Schemas['ClusterStatus'];
 export type Connection = Schemas['Connection'];
 export type Connector = Schemas['Connector'];
+export type AgentTool = Schemas['AgentTool'];
 export type PodStatus = Schemas['PodStatus'];
 export type ConfigInfo = Schemas['ConfigInfo'];
 export type LogRecord = Schemas['LogRecord'];

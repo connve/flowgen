@@ -23,7 +23,7 @@ flow:
         filter:
           status: "active"
 
-    - nats_jetstream_publisher:
+    - nats_jetstream_publish:
         name: publish_events
         credentials_path: /etc/nats/credentials.json
         subject: pubsub.data.mongo

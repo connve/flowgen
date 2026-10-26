@@ -819,14 +819,12 @@ async fn dispatch_streaming<A: ProtocolAdapter>(
         session,
     } = request;
 
-    let correlation_id = uuid::Uuid::now_v7().to_string();
-
     let (progress_tx, mut progress_rx) = mpsc::channel::<ProgressEvent>(32);
 
-    registration
+    let correlation_id = registration
         .response_registry
-        .insert(
-            correlation_id.clone(),
+        .register(
+            None,
             ResponseSender {
                 progress_tx,
                 result_tx: None,
@@ -910,7 +908,7 @@ async fn dispatch_streaming<A: ProtocolAdapter>(
                             // final text emission (which is gated on
                             // `streamed_progress`).
                             let frames = match evt.tool {
-                                Some(step) => writer.tool_step(step.name, step.arguments),
+                                Some(step) => writer.tool_step(step),
                                 None => {
                                     streamed_progress = true;
                                     writer.text_delta(evt.status.clone())
@@ -941,7 +939,7 @@ async fn dispatch_streaming<A: ProtocolAdapter>(
 
                     while let Ok(evt) = progress_rx.try_recv() {
                         let frames = match evt.tool {
-                            Some(step) => writer.tool_step(step.name, step.arguments),
+                            Some(step) => writer.tool_step(step),
                             None => {
                                 streamed_progress = true;
                                 writer.text_delta(evt.status.clone())

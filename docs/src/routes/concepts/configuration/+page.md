@@ -189,12 +189,16 @@ Embedded web dashboard and JSON API.
 | `enabled` | bool | required | Set `true` to start the server. |
 | `port` | int | `8080` | Listening port. |
 | `path` | string | `/` | Path prefix for both the UI and the API. |
-| `headers` | map of string to string | `{}` | HTTP headers sent with every outbound request the web server makes on its own behalf (currently the built-in Agents chat proxy to the AI gateway). Set this so `llm_proxy`/`mcp_tool` tasks scoped with a matching `headers` field can identify and allow the web server as a caller — see [AI Gateway](/docs/flowgen/ai/gateway) and [MCP](/docs/flowgen/ai/mcp). |
-| `agents.enabled` | bool | required | Shows the Ask tab and enables `/api/agents`. Omit `agents` to hide the tab. |
+| `headers` | map of string to string | `{}` | HTTP headers sent with every request the web server makes to the AI gateway for the Agents tab. Set this so `llm_proxy`/`mcp_tool` tasks scoped with a matching `headers` field can identify and allow the web server as a caller — see [AI Gateway](/docs/flowgen/ai/gateway) and [MCP](/docs/flowgen/ai/mcp). |
+| `agents.enabled` | bool | required | Shows the Agents tab and enables `/api/agents`. Omit `agents` to hide the tab. |
 | `agents.conversation_history_ttl` | duration | `30d` | How long a conversation is kept after its last message; `0` keeps it indefinitely. |
+| `agents.cache_prefix` | string | `agents` | Cache key prefix for conversations, read state and folders: segments of letters, digits, `-` and `_` joined by `.`. A flow opens a conversation under `<cache_prefix>.conversations.`. |
+| `agents.reply_save_interval` | duration | `3s` | How often a reply in progress is saved; above 0. A pending reply not saved for ten times this long is shown as interrupted. |
+| `agents.reply_idle_timeout` | duration | `10m` | How long a reply may wait for the AI gateway's next output before it fails; above 0. |
 | `agents.on_behalf_of_user` | bool | `false` | Calls the AI gateway as the signed-in user, with their login token as the bearer. The gateway's `auth` must be `oidc` with the issuer of `web.auth` and its `client_id` as the audience. |
-| `ai_gateway_url` | string | same-process `ai_gateway` | Base URL the Agents chat is proxied to, e.g. `http://127.0.0.1:3002/v1`. Set when the AI gateway runs in another process or pod. |
+| `ai_gateway_url` | string | same-process `ai_gateway` | Base URL of the AI gateway the Agents tab replies through, e.g. `http://127.0.0.1:3002/v1`. Set when the AI gateway runs in another process or pod. |
 | `api_credentials_path` | string | | Machine keys the API accepts as `Authorization: Bearer` next to the login session. See [Authoring](/docs/flowgen/concepts/authoring#machine-keys). |
+| `frame_ancestors` | list of string | `["'self'"]` | Who may show the web UI in a frame, as Content-Security-Policy `frame-ancestors` sources, e.g. `https://console.example.com`. |
 | `authoring.enabled` | bool | required | Enables change proposals. See [Authoring](/docs/flowgen/concepts/authoring). |
 | `authoring.targets` | list | one `workspace` target over `flows/` and `resources/` | Where changes can be proposed. See [Targets](/docs/flowgen/concepts/authoring#targets). |
 | `authoring.targets[].name` | string | required | Name shown on the target's changes. |
@@ -217,13 +221,34 @@ The API contract is defined in `openapi.yaml` and served at `<path>/api/openapi.
 | `GET <path>/api/resources/{key}` | Fetch one resource's content. |
 | `GET <path>/api/version` | Running build version. |
 | `GET <path>/api/config` | Non-secret config info shown in the web UI (e.g. whether the Agents chat is configured). |
-| `POST <path>/api/agents/chat` | Proxies a chat-completion request to the AI gateway for the built-in Agents chat. Streams the response back; same-origin, so no gateway-side CORS is required. |
 | `GET <path>/api/agents/models` | Proxies `GET /models` on the AI gateway for the built-in Agents chat's model picker. |
+| `GET <path>/api/agents/tools` | Each `mcp_tool` with its flow and the connectors that flow reaches. |
+| `GET <path>/api/agents/conversations/stream` | Server-Sent Events of the caller's conversations: the list on connect, then each change and removal. |
+| `PATCH <path>/api/agents/conversations/{id}` | Rename a conversation, or move it to one of the caller's folders. |
+| `PUT`, `DELETE <path>/api/agents/conversations/{id}/read` | Mark a conversation read or unread for the caller. |
+| `POST <path>/api/agents/conversations/{id}/reply` | Add the user's message and have the agent reply. The reply runs on the server and is saved into the conversation as it arrives. `409` while another reply to the conversation is in progress. |
+| `GET`, `DELETE <path>/api/agents/conversations/{id}/reply` | Follow the reply in progress as Server-Sent Events from the pod writing it, or stop it from any pod. |
 | `POST <path>/api/workspace/validate` | Validates flow and resource files without running them. |
 | `GET`, `POST <path>/api/changes` | List and propose workspace changes. |
 | `GET <path>/api/changes/{id}` | One change with its diff. |
 | `POST <path>/api/changes/{id}/approve`, `/reject` | Decide a pending change; a signed-in user only. |
 | `GET <path>/api/openapi.yaml` | The spec itself. |
+
+### Conversations from flows
+
+With `web.auth`, each signed-in user sees their own conversations and the shared ones; without it, every conversation is shared.
+
+A flow opens a conversation in the Agents tab by writing it to the system bucket (`cache.system.db_name`) with [`nats_kv_store`](/docs/flowgen/nats/kv-store). Under `agents.conversations.<id>` it is shared. Under `agents.conversations.<user>.<id>`, where `<user>` is the hex SHA-256 of the user id, only that user sees it; a flow started by an `http_endpoint` or `mcp_tool` with `auth` has the id in `event.meta.auth.user_id`, so a script gets `<user>` with `sha256(event.meta.auth.user_id)`. The id uses only letters, digits, `-` and `_`. `event.data.content` is a `Conversation` from `openapi.yaml` as JSON, with `origin: agent` and `unread: true`, and optionally `folder`, e.g. `Preflight/Klaviyo`. It is unread for each user until they open it, and again when it changes. Marking a conversation read or unread, or moving it to another folder, affects only the user who does it; without `web.auth` it affects everyone.
+
+```yaml
+- nats_kv_store:
+    name: open_conversation
+    url: "{{env.NATS_URL}}"
+    bucket: flowgen_system
+    operation: put
+    key: "agents.conversations.{{event.meta.correlation_id}}"
+    ttl: 30d
+```
 
 ## `health`
 

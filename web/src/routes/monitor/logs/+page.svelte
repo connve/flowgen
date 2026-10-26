@@ -20,6 +20,7 @@
 	import { LOGS_LIMIT_MAX, clampLogsLimit } from '$lib/logsLimit';
 	import { getLogsLimit, logsLevels, setLogsLimit } from '$lib/logsPageState.svelte';
 	import { m } from '$lib/paraglide/messages.js';
+	import { pageTitle } from '$lib/pageTitle';
 
 	let logsLimit = $derived(getLogsLimit());
 
@@ -291,6 +292,10 @@
 		return `${(ms / 60_000).toFixed(1)}m`;
 	}
 </script>
+
+<svelte:head>
+	<title>{pageTitle(m.monitor_tab_logs(), m.nav_monitor())}</title>
+</svelte:head>
 
 <section class="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
 	<div class="shrink-0 border-b border-base-200 bg-base-100 px-6 pb-4 pt-6">

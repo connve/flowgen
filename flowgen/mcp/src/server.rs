@@ -496,6 +496,19 @@ struct ToolCallParams {
     name: String,
     #[serde(default)]
     arguments: serde_json::Value,
+    #[serde(default, rename = "_meta")]
+    meta: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+/// The run id the caller chose, when it is a non-nil UUID.
+fn requested_run_id(meta: Option<&serde_json::Map<String, serde_json::Value>>) -> Option<String> {
+    let id = meta?
+        .get(flowgen_core::registry::CORRELATION_ID)?
+        .as_str()?;
+    match uuid::Uuid::parse_str(id) {
+        Ok(id) if !id.is_nil() => Some(id.to_string()),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1471,15 +1484,13 @@ async fn execute_tool_call(
         None => None,
     };
 
-    let correlation_id = uuid::Uuid::now_v7().to_string();
-
     let (progress_tx, mut progress_rx) = mpsc::channel::<ProgressEvent>(32);
 
-    state
+    let correlation_id = state
         .extras
         .response_registry
-        .insert(
-            correlation_id.clone(),
+        .register(
+            requested_run_id(params.meta.as_ref()),
             flowgen_core::registry::ResponseSender {
                 progress_tx,
                 result_tx: None,
@@ -2052,6 +2063,144 @@ mod tests {
 
         assert_eq!(session.user.user_id, "u1");
         assert_eq!(session.token.as_ref().unwrap().expose_secret(), "t1");
+    }
+
+    fn tool_call_request(path: &str, meta: serde_json::Value) -> Request<Body> {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "lookup", "arguments": {}, "_meta": meta}
+        });
+        Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap()
+    }
+
+    async fn tool_result(response: Response) -> serde_json::Value {
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        let data = body
+            .lines()
+            .rev()
+            .find_map(|line| line.strip_prefix("data: "))
+            .expect("result event");
+        let message: serde_json::Value = serde_json::from_str(data).unwrap();
+        serde_json::from_str(message["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+    }
+
+    async fn run_of_call(meta: serde_json::Value) -> String {
+        let server = test_server();
+        let (tx, mut rx) = mpsc::channel(1);
+        let table = Arc::new(DashMap::new());
+        table.insert(
+            "lookup".to_string(),
+            ToolRegistration {
+                tx,
+                ..test_tool_registration("f", "Look up")
+            },
+        );
+        let state = build_test_state(&server, table);
+        let flow = tokio::spawn(async move {
+            let event = rx.recv().await.unwrap();
+            let run = event.correlation_id().to_string();
+            event
+                .completion_tx
+                .as_ref()
+                .unwrap()
+                .signal_completion(None);
+            run
+        });
+        let request = tool_call_request(&state.path, meta);
+        McpDispatcher::build_router(state)
+            .oneshot(request)
+            .await
+            .unwrap();
+        flow.await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_tool_call_runs_under_the_run_id_the_caller_gives() {
+        let run = "6f1c2b9e-3a4d-5e6f-8a9b-0c1d2e3f4a5b";
+        assert_eq!(
+            run_of_call(serde_json::json!({ "correlation_id": run })).await,
+            run
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tool_call_with_an_invalid_run_id_gets_a_new_one() {
+        let run = run_of_call(serde_json::json!({ "correlation_id": "../x" })).await;
+        assert!(uuid::Uuid::parse_str(&run).is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_tool_call_with_a_nil_run_id_gets_a_new_one() {
+        let nil = uuid::Uuid::nil().to_string();
+        let run = run_of_call(serde_json::json!({ "correlation_id": nil })).await;
+        assert_ne!(run, nil);
+        assert!(uuid::Uuid::parse_str(&run).is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_tool_call_with_null_meta_runs_under_a_new_run_id() {
+        let run = run_of_call(serde_json::Value::Null).await;
+        assert!(uuid::Uuid::parse_str(&run).is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_call_reusing_a_run_id_in_flight_gets_a_new_one_and_each_call_gets_its_own_result() {
+        let run = "6f1c2b9e-3a4d-5e6f-8a9b-0c1d2e3f4a5b";
+        let (tx, mut rx) = mpsc::channel(2);
+        let table = Arc::new(DashMap::new());
+        table.insert(
+            "lookup".to_string(),
+            ToolRegistration {
+                tx,
+                ..test_tool_registration("f", "Look up")
+            },
+        );
+        let state = build_test_state(&test_server(), table);
+        let path = state.path.clone();
+        let router = McpDispatcher::build_router(state);
+        let meta = serde_json::json!({ "correlation_id": run });
+
+        let first_response = router
+            .clone()
+            .oneshot(tool_call_request(&path, meta.clone()))
+            .await
+            .unwrap();
+        let first = rx.recv().await.unwrap();
+        let second_response = router
+            .oneshot(tool_call_request(&path, meta))
+            .await
+            .unwrap();
+        let second = rx.recv().await.unwrap();
+        second
+            .completion_tx
+            .as_ref()
+            .unwrap()
+            .signal_completion(Some(serde_json::json!({"call": "second"})));
+        first
+            .completion_tx
+            .as_ref()
+            .unwrap()
+            .signal_completion(Some(serde_json::json!({"call": "first"})));
+
+        assert_eq!(first.correlation_id(), run);
+        assert_ne!(second.correlation_id(), run);
+        assert!(uuid::Uuid::parse_str(second.correlation_id()).is_ok());
+        assert_eq!(
+            tool_result(first_response).await,
+            serde_json::json!({"call": "first"})
+        );
+        assert_eq!(
+            tool_result(second_response).await,
+            serde_json::json!({"call": "second"})
+        );
     }
 
     #[tokio::test]

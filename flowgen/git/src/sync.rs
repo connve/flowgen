@@ -253,20 +253,9 @@ impl flowgen_core::task::runner::Handler for EventHandler {
                 None => self.clone_path.clone(),
             };
 
-            // Walk files and emit one event per file. `.git/` is
-            // excluded so a bare `path: None` (or `path: "."`) config
-            // does not leak internal git metadata like `.git/config` or
-            // shallow markers into the downstream pipeline.
-            let entries: Vec<_> = WalkDir::new(&scan_path)
-                .follow_links(false)
-                .into_iter()
-                .filter_entry(|e| e.file_name() != ".git")
-                .filter_map(|e| e.ok())
-                .filter(|e| e.path().is_file())
-                .collect();
+            let entries = repository_files(&self.clone_path, &scan_path);
 
-            for (index, entry) in entries.iter().enumerate() {
-                let file_path = entry.path();
+            for (index, file_path) in entries.iter().enumerate() {
                 let content =
                     std::fs::read_to_string(file_path).map_err(|source| Error::FileRead {
                         path: file_path.display().to_string(),
@@ -346,6 +335,26 @@ impl flowgen_core::task::runner::Handler for EventHandler {
         })
         .await
     }
+}
+
+/// Regular files under `scan_path`, without `.git/` and without symlinks, so a
+/// link committed to the repository cannot expose a file outside the clone.
+fn repository_files(clone_path: &Path, scan_path: &Path) -> Vec<PathBuf> {
+    match (
+        std::fs::canonicalize(clone_path),
+        std::fs::canonicalize(scan_path),
+    ) {
+        (Ok(clone), Ok(scan)) if scan.starts_with(&clone) => {}
+        _ => return Vec::new(),
+    }
+    WalkDir::new(scan_path)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| e.file_name() != ".git")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .map(walkdir::DirEntry::into_path)
+        .collect()
 }
 
 // All gix calls are blocking and must run on a dedicated thread. We wrap the
@@ -613,6 +622,40 @@ mod tests {
             retry: None,
             max_in_flight: None,
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_in_the_repository_are_skipped() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("b.txt"), "b").unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let resources = repo.path().join("resources");
+        std::fs::create_dir_all(&resources).unwrap();
+        std::fs::write(resources.join("a.txt"), "a").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("b.txt"), resources.join("b.txt")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), resources.join("nested")).unwrap();
+        std::os::unix::fs::symlink(resources.join("a.txt"), resources.join("c.txt")).unwrap();
+
+        let files = repository_files(repo.path(), &resources);
+
+        assert_eq!(files, vec![resources.join("a.txt")]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_scan_path_through_a_symlink_out_of_the_repository_has_no_files() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(outside.path().join("nested")).unwrap();
+        std::fs::write(outside.path().join("nested/b.txt"), "b").unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), repo.path().join("flows")).unwrap();
+
+        let root = repository_files(repo.path(), &repo.path().join("flows"));
+        let nested = repository_files(repo.path(), &repo.path().join("flows/nested"));
+
+        assert!(root.is_empty());
+        assert!(nested.is_empty());
     }
 
     #[test]

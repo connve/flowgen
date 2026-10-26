@@ -140,6 +140,24 @@ template
 
 For static resources known at config time, prefer the task's `code: { resource: ... }` field — it's resolved once and supports templating.
 
+### Shared functions with `import`
+
+`import "path" as name;` loads `path.rhai` from the resources, so several scripts can share functions:
+
+```rhai
+// checks/common.rhai
+fn verdict(findings) {
+    if findings.some(|f| f.level == "fail") { "fail" } else { "pass" }
+}
+```
+
+```rhai
+import "checks/common" as common;
+#{ verdict: common::verdict(event.data.findings) }
+```
+
+Module functions see only their arguments, not `event` or `ctx`. A missing module fails at startup.
+
 ## Built-in helpers
 
 ### Identifiers and hashes

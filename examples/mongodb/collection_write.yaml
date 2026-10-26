@@ -9,7 +9,7 @@ flow:
     tags: ["mongo", "write", "example"]
   tasks:
 
-    - nats_jetstream_subscriber:
+    - nats_jetstream_subscribe:
         name: consume_events
         credentials_path: /etc/nats/credentials.json
         url: "127.0.0.1:4222"

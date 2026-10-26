@@ -16,7 +16,7 @@ flow:
   require_leader_election: true
   tasks:
 
-    - salesforce_pubsubapi_subscriber:
+    - salesforce_pubsubapi_subscribe:
         name: start_subscription
         credentials_path: /etc/sfdc/credentials.json
         topic:
@@ -27,7 +27,7 @@ flow:
             name: salesforce_account_subscriber
             # replay_preset: EARLIEST
 
-    - nats_jetstream_publisher:
+    - nats_jetstream_publish:
         name: publish_events
         credentials_path: /etc/nats/credentials.json
         url: "{{env.NATS_URL}}"

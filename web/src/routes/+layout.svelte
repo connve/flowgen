@@ -1,11 +1,14 @@
 <script lang="ts">
 	import { base } from '$app/paths';
+	import { afterNavigate } from '$app/navigation';
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
 	import { env } from '$env/dynamic/public';
 	import { apiUrl, type UserContext } from '$lib/api';
+	import { agentConversations, followAgentConversations } from '$lib/agentConversations.svelte';
 	import { auth } from '$lib/auth.svelte';
 	import Badge from '$lib/Badge.svelte';
+	import CommandPalette from '$lib/CommandPalette.svelte';
 	import { m } from '$lib/paraglide/messages.js';
 	import Icon from '@iconify/svelte';
 	import '../app.css';
@@ -16,15 +19,19 @@
 	let { children, data }: LayoutProps = $props();
 
 	const NAV = [
-		{ href: '/ask', icon: 'tabler:message-question', label: m.nav_ask(), match: (p: string) => p.startsWith(base + '/ask') },
+		{ href: '/agents', icon: 'tabler:prompt', label: m.nav_agents(), match: (p: string) => p.startsWith(base + '/agents') },
 		{ href: '/', icon: 'tabler:binary-tree', label: m.nav_flows(), match: (p: string) => p === base + '/' || p === base || p.startsWith(base + '/flows') || p.startsWith(base + '/changes') },
 		{ href: '/resources', icon: 'tabler:file-code', label: m.nav_resources(), match: (p: string) => p.startsWith(base + '/resources') },
 		{ href: '/connections', icon: 'tabler:plug-connected', label: m.nav_connections(), match: (p: string) => p.startsWith(base + '/connections') },
 		{ href: '/monitor/logs', icon: 'tabler:activity', label: m.nav_monitor(), match: (p: string) => p.startsWith(base + '/monitor') }
 	];
-	let nav = $derived(data.agents ? NAV : NAV.filter((item) => item.href !== '/ask'));
+	let nav = $derived(data.agents ? NAV : NAV.filter((item) => item.href !== '/agents'));
 
 	let collapsed = $state(true);
+	// On mobile the sidebar is a drawer, opened from the top bar and always full width.
+	let menuOpen = $state(false);
+	let compact = $derived(collapsed && !menuOpen);
+	afterNavigate(() => (menuOpen = false));
 	let version = $state<string | null>(null);
 	let currentPath = $derived(page.url.pathname);
 
@@ -39,6 +46,23 @@
 
 	// Hides outer chrome when embedded (e.g. console.connve.dev); nav stays.
 	const chromeless = env.PUBLIC_FLOWGEN_CHROME === 'embedded';
+
+	let searching = $state(false);
+	const shortcut =
+		typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘K' : 'Ctrl K';
+
+	function onWindowKeydown(event: KeyboardEvent) {
+		if (data.login || event.key.toLowerCase() !== 'k' || !(event.metaKey || event.ctrlKey)) return;
+		event.preventDefault();
+		searching = !searching;
+	}
+
+	// A boolean, so navigating (a new `data` each route) keeps the stream open.
+	let followConversations = $derived(!!data.agents && !data.login);
+	$effect(() => {
+		if (!followConversations) return;
+		return followAgentConversations();
+	});
 
 	// Reapply the DOM theme attribute whenever the effective dark state changes.
 	$effect(() => {
@@ -99,20 +123,23 @@
 {:else}
 <div class="min-h-screen overflow-x-hidden bg-base-100 text-base-content">
 	<div class="flex min-h-screen w-full min-w-0">
+		{#if menuOpen}
+			<div class="fixed inset-0 z-30 bg-black/50 md:hidden" aria-hidden="true" onclick={() => (menuOpen = false)}></div>
+		{/if}
 		<aside
-			class="flex shrink-0 flex-col border-r border-base-300 bg-base-100 transition-[width] duration-200 ease-out {collapsed
-				? 'w-16'
-				: 'w-56'}"
+			class="flex shrink-0 flex-col border-r border-base-300 bg-base-100 transition-[width] duration-200 ease-out {menuOpen
+				? 'max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:z-40 max-md:w-64 max-md:shadow-xl'
+				: 'max-md:hidden'} {compact ? 'w-16' : 'w-56'}"
 		>
 			{#if !chromeless}
 				<div
-					class="flex h-16 shrink-0 items-center border-b border-base-300 {collapsed
+					class="flex h-16 shrink-0 items-center border-b border-base-300 {compact
 						? 'justify-center'
 						: 'px-6'}"
 				>
 					<a
 						href="{base}/"
-						class="flex h-10 items-center text-primary {collapsed ? 'w-10 justify-center' : ''}"
+						class="flex h-10 items-center text-primary {compact ? 'w-10 justify-center' : ''}"
 						aria-label={m.nav_home()}
 					>
 						<svg
@@ -133,36 +160,45 @@
 			{/if}
 
 			<nav
-				class="flex-1 space-y-0.5 py-2 {collapsed ? 'flex flex-col items-center' : 'px-3'}"
+				class="flex-1 space-y-0.5 py-2 {compact ? 'flex flex-col items-center' : 'px-3'}"
 			>
 				{#each nav as item (item.href)}
 					{@const active = item.match(currentPath)}
+					{@const unread = item.href === '/agents' ? agentConversations.unread : 0}
+					{@const label = unread > 0 ? m.nav_agents_unread({ count: unread }) : item.label}
 					<a
 						href="{base}{item.href}"
 						class="relative flex h-10 items-center rounded-md text-sm font-medium transition-colors hover:bg-base-200 {active
 							? 'bg-base-200 text-primary'
-							: 'text-base-content'} {collapsed ? 'tooltip tooltip-right w-10 justify-center' : 'gap-3 px-3'}"
-						data-tip={collapsed ? item.label : undefined}
-						aria-label={item.label}
+							: 'text-base-content'} {compact ? 'tooltip tooltip-right w-10 justify-center' : 'gap-3 px-3'}"
+						data-tip={compact ? label : undefined}
+						aria-label={label}
 						aria-current={active ? 'page' : undefined}
 					>
 						{#if active}
 							<span class="absolute -left-1 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r bg-primary"></span>
 						{/if}
 						<Icon icon={item.icon} class="h-5 w-5 shrink-0" />
-						{#if !collapsed}
+						{#if !compact}
 							<span>{item.label}</span>
+						{/if}
+						{#if unread > 0}
+							{#if compact}
+								<span class="badge badge-primary badge-xs absolute -right-1 -top-1 min-w-4 px-1">{unread}</span>
+							{:else}
+								<span class="badge badge-primary badge-sm ml-auto">{unread}</span>
+							{/if}
 						{/if}
 					</a>
 				{/each}
 			</nav>
 
 			<div
-				class="flex h-12 shrink-0 items-center border-t border-base-300 {collapsed
+				class="flex h-12 shrink-0 items-center border-t border-base-300 {compact
 					? 'justify-center'
 					: 'justify-between pl-6 pr-3'}"
 			>
-				{#if !collapsed}
+				{#if !compact}
 					<div class="flex items-center gap-2">
 						{#if version}
 							<div class="tooltip tooltip-right" data-tip={m.nav_release_notes()}>
@@ -197,7 +233,7 @@
 					data-tip={collapsed ? m.nav_expand() : m.nav_collapse()}
 					class="tooltip {collapsed
 						? 'tooltip-right'
-						: 'tooltip-top'} flex h-10 w-10 items-center justify-center rounded-md text-base-content/70 transition-colors hover:bg-base-200 hover:text-base-content"
+						: 'tooltip-top'} flex h-10 w-10 items-center justify-center rounded-md text-base-content/70 transition-colors hover:bg-base-200 hover:text-base-content max-md:hidden"
 					onclick={() => {
 						collapsed = !collapsed;
 						localStorage.setItem('flowgen-nav-collapsed', collapsed ? '1' : '0');
@@ -212,53 +248,78 @@
 		</aside>
 
 		<div class="flex min-w-0 flex-1 flex-col bg-base-100">
-			{#if !chromeless}
-				<header class="flex h-16 items-center justify-end gap-3 border-b border-base-300 px-6">
-					<div
-						class="flex items-center gap-0.5 rounded-full border border-base-300 bg-base-200/50 p-0.5"
-						role="group"
-						aria-label={m.theme_label()}
+			<!-- Embedded, the host shows the theme and user; search stays here. -->
+			<header
+				class="flex h-16 items-center gap-3 border-b border-base-300 px-4 md:grid md:grid-cols-[1fr_minmax(0,28rem)_1fr] md:px-6 xl:grid-cols-[1fr_minmax(0,40rem)_1fr] 2xl:grid-cols-[1fr_minmax(0,48rem)_1fr]"
+			>
+				<div class="flex items-center">
+					<button
+						type="button"
+						class="btn btn-ghost btn-circle btn-sm md:hidden"
+						aria-label={m.nav_menu()}
+						onclick={() => (menuOpen = true)}
 					>
-						{#each [{ pref: 'system' as ThemePref, icon: 'tabler:device-desktop', label: m.theme_system() }, { pref: 'light' as ThemePref, icon: 'tabler:sun', label: m.theme_light() }, { pref: 'dark' as ThemePref, icon: 'tabler:moon', label: m.theme_dark() }] as opt (opt.pref)}
-							<div class="tooltip tooltip-bottom" data-tip={opt.label}>
-								<button
-									type="button"
-									class="flex h-7 w-7 items-center justify-center rounded-full transition-colors {themePref ===
-									opt.pref
-										? 'bg-base-100 text-primary shadow-sm'
-										: 'text-base-content/60 hover:text-base-content'}"
-									aria-label={m.theme_option({ theme: opt.label })}
-									aria-pressed={themePref === opt.pref}
-									onclick={() => setTheme(opt.pref)}
-								>
-									<Icon icon={opt.icon} class="h-4 w-4" />
-								</button>
-							</div>
-						{/each}
-					</div>
-
-					{#if auth.user}
-						<div class="tooltip tooltip-left" data-tip={m.user_sign_out({ name: displayName(auth.user) })}>
-							<a
-								href={apiUrl('auth/logout')}
-								data-sveltekit-reload
-								class="flex h-8 w-8 items-center justify-center rounded-full bg-base-200 text-base-content/70 transition-colors hover:text-base-content"
-								aria-label={m.user_sign_out({ name: displayName(auth.user) })}
-							>
-								<Icon icon="tabler:user-check" class="h-6 w-6" />
-							</a>
-						</div>
-					{:else}
+						<Icon icon="tabler:menu-2" class="h-5 w-5" />
+					</button>
+				</div>
+				<button
+					type="button"
+					class="flex h-9 w-full min-w-0 flex-1 items-center gap-2 rounded-md border border-base-300 bg-base-100 px-3 text-sm text-base-content/50 transition-colors hover:border-base-content/30"
+					aria-keyshortcuts="Meta+K Control+K"
+					onclick={() => (searching = true)}
+				>
+					<Icon icon="tabler:search" class="h-4 w-4 shrink-0" />
+					<span class="truncate">{m.search_placeholder()}</span>
+					<kbd class="kbd kbd-xs ml-auto max-md:hidden">{shortcut}</kbd>
+				</button>
+				<div class="flex items-center justify-end gap-3">
+					{#if !chromeless}
 						<div
-							class="tooltip tooltip-bottom flex h-8 w-8 items-center justify-center rounded-full bg-base-200 text-base-content/70"
-							data-tip={m.user_signed_in()}
-							aria-label={m.user_signed_in()}
+							class="flex items-center gap-0.5 rounded-full border border-base-300 bg-base-200/50 p-0.5 max-sm:hidden"
+							role="group"
+							aria-label={m.theme_label()}
 						>
-							<Icon icon="tabler:user" class="h-6 w-6" />
+							{#each [{ pref: 'system' as ThemePref, icon: 'tabler:device-desktop', label: m.theme_system() }, { pref: 'light' as ThemePref, icon: 'tabler:sun', label: m.theme_light() }, { pref: 'dark' as ThemePref, icon: 'tabler:moon', label: m.theme_dark() }] as opt (opt.pref)}
+								<div class="tooltip tooltip-bottom" data-tip={opt.label}>
+									<button
+										type="button"
+										class="flex h-7 w-7 items-center justify-center rounded-full transition-colors {themePref ===
+										opt.pref
+											? 'bg-base-100 text-primary shadow-sm'
+											: 'text-base-content/60 hover:text-base-content'}"
+										aria-label={m.theme_option({ theme: opt.label })}
+										aria-pressed={themePref === opt.pref}
+										onclick={() => setTheme(opt.pref)}
+									>
+										<Icon icon={opt.icon} class="h-4 w-4" />
+									</button>
+								</div>
+							{/each}
 						</div>
+
+						{#if auth.user}
+							<div class="tooltip tooltip-left" data-tip={m.user_sign_out({ name: displayName(auth.user) })}>
+								<a
+									href={apiUrl('auth/logout')}
+									data-sveltekit-reload
+									class="flex h-8 w-8 items-center justify-center rounded-full bg-base-200 text-base-content/70 transition-colors hover:text-base-content"
+									aria-label={m.user_sign_out({ name: displayName(auth.user) })}
+								>
+									<Icon icon="tabler:user-check" class="h-6 w-6" />
+								</a>
+							</div>
+						{:else}
+							<div
+								class="tooltip tooltip-bottom flex h-8 w-8 items-center justify-center rounded-full bg-base-200 text-base-content/70"
+								data-tip={m.user_signed_in()}
+								aria-label={m.user_signed_in()}
+							>
+								<Icon icon="tabler:user" class="h-6 w-6" />
+							</div>
+						{/if}
 					{/if}
-				</header>
-			{/if}
+				</div>
+			</header>
 
 			<main class="min-w-0 flex-1 overflow-hidden bg-base-100">
 				{@render children()}
@@ -266,4 +327,7 @@
 		</div>
 	</div>
 </div>
+<CommandPalette bind:open={searching} agents={!!data.agents} />
 {/if}
+
+<svelte:window onkeydown={onWindowKeydown} />

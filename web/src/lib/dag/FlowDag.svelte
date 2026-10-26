@@ -35,6 +35,7 @@
 	let nodes = $state.raw<Node[]>([]);
 	let edges = $state.raw<Edge[]>([]);
 	let width = $state(0);
+	let height = $state(0);
 
 	$effect(() => {
 		const built = build(parseFlow(yaml));
@@ -43,7 +44,7 @@
 	});
 </script>
 
-<div class="dag-container h-full w-full" bind:clientWidth={width}>
+<div class="dag-container h-full w-full" bind:clientWidth={width} bind:clientHeight={height}>
 	<SvelteFlow
 		bind:nodes
 		bind:edges
@@ -54,7 +55,7 @@
 		proOptions={{ hideAttribution: true }}
 		onnodeclick={({ node }) => onNodeClick?.(node.id)}
 	>
-		<DagLayout {edges} {width} />
+		<DagLayout {edges} {width} {height} />
 		<Background />
 		<Controls showLock={false} />
 	</SvelteFlow>

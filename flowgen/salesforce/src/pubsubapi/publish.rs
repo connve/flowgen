@@ -1,4 +1,4 @@
-//! The `salesforce_pubsubapi_publisher` task: publishes each event to a
+//! The `salesforce_pubsubapi_publish` task: publishes each event to a
 //! Pub/Sub API topic, rebuilding the connection after a publish fails.
 
 use crate::processor::{failure, Error, Failure, Payload, PubSub};
@@ -22,7 +22,7 @@ use tracing::{error, warn, Instrument};
 /// # Examples
 ///
 /// ```yaml
-/// salesforce_pubsubapi_publisher:
+/// salesforce_pubsubapi_publish:
 ///   name: order_status
 ///   credentials_path: /path/to/salesforce_creds.json
 ///   topic: /event/Order_Status__e
@@ -32,7 +32,7 @@ use tracing::{error, warn, Instrument};
 /// ```
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, TaskConfig)]
 #[serde(deny_unknown_fields)]
-pub struct Publisher {
+pub struct Publish {
     /// The unique name / identifier of the task.
     pub name: String,
     /// Path to credentials file containing Salesforce authentication details.
@@ -56,11 +56,11 @@ pub struct Publisher {
     pub max_in_flight: Option<std::num::NonZeroUsize>,
 }
 
-impl ConfigExt for Publisher {}
+impl ConfigExt for Publish {}
 
 /// Publishes events to one Salesforce Pub/Sub topic.
 pub struct EventHandler {
-    config: Arc<Publisher>,
+    config: Arc<Publish>,
     /// Pub/Sub client and the registry keys a rebuild after a failed publish
     /// evicts, so the replacement doesn't get the same dead connection.
     pubsub: PubSub,
@@ -155,7 +155,7 @@ impl EventHandler {
 /// Receives events and publishes them to the configured topic.
 #[derive(Debug)]
 pub struct Processor {
-    config: Arc<Publisher>,
+    config: Arc<Publish>,
     rx: Receiver<Event>,
     tx: Option<Sender<Event>>,
     task_id: usize,
@@ -367,7 +367,7 @@ impl Runner for Processor {
 /// Builds a [`Processor`].
 #[derive(Default)]
 pub struct ProcessorBuilder {
-    config: Option<Arc<Publisher>>,
+    config: Option<Arc<Publish>>,
     rx: Option<Receiver<Event>>,
     tx: Option<Sender<Event>>,
     task_id: usize,
@@ -382,7 +382,7 @@ impl ProcessorBuilder {
     }
 
     /// The task's config.
-    pub fn config(mut self, config: Arc<Publisher>) -> Self {
+    pub fn config(mut self, config: Arc<Publish>) -> Self {
         self.config = Some(config);
         self
     }
@@ -466,7 +466,7 @@ mod tests {
             )])),
             Payload::FromEvent { from_event: true },
         ] {
-            let publisher = Publisher {
+            let publisher = Publish {
                 name: "order_publisher".to_string(),
                 credentials_path: PathBuf::from("sf_creds"),
                 topic: "/event/Order_Status__e".to_string(),
@@ -478,7 +478,7 @@ mod tests {
             };
 
             let json = serde_json::to_string(&publisher).unwrap();
-            let deserialized: Publisher = serde_json::from_str(&json).unwrap();
+            let deserialized: Publish = serde_json::from_str(&json).unwrap();
             assert_eq!(publisher, deserialized);
         }
     }

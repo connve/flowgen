@@ -102,7 +102,7 @@ flow:
   require_leader_election: true
   tasks:
 
-    - salesforce_pubsubapi_subscriber:
+    - salesforce_pubsubapi_subscribe:
         name: listen_job_events
         credentials_path: /etc/sfdc/credentials.json
         topic:
@@ -158,7 +158,7 @@ flow:
         batch_size: 10000
         has_header: true
 
-    - nats_jetstream_publisher:
+    - nats_jetstream_publish:
         name: publish_to_nats
         credentials_path: /etc/nats/credentials.json
         url: "{{env.NATS_URL}}"
@@ -192,7 +192,7 @@ graph TD
 flow:
   tasks:
 
-    - nats_jetstream_subscriber:
+    - nats_jetstream_subscribe:
         name: start_subscription
         credentials_path: /etc/nats/credentials.json
         url: "{{env.NATS_URL}}"

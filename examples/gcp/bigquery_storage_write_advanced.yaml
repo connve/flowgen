@@ -14,7 +14,7 @@ flow:
   tasks:
 
     # Concurrent NATS consumer with durable state.
-    - nats_jetstream_subscriber:
+    - nats_jetstream_subscribe:
         name: consume_events
         credentials_path: /etc/nats/credentials.json
         url: "{{env.NATS_URL}}"
@@ -62,7 +62,7 @@ flow:
           max_attempts: 5
 
     # Confirmation subject routes by event type.
-    - nats_jetstream_publisher:
+    - nats_jetstream_publish:
         name: publish_confirmation
         credentials_path: /etc/nats/credentials.json
         url: "{{env.NATS_URL}}"

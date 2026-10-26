@@ -1,6 +1,5 @@
 # Webhook → LLM completion with RAG. `static_context` is loaded once at
-# init and stitched into every request; the LLM has access to the
-# tool sandbox for retrieval or computation.
+# init and stitched into every request.
 #
 # Required:
 #   - OpenAI API key at /etc/openai/credentials.json
@@ -11,7 +10,7 @@
 flow:
   labels:
     display_name: "RAG Resource Completion"
-    description: "Answers webhook-submitted questions with an OpenAI completion grounded in static resource context and a locked-down tool sandbox."
+    description: "Answers webhook-submitted questions with an OpenAI completion grounded in static resource context."
     tags: ["ai", "rag", "openai", "example"]
   tasks:
 
@@ -38,8 +37,3 @@ flow:
         temperature: 0.3
         max_tokens: 800
         max_turns: 3
-        sandbox:
-          memory_limit_mb: 512
-          time_limit_seconds: 30
-          max_pids: 10
-          allow_network: false

@@ -169,6 +169,61 @@ pub(crate) async fn get_connection(
     }
 }
 
+/// `GET /api/agents/tools`: each `mcp_tool` with the connectors of its flow,
+/// so the Agents chat can show what a tool call reaches.
+pub(crate) async fn list_agent_tools(
+    State(state): State<Arc<WebState>>,
+) -> Json<Vec<api::AgentTool>> {
+    let registry = match state.flow_registry.read() {
+        Ok(registry) => registry,
+        Err(_) => {
+            warn!("Flow registry is poisoned, returning no tools");
+            return Json(Vec::new());
+        }
+    };
+    let mut tools = Vec::new();
+    for handle in registry.values() {
+        let mut connectors: Vec<String> = Vec::new();
+        for found in &handle.connections {
+            let name = found.connection.connector.name;
+            if !matches!(name, "core" | "mcp") && !connectors.iter().any(|known| known == name) {
+                connectors.push(name.to_string());
+            }
+        }
+        for name in mcp_tool_names(&handle.flow_yaml) {
+            tools.push(api::AgentTool {
+                name,
+                flow: handle.identity().to_string(),
+                connectors: connectors.clone(),
+            });
+        }
+    }
+    Json(tools)
+}
+
+/// Names of the `mcp_tool` tasks in a flow's YAML.
+fn mcp_tool_names(yaml: &str) -> Vec<String> {
+    fn walk(value: &serde_yaml::Value, names: &mut Vec<String>) {
+        match value {
+            serde_yaml::Value::Mapping(map) => {
+                for (key, value) in map {
+                    match (key.as_str(), value.get("name").and_then(|n| n.as_str())) {
+                        (Some("mcp_tool"), Some(name)) => names.push(name.to_string()),
+                        _ => walk(value, names),
+                    }
+                }
+            }
+            serde_yaml::Value::Sequence(items) => items.iter().for_each(|item| walk(item, names)),
+            _ => {}
+        }
+    }
+    let mut names = Vec::new();
+    if let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(yaml) {
+        walk(&value, &mut names);
+    }
+    names
+}
+
 fn loaded_flows(state: &WebState) -> Vec<(String, Vec<TaskConnection>)> {
     match state.flow_registry.read() {
         Ok(registry) => registry
@@ -290,6 +345,13 @@ mod tests {
     use super::*;
     use flowgen_core::telemetry::{StoredLog, StoredSpan};
 
+    #[test]
+    fn mcp_tool_names_are_read_from_the_flow_yaml() {
+        let yaml = "flow:\n  tasks:\n    - mcp_tool:\n        name: a\n    - script:\n        name: b\n    - mcp_tool:\n        name: c\n";
+
+        assert_eq!(mcp_tool_names(yaml), vec!["a", "c"]);
+    }
+
     fn tasks(yaml: &str) -> Vec<TaskType> {
         let indented: String = yaml.lines().map(|line| format!("    {line}\n")).collect();
         crate::config::FlowConfigRaw::parse("a.yaml", &format!("flow:\n  tasks:\n{indented}"))
@@ -378,7 +440,7 @@ mod tests {
     credentials_path: /etc/a/gcp.json
     project_id: p
     query: "SELECT 2"
-- nats_jetstream_publisher:
+- nats_jetstream_publish:
     name: publish
     url: "nats://user:secret@nats:4222"
     subject: a

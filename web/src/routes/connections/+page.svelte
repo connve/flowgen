@@ -6,6 +6,7 @@
 	import StateMessage from '$lib/StateMessage.svelte';
 	import { connectorByName } from '$lib/connectors';
 	import { m } from '$lib/paraglide/messages.js';
+	import { pageTitle } from '$lib/pageTitle';
 	import type { PageProps } from './$types';
 
 	const REFRESH_MS = 30_000;
@@ -42,7 +43,7 @@
 </script>
 
 <svelte:head>
-	<title>{m.connections_page_title()}</title>
+	<title>{pageTitle(m.nav_connections())}</title>
 </svelte:head>
 
 <div class="flex min-h-0 flex-1 flex-col overflow-y-auto p-6">

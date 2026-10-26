@@ -2,71 +2,52 @@
 //!
 //! Provides unified client creation for different AI providers through the Rig framework.
 //!
-//! Uses an enum-based pattern as recommended by Rig's official examples for handling
-//! multiple providers without the deprecated CompletionClientDyn trait. Provider-agnostic
-//! operations (tool-use passthrough) are implemented via a local `Passthrough` trait
-//! with a blanket impl over `rig::client::CompletionClient`, so the enum dispatch is
-//! one call per variant instead of a duplicated body per provider.
+//! Each provider's completion model is erased to a `DynModel` once at build
+//! time, so one `Agent` serves every provider: the agent runs the tool loop,
+//! and the erased model also answers tool-use passthrough directly.
 
 use crate::completion::{Credentials, Provider};
+use crate::tool_runs::{RecordRuns, ToolRuns};
 use futures_util::stream::Stream;
 use futures_util::StreamExt;
-use rig::agent::{Agent, MultiTurnStreamItem};
-use rig::client::CompletionClient as RigCompletionClientTrait;
-use rig::completion::message::{Reasoning, ReasoningContent};
-use rig::completion::{
-    CompletionError, CompletionModel, CompletionRequest, Document, Prompt, Usage,
+use rig_agent::agent::MultiTurnStreamItem;
+use rig_agent::completion::PromptError;
+use rig_agent::tool::server::ToolServerHandle;
+use rig_agent::{Agent, AgentBuilder, AgentRunner};
+use rig_core::completion::{CompletionRequest, Document, Usage};
+use rig_core::message::{AssistantContent, Message, ToolChoice};
+use rig_core::operation::Completion;
+use rig_core::providers::{
+    anthropic, cohere, gemini, groq, huggingface, mistral, openai, openrouter, perplexity,
+    together, xai,
 };
-use rig::message::ToolChoice;
-use rig::streaming::StreamedAssistantContent as RigStreamedContent;
-use rig::streaming::StreamedAssistantContent;
-use rig::streaming::StreamingPrompt;
-use rig::tool::server::ToolServerHandle;
-use rig::vector_store::VectorStoreIndexDyn;
+use rig_core::streaming::{CompletionStream, Item, StreamEvent};
+use rig_core::tool::context::ToolContext;
+use rig_core::{DynModel, ProviderError};
 use schemars::Schema;
 use serde_json::Value;
+use std::pin::Pin;
 use std::sync::Arc;
-use tokio::sync::RwLock;
-
-/// Type alias for dynamic context storage (vector store indexes with sample sizes).
-type DynamicContext = Arc<RwLock<Vec<(usize, Arc<dyn VectorStoreIndexDyn + Send + Sync>)>>>;
-
-/// Flattens `Reasoning` text/summary blocks; returns `None` when only
-/// opaque payloads (encrypted/redacted) are present.
-fn flatten_reasoning(reasoning: &Reasoning) -> Option<String> {
-    let mut parts: Vec<&str> = Vec::new();
-    for block in &reasoning.content {
-        match block {
-            ReasoningContent::Text { text, .. } => parts.push(text),
-            ReasoningContent::Summary(text) => parts.push(text),
-            _ => {}
-        }
-    }
-    match parts.as_slice() {
-        [] => None,
-        _ => Some(parts.join("\n")),
-    }
-}
 
 /// Streaming chunk from completion.
 #[derive(Debug, Clone)]
 pub enum CompletionChunk {
     /// Text chunk from the stream.
     Text(String),
-    /// Reasoning/thinking text; full blocks and deltas collapsed to a
-    /// single string, signatures dropped.
+    /// Reasoning/thinking text fragment.
     Reasoning(String),
     /// Final response with the complete text and provider-reported
-    /// token usage. `Usage` is zero-filled when the provider omits it.
+    /// token usage. Counters the provider omits are `None`.
     Final { text: String, usage: Usage },
     /// A tool the agent invoked mid-turn (name + arguments). rig runs the tool
     /// internally and doesn't stream its result, so this marks the call only.
     ToolCall {
         name: String,
         arguments: serde_json::Value,
+        run: String,
     },
-    /// Error during streaming.
-    Error(String),
+    /// Error during streaming, and whether retrying may succeed.
+    Error { message: String, retryable: bool },
 }
 
 /// Errors that can occur during client creation and completion.
@@ -92,70 +73,45 @@ pub enum Error {
     #[error("OpenAI client creation failed: {source}")]
     OpenAIClient {
         #[source]
-        source: rig::http_client::Error,
+        source: reqwest::Error,
     },
-    #[error("Anthropic client creation failed: {source}")]
-    AnthropicClient {
+    #[error("Vertex AI client creation failed: {source}")]
+    VertexAiClient {
         #[source]
-        source: rig::http_client::Error,
+        source: rig_vertexai::client::VertexAiClientError,
     },
-    #[error("Cohere client creation failed: {source}")]
-    CohereClient {
-        #[source]
-        source: rig::http_client::Error,
-    },
-    #[error("Google/Gemini client creation failed: {source}")]
-    GeminiClient {
-        #[source]
-        source: rig::http_client::Error,
-    },
-    #[error("Mistral client creation failed: {source}")]
-    MistralClient {
-        #[source]
-        source: rig::http_client::Error,
-    },
-    #[error("Groq client creation failed: {source}")]
-    GroqClient {
-        #[source]
-        source: rig::http_client::Error,
-    },
-    #[error("Together client creation failed: {source}")]
-    TogetherClient {
-        #[source]
-        source: rig::http_client::Error,
-    },
-    #[error("xAI client creation failed: {source}")]
-    XaiClient {
-        #[source]
-        source: rig::http_client::Error,
-    },
-    #[error("OpenRouter client creation failed: {source}")]
-    OpenRouterClient {
-        #[source]
-        source: rig::http_client::Error,
-    },
-    #[error("Perplexity client creation failed: {source}")]
-    PerplexityClient {
-        #[source]
-        source: rig::http_client::Error,
-    },
-    #[error("HuggingFace client creation failed: {source}")]
-    HuggingFaceClient {
-        #[source]
-        source: rig::http_client::Error,
-    },
-    #[error("Vertex AI client creation failed: {reason}")]
-    VertexAiClient { reason: String },
     #[error("Completion request failed: {source}")]
     CompletionRequest {
         #[source]
-        source: rig::completion::PromptError,
+        source: Box<PromptError>,
     },
     #[error("Completion passthrough failed: {source}")]
     CompletionPassthrough {
         #[source]
-        source: rig::completion::CompletionError,
+        source: Box<ProviderError>,
     },
+}
+
+impl Error {
+    /// Whether sending the request again may succeed: rig's verdict for
+    /// provider failures, while other failures are retried.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Error::CompletionRequest { source } => is_retryable(source),
+            Error::CompletionPassthrough { source } => source.is_retryable(),
+            _ => true,
+        }
+    }
+}
+
+/// rig's verdict for a provider failure; failures of the run itself carry no
+/// provider reply and are retried.
+fn is_retryable(error: &PromptError) -> bool {
+    match error {
+        PromptError::Provider(error) => error.is_retryable(),
+        PromptError::Report(report) => report.is_retryable(),
+        _ => true,
+    }
 }
 
 /// Client builder for creating AI provider clients.
@@ -183,13 +139,11 @@ pub struct ClientBuilder {
     max_tokens: Option<u32>,
     /// Static context documents always available to the agent (RAG).
     static_context: Vec<Document>,
-    /// Dynamic context from vector stores (RAG).
-    dynamic_context: DynamicContext,
     /// Optional tool server handle for providing tools to the agent.
     tool_server_handle: Option<ToolServerHandle>,
     /// Optional tool choice strategy (auto, required, specific tool).
     tool_choice: Option<ToolChoice>,
-    /// Optional maximum number of recursive agent turns (prevents infinite loops).
+    /// Optional maximum number of model calls per prompt (prevents infinite loops).
     max_turns: Option<usize>,
     /// Optional JSON schema for structured output (provider must support it).
     output_schema: Option<Schema>,
@@ -203,20 +157,7 @@ impl ClientBuilder {
         Self {
             provider,
             model,
-            credentials: None,
-            endpoint: None,
-            headers: None,
-            name: None,
-            description: None,
-            temperature: None,
-            max_tokens: None,
-            static_context: Vec::new(),
-            dynamic_context: Arc::new(RwLock::new(Vec::new())),
-            tool_server_handle: None,
-            tool_choice: None,
-            max_turns: None,
-            output_schema: None,
-            additional_params: None,
+            ..Self::default()
         }
     }
 
@@ -275,18 +216,6 @@ impl ClientBuilder {
         self
     }
 
-    /// Adds a dynamic context vector store index to the agent (RAG).
-    pub fn dynamic_context_index(
-        self,
-        sample_size: usize,
-        index: Arc<dyn VectorStoreIndexDyn + Send + Sync>,
-    ) -> Self {
-        if let Ok(mut context) = self.dynamic_context.try_write() {
-            context.push((sample_size, index));
-        }
-        self
-    }
-
     /// Sets the tool server handle that provides tools to the agent.
     ///
     /// Tools are managed through a ToolServerHandle which registers and executes tools.
@@ -301,7 +230,7 @@ impl ClientBuilder {
         self
     }
 
-    /// Sets the maximum number of recursive agent turns (prevents infinite loops in tool calling).
+    /// Sets the maximum number of model calls per prompt (prevents infinite loops in tool calling).
     pub fn max_turns(mut self, max_turns: usize) -> Self {
         self.max_turns = Some(max_turns);
         self
@@ -320,49 +249,78 @@ impl ClientBuilder {
     }
 
     /// Builds an agent client for the configured provider.
-    pub fn build(self) -> Result<AgentClient, Error> {
-        // Helper macro to reduce boilerplate for standard providers.
-        macro_rules! build_provider {
-            ($provider_mod:ident, $variant:ident, $error:ident) => {{
-                let credentials = self.credentials.ok_or(Error::MissingCredentials)?;
-                let client = rig::providers::$provider_mod::Client::new(&credentials.api_key)
-                    .map_err(|source| Error::$error { source })?;
-                Ok(AgentClient {
-                    provider: self.provider,
-                    model: self.model,
-                    name: self.name,
-                    description: self.description,
-                    temperature: self.temperature.map(|t| t as f64),
-                    max_tokens: self.max_tokens.map(|t| t as u64),
-                    static_context: self.static_context,
-                    dynamic_context: self.dynamic_context,
-                    tool_server_handle: self.tool_server_handle,
-                    tool_choice: self.tool_choice,
-                    max_turns: self.max_turns,
-                    output_schema: self.output_schema,
-                    additional_params: self.additional_params,
-                    client: ProviderClient::$variant(client),
-                })
-            }};
+    pub fn build(mut self) -> Result<AgentClient, Error> {
+        let completion_model = self.completion_model()?;
+
+        let mut builder = AgentBuilder::new(completion_model.clone());
+        if let Some(name) = self.name.take() {
+            builder = builder.name(name);
+        }
+        if let Some(description) = self.description.take() {
+            builder = builder.description(description);
+        }
+        if let Some(temperature) = self.temperature {
+            builder = builder.temperature(temperature as f64);
+        }
+        if let Some(tokens) = self.max_tokens {
+            builder = builder.max_tokens(tokens as u64);
+        }
+        if let Some(choice) = self.tool_choice.take() {
+            builder = builder.tool_choice(choice);
+        }
+        if let Some(turns) = self.max_turns {
+            builder = builder.default_max_turns(turns);
+        }
+        if let Some(schema) = self.output_schema.take() {
+            builder = builder.output_schema_raw(schema);
+        }
+        if let Some(params) = self.additional_params.take() {
+            builder = builder.additional_params(params);
+        }
+        if let Some(handle) = self.tool_server_handle.take() {
+            builder = builder.tool_server_handle(handle);
         }
 
+        Ok(AgentClient {
+            provider: self.provider,
+            model: self.model,
+            static_context: self.static_context,
+            agent: builder.build(),
+            completion_model,
+        })
+    }
+
+    /// The provider's completion model, erased to its operation.
+    fn completion_model(&mut self) -> Result<DynModel<Completion>, Error> {
+        let model = self.model.clone();
         match self.provider {
-            Provider::OpenAi => build_provider!(openai, OpenAi, OpenAIClient),
-            Provider::Anthropic => build_provider!(anthropic, Anthropic, AnthropicClient),
-            Provider::Cohere => build_provider!(cohere, Cohere, CohereClient),
-            Provider::Google => build_provider!(gemini, Gemini, GeminiClient),
-            Provider::Mistral => build_provider!(mistral, Mistral, MistralClient),
-            Provider::Groq => build_provider!(groq, Groq, GroqClient),
-            Provider::Together => build_provider!(together, Together, TogetherClient),
-            Provider::Xai => build_provider!(xai, Xai, XaiClient),
-            Provider::OpenRouter => build_provider!(openrouter, OpenRouter, OpenRouterClient),
-            Provider::Perplexity => build_provider!(perplexity, Perplexity, PerplexityClient),
-            Provider::HuggingFace => build_provider!(huggingface, HuggingFace, HuggingFaceClient),
+            Provider::OpenAi => Ok(openai::OpenAI::new(self.api_key()?)
+                .completion(model)
+                .into()),
+            Provider::Anthropic => Ok(anthropic::Anthropic::new(self.api_key()?)
+                .completion(model)
+                .into()),
+            Provider::Cohere => {
+                // The native `/v2/chat` API, as Cohere was reached before.
+                let mut cohere_model = cohere::Cohere::new(self.api_key()?).completion(model);
+                cohere_model.wire = cohere_model.wire.with_route(cohere::ChatRoute::Native);
+                Ok(cohere_model.into())
+            }
+            Provider::Google => Ok(gemini::Gemini::new(self.api_key()?)
+                .completion(model)
+                .into()),
+            Provider::Mistral => Ok(mistral::new(self.api_key()?).completion(model).into()),
+            Provider::Groq => Ok(groq::new(self.api_key()?).completion(model).into()),
+            Provider::Together => Ok(together::new(self.api_key()?).completion(model).into()),
+            Provider::Xai => Ok(xai::new(self.api_key()?).completion(model).into()),
+            Provider::OpenRouter => Ok(openrouter::new(self.api_key()?).completion(model).into()),
+            Provider::Perplexity => Ok(perplexity::new(self.api_key()?).completion(model).into()),
+            Provider::HuggingFace => Ok(huggingface::new(self.api_key()?).completion(model).into()),
             Provider::VertexAi => {
                 // Vertex AI uses Google Cloud Application Default Credentials (ADC).
                 // Project and location can be set via credentials fields or environment
                 // variables (GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_LOCATION).
-                let mut builder = rig_vertexai::Client::builder();
+                let mut builder = rig_vertexai::VertexAi::builder();
                 if let Some(ref creds) = self.credentials {
                     if let Some(ref project_id) = creds.project_id {
                         builder = builder.with_project(project_id);
@@ -373,39 +331,30 @@ impl ClientBuilder {
                 }
                 let client = builder
                     .build()
-                    .map_err(|reason| Error::VertexAiClient { reason })?;
-                Ok(AgentClient {
-                    provider: self.provider,
-                    model: self.model,
-                    name: self.name,
-                    description: self.description,
-                    temperature: self.temperature.map(|t| t as f64),
-                    max_tokens: self.max_tokens.map(|t| t as u64),
-                    static_context: self.static_context,
-                    dynamic_context: self.dynamic_context,
-                    tool_server_handle: self.tool_server_handle,
-                    tool_choice: self.tool_choice,
-                    max_turns: self.max_turns,
-                    output_schema: self.output_schema,
-                    additional_params: self.additional_params,
-                    client: ProviderClient::VertexAi(client),
-                })
+                    .map_err(|source| Error::VertexAiClient { source })?;
+                Ok(client.completion(model).into())
             }
-            Provider::Ollama | Provider::Custom => self.build_openai_compatible_provider(),
+            Provider::Ollama | Provider::Custom => self.openai_compatible_model(),
         }
     }
 
-    fn build_openai_compatible_provider(mut self) -> Result<AgentClient, Error> {
-        // Custom and Ollama providers use OpenAI-compatible endpoints (requires explicit endpoint).
-        let endpoint = self.endpoint.take().ok_or(Error::MissingEndpoint)?;
-        self.build_openai_compatible(endpoint)
+    fn api_key(&self) -> Result<String, Error> {
+        match &self.credentials {
+            Some(credentials) => Ok(credentials.api_key.clone()),
+            None => Err(Error::MissingCredentials),
+        }
     }
 
-    fn build_openai_compatible(self, endpoint: String) -> Result<AgentClient, Error> {
-        // Third-party servers implement classic chat completions, not the
-        // Responses API; `.completions_api()` routes through the right path.
-        // Credentials are optional for local providers without auth.
-        let api_key = self.credentials.map(|c| c.api_key).unwrap_or_default();
+    /// Custom and Ollama providers use OpenAI-compatible endpoints (requires
+    /// explicit endpoint). Third-party servers implement classic chat
+    /// completions, not the Responses API. Credentials are optional for
+    /// local providers without auth.
+    fn openai_compatible_model(&mut self) -> Result<DynModel<Completion>, Error> {
+        let endpoint = self.endpoint.take().ok_or(Error::MissingEndpoint)?;
+        let api_key = match &self.credentials {
+            Some(credentials) => credentials.api_key.clone(),
+            None => String::new(),
+        };
 
         let mut header_map = http::HeaderMap::new();
         for (name, value) in self.headers.iter().flatten() {
@@ -423,154 +372,19 @@ impl ClientBuilder {
             header_map.insert(header_name, header_value);
         }
 
-        let mut builder = rig::providers::openai::Client::builder()
-            .api_key(&api_key)
-            .base_url(&endpoint);
-        if !header_map.is_empty() {
-            builder = builder.http_headers(header_map);
-        }
-        let client = builder
-            .build()
-            .map_err(|source| Error::OpenAIClient { source })?
-            .completions_api();
-
-        Ok(AgentClient {
-            provider: self.provider,
-            model: self.model,
-            name: self.name,
-            description: self.description,
-            temperature: self.temperature.map(|t| t as f64),
-            max_tokens: self.max_tokens.map(|t| t as u64),
-            static_context: self.static_context,
-            dynamic_context: self.dynamic_context,
-            tool_server_handle: self.tool_server_handle,
-            tool_choice: self.tool_choice,
-            max_turns: self.max_turns,
-            output_schema: self.output_schema,
-            additional_params: self.additional_params,
-            client: ProviderClient::OpenAiCompat(client),
-        })
+        let config = openai::OpenAIConfig::new(api_key).with_base_url(endpoint);
+        let client = match header_map.is_empty() {
+            true => config.client(),
+            false => {
+                let http = reqwest::Client::builder()
+                    .default_headers(header_map)
+                    .build()
+                    .map_err(|source| Error::OpenAIClient { source })?;
+                config.connect(rig_reqwest::ReqwestClient::from(http))
+            }
+        };
+        Ok(client.chat(self.model.clone()).into())
     }
-}
-
-/// Macro to configure agent builder with common parameters (without tools).
-macro_rules! build_agent_no_tools {
-    (
-        $builder:expr,
-        $name:expr,
-        $description:expr,
-        $temp:expr,
-        $tokens:expr,
-        $prompt:expr,
-        $static_context:expr,
-        $dynamic_context:expr,
-        $tool_choice:expr,
-        $max_turns:expr,
-        $output_schema:expr,
-        $additional_params:expr
-    ) => {{
-        let mut builder = $builder;
-        if let Some(temp) = $temp {
-            builder = builder.temperature(temp);
-        }
-        if let Some(tokens) = $tokens {
-            builder = builder.max_tokens(tokens);
-        }
-        if let Some(preamble) = $prompt {
-            builder = builder.preamble(preamble);
-        }
-        if let Some(choice) = $tool_choice.as_ref() {
-            builder = builder.tool_choice(choice.clone());
-        }
-        if let Some(params) = $additional_params.as_ref() {
-            builder = builder.additional_params(params.clone());
-        }
-
-        // Build the agent, then set fields that don't have builder methods.
-        let mut agent = builder.build();
-        agent.name = $name.clone();
-        agent.description = $description.clone();
-        agent.static_context = $static_context.to_vec();
-        agent.dynamic_context = Arc::clone($dynamic_context);
-        if let Some(turns) = $max_turns {
-            agent.default_max_turns = Some(turns);
-        }
-        if let Some(schema) = $output_schema.as_ref() {
-            agent.output_schema = Some(schema.clone());
-        }
-        agent
-    }};
-}
-
-/// Macro to configure agent builder with common parameters (with tools).
-macro_rules! build_agent_with_tools {
-    (
-        $builder:expr,
-        $name:expr,
-        $description:expr,
-        $temp:expr,
-        $tokens:expr,
-        $prompt:expr,
-        $static_context:expr,
-        $dynamic_context:expr,
-        $tool_server_handle:expr,
-        $tool_choice:expr,
-        $max_turns:expr,
-        $output_schema:expr,
-        $additional_params:expr
-    ) => {{
-        let mut builder = $builder;
-        if let Some(temp) = $temp {
-            builder = builder.temperature(temp);
-        }
-        if let Some(tokens) = $tokens {
-            builder = builder.max_tokens(tokens);
-        }
-        if let Some(preamble) = $prompt {
-            builder = builder.preamble(preamble);
-        }
-
-        // Add tool server handle (changes typestate).
-        let mut builder = builder.tool_server_handle($tool_server_handle.clone());
-
-        if let Some(choice) = $tool_choice.as_ref() {
-            builder = builder.tool_choice(choice.clone());
-        }
-        if let Some(params) = $additional_params.as_ref() {
-            builder = builder.additional_params(params.clone());
-        }
-
-        // Build the agent, then set fields that don't have builder methods.
-        let mut agent = builder.build();
-        agent.name = $name.clone();
-        agent.description = $description.clone();
-        agent.static_context = $static_context.to_vec();
-        agent.dynamic_context = Arc::clone($dynamic_context);
-        if let Some(turns) = $max_turns {
-            agent.default_max_turns = Some(turns);
-        }
-        if let Some(schema) = $output_schema.as_ref() {
-            agent.output_schema = Some(schema.clone());
-        }
-        agent
-    }};
-}
-
-/// Parameters for building an agent on-demand.
-struct AgentParams<'a> {
-    model: &'a str,
-    name: &'a Option<String>,
-    description: &'a Option<String>,
-    temperature: Option<f64>,
-    max_tokens: Option<u64>,
-    system_prompt: Option<&'a str>,
-    static_context: &'a [Document],
-    dynamic_context: &'a DynamicContext,
-    tool_server_handle: &'a Option<ToolServerHandle>,
-    tool_choice: &'a Option<ToolChoice>,
-    max_turns: Option<usize>,
-    output_schema: &'a Option<Schema>,
-    additional_params: &'a Option<Value>,
 }
 
 /// Non-passthrough completion output carrying rig-reported token usage
@@ -583,403 +397,145 @@ pub struct CompletionOutput {
 }
 
 /// Provider-agnostic response returned by tool-use passthrough.
-///
-/// Drops the provider-specific `raw_response` so a single type flows
-/// out of `AgentClient::completion_passthrough` regardless of provider.
 pub struct PassthroughResponse {
-    pub choice: rig::OneOrMany<rig::completion::AssistantContent>,
+    pub choice: Vec<AssistantContent>,
     pub usage: Usage,
 }
 
 /// Provider-agnostic streaming event carried out of tool-use
-/// passthrough. Mirrors the subset of `rig::StreamedAssistantContent`
-/// the AI gateway cares about — text deltas and complete tool calls;
-/// reasoning and provider-native items are dropped. `Done` carries
-/// the provider-reported token usage extracted from the final
-/// response, or `None` if the provider omitted it.
+/// passthrough. Mirrors the subset of rig's stream events the AI gateway
+/// cares about — text deltas and complete tool calls; reasoning and
+/// provider-native items are dropped. `Done` carries the provider-reported
+/// token usage of the final response, or `None` if the provider omitted it.
 pub enum PassthroughStreamEvent {
     Text(String),
-    ToolCall(rig::completion::message::ToolCall),
+    ToolCall(rig_core::message::ToolCall),
     Done(Option<Usage>),
 }
 
-/// One-shot completion that skips rig's agent loop.
-///
-/// Blanket-implemented for every rig `CompletionClient`, so the enum
-/// dispatch in `ProviderClient::completion_passthrough` reduces to a
-/// single call per variant.
-trait Passthrough {
-    async fn passthrough(
-        &self,
-        model: &str,
-        request: CompletionRequest,
-    ) -> Result<PassthroughResponse, CompletionError>;
+/// Stream of passthrough events.
+pub type PassthroughStream =
+    Pin<Box<dyn Stream<Item = Result<PassthroughStreamEvent, ProviderError>> + Send>>;
 
-    async fn passthrough_stream(
-        &self,
-        model: &str,
-        request: CompletionRequest,
-    ) -> Result<
-        std::pin::Pin<
-            Box<dyn Stream<Item = Result<PassthroughStreamEvent, CompletionError>> + Send>,
-        >,
-        CompletionError,
-    >;
+/// Maps one provider stream item to a passthrough event. Reasoning and
+/// partial fragments become empty text, which the gateway skips.
+fn passthrough_event(item: Item<StreamEvent>) -> PassthroughStreamEvent {
+    match item {
+        Item::Event(StreamEvent::Text { text, .. }) => PassthroughStreamEvent::Text(text),
+        Item::Event(StreamEvent::End {
+            content: AssistantContent::ToolCall(call),
+            ..
+        }) => PassthroughStreamEvent::ToolCall(call),
+        _ => PassthroughStreamEvent::Text(String::new()),
+    }
 }
 
-impl<C> Passthrough for C
-where
-    C: RigCompletionClientTrait,
-    C::CompletionModel: CompletionModel,
-    <C::CompletionModel as CompletionModel>::StreamingResponse: 'static,
-{
-    async fn passthrough(
-        &self,
-        model: &str,
-        request: CompletionRequest,
-    ) -> Result<PassthroughResponse, CompletionError> {
-        let cm = self.completion_model(model);
-        let resp = cm.completion(request).await?;
-        Ok(PassthroughResponse {
-            choice: resp.choice,
+/// The stream's events, ending with `Done` once the provider's reply is read.
+fn passthrough_events(stream: CompletionStream) -> PassthroughStream {
+    Box::pin(futures_util::stream::unfold(
+        Some(stream),
+        |state| async move {
+            let mut stream = state?;
+            match stream.next().await {
+                Some(Ok(item)) => Some((Ok(passthrough_event(item)), Some(stream))),
+                Some(Err(error)) => Some((Err(error), None)),
+                None => {
+                    let done = stream.finish().await.map(|response| {
+                        let usage = response.usage;
+                        PassthroughStreamEvent::Done(usage.is_reported().then_some(usage))
+                    });
+                    Some((done, None))
+                }
+            }
+        },
+    ))
+}
+
+/// Maps one agent stream item to a completion chunk; `None` for items the
+/// processor does not surface.
+fn completion_chunk(
+    item: Result<MultiTurnStreamItem, PromptError>,
+    runs: &ToolRuns,
+) -> Option<CompletionChunk> {
+    match item {
+        Ok(MultiTurnStreamItem::StreamAssistantItem(Item::Event(StreamEvent::Text {
+            text,
+            ..
+        }))) => Some(CompletionChunk::Text(text)),
+        Ok(MultiTurnStreamItem::StreamAssistantItem(Item::Event(StreamEvent::Reasoning {
+            text,
+            ..
+        }))) => Some(CompletionChunk::Reasoning(text)),
+        Ok(MultiTurnStreamItem::ToolCall { tool_call }) => Some(CompletionChunk::ToolCall {
+            name: tool_call.function.name.as_str().to_string(),
+            arguments: tool_call.function.arguments_value(),
+            run: runs.streamed(&tool_call.id),
+        }),
+        Ok(MultiTurnStreamItem::FinalResponse(resp)) => Some(CompletionChunk::Final {
+            text: resp.output(),
             usage: resp.usage,
-        })
-    }
-
-    async fn passthrough_stream(
-        &self,
-        model: &str,
-        request: CompletionRequest,
-    ) -> Result<
-        std::pin::Pin<
-            Box<dyn Stream<Item = Result<PassthroughStreamEvent, CompletionError>> + Send>,
-        >,
-        CompletionError,
-    > {
-        use rig::completion::GetTokenUsage;
-        let cm = self.completion_model(model);
-        let stream = cm.stream(request).await?;
-        let mapped = stream.map(|item| match item {
-            Ok(RigStreamedContent::Text(text)) => Ok(PassthroughStreamEvent::Text(text.text)),
-            Ok(RigStreamedContent::ToolCall { tool_call, .. }) => {
-                Ok(PassthroughStreamEvent::ToolCall(tool_call))
-            }
-            Ok(RigStreamedContent::Final(res)) => {
-                Ok(PassthroughStreamEvent::Done(res.token_usage()))
-            }
-            // Drop reasoning and delta fragments — the gateway only
-            // needs text and complete tool calls.
-            Ok(_) => Ok(PassthroughStreamEvent::Text(String::new())),
-            Err(e) => Err(e),
-        });
-        Ok(Box::pin(mapped))
+        }),
+        Err(e) => Some(CompletionChunk::Error {
+            message: e.to_string(),
+            retryable: is_retryable(&e),
+        }),
+        Ok(_) => None,
     }
 }
 
-/// Provider client enum - stores the client (built once), not the agent.
+/// Agent client wrapper.
 ///
-/// We build agents on-demand per request so we can apply dynamic system prompts.
-enum ProviderClient {
-    OpenAi(rig::providers::openai::Client),
-    /// Third-party OpenAI-compatible server using classic `/v1/chat/completions`.
-    OpenAiCompat(rig::providers::openai::CompletionsClient),
-    Anthropic(rig::providers::anthropic::Client),
-    Cohere(rig::providers::cohere::Client),
-    Gemini(rig::providers::gemini::Client),
-    Mistral(rig::providers::mistral::Client),
-    Groq(rig::providers::groq::Client),
-    Together(rig::providers::together::Client),
-    Xai(rig::providers::xai::Client),
-    OpenRouter(rig::providers::openrouter::Client),
-    Perplexity(rig::providers::perplexity::Client),
-    HuggingFace(rig::providers::huggingface::Client),
-    VertexAi(rig_vertexai::Client),
-}
-
-/// Macro to dispatch to the correct build macro based on tool presence.
-macro_rules! dispatch_build_agent {
-    ($variant:ident, $client:expr, $params:expr) => {
-        if let Some(handle) = $params.tool_server_handle {
-            AgentEnum::$variant(build_agent_with_tools!(
-                $client.agent($params.model),
-                $params.name,
-                $params.description,
-                $params.temperature,
-                $params.max_tokens,
-                $params.system_prompt,
-                $params.static_context,
-                $params.dynamic_context,
-                handle,
-                $params.tool_choice,
-                $params.max_turns,
-                $params.output_schema,
-                $params.additional_params
-            ))
-        } else {
-            AgentEnum::$variant(build_agent_no_tools!(
-                $client.agent($params.model),
-                $params.name,
-                $params.description,
-                $params.temperature,
-                $params.max_tokens,
-                $params.system_prompt,
-                $params.static_context,
-                $params.dynamic_context,
-                $params.tool_choice,
-                $params.max_turns,
-                $params.output_schema,
-                $params.additional_params
-            ))
-        }
-    };
-}
-
-impl ProviderClient {
-    /// Builds an agent on-demand with the given parameters.
-    fn build_agent(&self, params: &AgentParams) -> AgentEnum {
-        match self {
-            Self::OpenAi(client) => dispatch_build_agent!(OpenAi, client, params),
-            Self::OpenAiCompat(client) => dispatch_build_agent!(OpenAiCompat, client, params),
-            Self::Anthropic(client) => dispatch_build_agent!(Anthropic, client, params),
-            Self::Cohere(client) => dispatch_build_agent!(Cohere, client, params),
-            Self::Gemini(client) => dispatch_build_agent!(Gemini, client, params),
-            Self::Mistral(client) => dispatch_build_agent!(Mistral, client, params),
-            Self::Groq(client) => dispatch_build_agent!(Groq, client, params),
-            Self::Together(client) => dispatch_build_agent!(Together, client, params),
-            Self::Xai(client) => dispatch_build_agent!(Xai, client, params),
-            Self::OpenRouter(client) => dispatch_build_agent!(OpenRouter, client, params),
-            Self::Perplexity(client) => dispatch_build_agent!(Perplexity, client, params),
-            Self::HuggingFace(client) => dispatch_build_agent!(HuggingFace, client, params),
-            Self::VertexAi(client) => dispatch_build_agent!(VertexAi, client, params),
-        }
-    }
-
-    /// One-shot completion that skips rig's agent loop, delegating to
-    /// each provider's `Passthrough` blanket impl.
-    async fn completion_passthrough(
-        &self,
-        model: &str,
-        request: CompletionRequest,
-    ) -> Result<PassthroughResponse, CompletionError> {
-        match self {
-            Self::OpenAi(client) => client.passthrough(model, request).await,
-            Self::OpenAiCompat(client) => client.passthrough(model, request).await,
-            Self::Anthropic(client) => client.passthrough(model, request).await,
-            Self::Cohere(client) => client.passthrough(model, request).await,
-            Self::Gemini(client) => client.passthrough(model, request).await,
-            Self::Mistral(client) => client.passthrough(model, request).await,
-            Self::Groq(client) => client.passthrough(model, request).await,
-            Self::Together(client) => client.passthrough(model, request).await,
-            Self::Xai(client) => client.passthrough(model, request).await,
-            Self::OpenRouter(client) => client.passthrough(model, request).await,
-            Self::Perplexity(client) => client.passthrough(model, request).await,
-            Self::HuggingFace(client) => client.passthrough(model, request).await,
-            Self::VertexAi(client) => client.passthrough(model, request).await,
-        }
-    }
-
-    /// Streaming counterpart to `completion_passthrough`. Returns a
-    /// boxed stream that yields provider-agnostic events.
-    async fn completion_stream_passthrough(
-        &self,
-        model: &str,
-        request: CompletionRequest,
-    ) -> Result<
-        std::pin::Pin<
-            Box<dyn Stream<Item = Result<PassthroughStreamEvent, CompletionError>> + Send>,
-        >,
-        CompletionError,
-    > {
-        match self {
-            Self::OpenAi(client) => client.passthrough_stream(model, request).await,
-            Self::OpenAiCompat(client) => client.passthrough_stream(model, request).await,
-            Self::Anthropic(client) => client.passthrough_stream(model, request).await,
-            Self::Cohere(client) => client.passthrough_stream(model, request).await,
-            Self::Gemini(client) => client.passthrough_stream(model, request).await,
-            Self::Mistral(client) => client.passthrough_stream(model, request).await,
-            Self::Groq(client) => client.passthrough_stream(model, request).await,
-            Self::Together(client) => client.passthrough_stream(model, request).await,
-            Self::Xai(client) => client.passthrough_stream(model, request).await,
-            Self::OpenRouter(client) => client.passthrough_stream(model, request).await,
-            Self::Perplexity(client) => client.passthrough_stream(model, request).await,
-            Self::HuggingFace(client) => client.passthrough_stream(model, request).await,
-            Self::VertexAi(client) => client.passthrough_stream(model, request).await,
-        }
-    }
-}
-
-/// Agent enum for executing prompts (built on-demand per request).
-enum AgentEnum {
-    OpenAi(Agent<rig::providers::openai::responses_api::ResponsesCompletionModel>),
-    OpenAiCompat(Agent<rig::providers::openai::completion::CompletionModel>),
-    Anthropic(Agent<rig::providers::anthropic::completion::CompletionModel>),
-    Cohere(Agent<rig::providers::cohere::CompletionModel>),
-    Gemini(Agent<rig::providers::gemini::CompletionModel>),
-    Mistral(Agent<rig::providers::mistral::CompletionModel>),
-    Groq(Agent<rig::providers::groq::CompletionModel>),
-    Together(Agent<rig::providers::together::CompletionModel>),
-    Xai(Agent<rig::providers::xai::CompletionModel>),
-    OpenRouter(Agent<rig::providers::openrouter::CompletionModel>),
-    Perplexity(Agent<rig::providers::perplexity::CompletionModel>),
-    HuggingFace(Agent<rig::providers::huggingface::completion::CompletionModel>),
-    VertexAi(Agent<rig_vertexai::completion::CompletionModel>),
-}
-
-impl AgentEnum {
-    /// Prompts the agent and returns the completion together with
-    /// rig-reported token usage. Uses rig's `extended_details()` API
-    /// so the response carries both the text and a `Usage` breakdown
-    /// instead of just the text; providers that don't report usage
-    /// return zeroed fields.
-    async fn prompt(
-        self,
-        prompt: &str,
-    ) -> Result<rig::agent::PromptResponse, rig::completion::PromptError> {
-        match self {
-            Self::OpenAi(agent) => agent.prompt(prompt).extended_details().await,
-            Self::OpenAiCompat(agent) => agent.prompt(prompt).extended_details().await,
-            Self::Anthropic(agent) => agent.prompt(prompt).extended_details().await,
-            Self::Cohere(agent) => agent.prompt(prompt).extended_details().await,
-            Self::Gemini(agent) => agent.prompt(prompt).extended_details().await,
-            Self::Mistral(agent) => agent.prompt(prompt).extended_details().await,
-            Self::Groq(agent) => agent.prompt(prompt).extended_details().await,
-            Self::Together(agent) => agent.prompt(prompt).extended_details().await,
-            Self::Xai(agent) => agent.prompt(prompt).extended_details().await,
-            Self::OpenRouter(agent) => agent.prompt(prompt).extended_details().await,
-            Self::Perplexity(agent) => agent.prompt(prompt).extended_details().await,
-            Self::HuggingFace(agent) => agent.prompt(prompt).extended_details().await,
-            Self::VertexAi(agent) => agent.prompt(prompt).extended_details().await,
-        }
-    }
-
-    /// Streams the agent prompt and returns a unified stream of completion chunks.
-    async fn stream_prompt(
-        self,
-        prompt: &str,
-    ) -> std::pin::Pin<Box<dyn Stream<Item = CompletionChunk> + Send>> {
-        // Macro to reduce boilerplate for converting stream items.
-        macro_rules! map_stream {
-            ($agent:expr, $prompt:expr) => {{
-                let stream = $agent.stream_prompt($prompt).await;
-                Box::pin(
-                    stream
-                        .map(|item| match item {
-                            Ok(MultiTurnStreamItem::StreamAssistantItem(
-                                StreamedAssistantContent::Text(text),
-                            )) => Some(CompletionChunk::Text(text.text)),
-                            Ok(MultiTurnStreamItem::StreamAssistantItem(
-                                StreamedAssistantContent::Reasoning(reasoning),
-                            )) => flatten_reasoning(&reasoning).map(CompletionChunk::Reasoning),
-                            Ok(MultiTurnStreamItem::StreamAssistantItem(
-                                StreamedAssistantContent::ReasoningDelta { reasoning, .. },
-                            )) => Some(CompletionChunk::Reasoning(reasoning)),
-                            Ok(MultiTurnStreamItem::FinalResponse(resp)) => {
-                                Some(CompletionChunk::Final {
-                                    text: resp.response().to_string(),
-                                    usage: resp.usage(),
-                                })
-                            }
-                            Ok(MultiTurnStreamItem::StreamAssistantItem(
-                                StreamedAssistantContent::ToolCall { tool_call, .. },
-                            )) => Some(CompletionChunk::ToolCall {
-                                name: tool_call.function.name.clone(),
-                                arguments: tool_call.function.arguments.clone(),
-                            }),
-                            Err(e) => Some(CompletionChunk::Error(e.to_string())),
-                            _ => None,
-                        })
-                        .filter_map(|item| async move { item }),
-                )
-            }};
-        }
-
-        match self {
-            Self::OpenAi(agent) => map_stream!(agent, prompt),
-            Self::OpenAiCompat(agent) => map_stream!(agent, prompt),
-            Self::Anthropic(agent) => map_stream!(agent, prompt),
-            Self::Cohere(agent) => map_stream!(agent, prompt),
-            Self::Gemini(agent) => map_stream!(agent, prompt),
-            Self::Mistral(agent) => map_stream!(agent, prompt),
-            Self::Groq(agent) => map_stream!(agent, prompt),
-            Self::Together(agent) => map_stream!(agent, prompt),
-            Self::Xai(agent) => map_stream!(agent, prompt),
-            Self::OpenRouter(agent) => map_stream!(agent, prompt),
-            Self::Perplexity(agent) => map_stream!(agent, prompt),
-            Self::HuggingFace(agent) => map_stream!(agent, prompt),
-            Self::VertexAi(agent) => map_stream!(agent, prompt),
-        }
-    }
-}
-
-/// Agent client wrapper following Rig's enum dispatch pattern.
-///
-/// Stores the provider client (built once) and parameters, then builds
-/// Rig agents on-demand per request to support dynamic system prompts.
+/// Holds one Rig agent built over the provider's model, plus the model
+/// itself for passthrough. The system prompt is applied per request.
 pub struct AgentClient {
     /// AI provider being used.
     provider: Provider,
     /// Model identifier.
     model: String,
-    /// Agent name for logging and debugging.
-    name: Option<String>,
-    /// Agent description for sub-agents and workflows.
-    description: Option<String>,
-    /// Optional temperature setting for response randomness.
-    temperature: Option<f64>,
-    /// Optional maximum tokens for response.
-    max_tokens: Option<u64>,
     /// Static context documents (RAG).
     static_context: Vec<Document>,
-    /// Dynamic context from vector stores (RAG).
-    dynamic_context: DynamicContext,
-    /// Tool server handle for managing tools.
-    tool_server_handle: Option<ToolServerHandle>,
-    /// Tool choice strategy.
-    tool_choice: Option<ToolChoice>,
-    /// Maximum number of recursive agent turns.
-    max_turns: Option<usize>,
-    /// JSON schema for structured output.
-    output_schema: Option<Schema>,
-    /// Additional parameters for the model.
-    additional_params: Option<Value>,
-    /// Provider client instance (built once, reused for all requests).
-    client: ProviderClient,
+    /// Agent over the provider's model and the configured tools.
+    agent: Agent,
+    /// The provider's completion model (built once, reused for all requests).
+    completion_model: DynModel<Completion>,
 }
 
 impl AgentClient {
-    /// Generates a completion from a prompt with optional system prompt.
-    ///
-    /// Builds a Rig agent on-demand with the given system prompt, then prompts it.
+    /// A run of `prompt` with the per-request system prompt and the static
+    /// context. `runs` gives each tool call the flow run it starts.
+    fn runner(
+        &self,
+        prompt: Message,
+        system_prompt: Option<&str>,
+        runs: &Arc<ToolRuns>,
+    ) -> AgentRunner {
+        let runner = self
+            .agent
+            .prompt(prompt)
+            .documents(self.static_context.iter().cloned())
+            .add_hook(RecordRuns(Arc::clone(runs)))
+            .tool_context(ToolContext::default().with_scope(Arc::clone(runs) as _));
+        match system_prompt {
+            Some(preamble) => runner.preamble(preamble),
+            None => runner,
+        }
+    }
+
+    /// Generates a completion from a prompt with optional system prompt,
+    /// together with rig-reported token usage.
     pub async fn complete(
         &self,
-        prompt: &str,
+        prompt: Message,
         system_prompt: Option<&str>,
     ) -> Result<CompletionOutput, Error> {
-        // Build agent on-demand to allow dynamic system prompts per request.
-        let params = AgentParams {
-            model: &self.model,
-            name: &self.name,
-            description: &self.description,
-            temperature: self.temperature,
-            max_tokens: self.max_tokens,
-            system_prompt,
-            static_context: &self.static_context,
-            dynamic_context: &self.dynamic_context,
-            tool_server_handle: &self.tool_server_handle,
-            tool_choice: &self.tool_choice,
-            max_turns: self.max_turns,
-            output_schema: &self.output_schema,
-            additional_params: &self.additional_params,
-        };
-
-        let agent = self.client.build_agent(&params);
-
-        let resp = agent
-            .prompt(prompt)
+        let resp = self
+            .runner(prompt, system_prompt, &ToolRuns::new())
             .await
-            .map_err(|source| Error::CompletionRequest { source })?;
+            .map_err(|source| Error::CompletionRequest {
+                source: Box::new(source),
+            })?;
         Ok(CompletionOutput {
-            text: resp.output,
+            text: resp.output(),
             usage: resp.usage,
         })
     }
@@ -989,29 +545,15 @@ impl AgentClient {
     /// Returns a stream of completion chunks (text or final response).
     pub async fn complete_stream(
         &self,
-        prompt: &str,
+        prompt: Message,
         system_prompt: Option<&str>,
-    ) -> std::pin::Pin<Box<dyn Stream<Item = CompletionChunk> + Send>> {
-        // Build agent on-demand to allow dynamic system prompts per request.
-        let params = AgentParams {
-            model: &self.model,
-            name: &self.name,
-            description: &self.description,
-            temperature: self.temperature,
-            max_tokens: self.max_tokens,
-            system_prompt,
-            static_context: &self.static_context,
-            dynamic_context: &self.dynamic_context,
-            tool_server_handle: &self.tool_server_handle,
-            tool_choice: &self.tool_choice,
-            max_turns: self.max_turns,
-            output_schema: &self.output_schema,
-            additional_params: &self.additional_params,
-        };
-
-        let agent = self.client.build_agent(&params);
-
-        agent.stream_prompt(prompt).await
+    ) -> Pin<Box<dyn Stream<Item = CompletionChunk> + Send>> {
+        let runs = ToolRuns::new();
+        let stream = self.runner(prompt, system_prompt, &runs).stream();
+        Box::pin(stream.filter_map(move |item| {
+            let chunk = completion_chunk(item, &runs);
+            async move { chunk }
+        }))
     }
 
     /// Returns the AI provider being used.
@@ -1032,10 +574,17 @@ impl AgentClient {
         &self,
         request: CompletionRequest,
     ) -> Result<PassthroughResponse, Error> {
-        self.client
-            .completion_passthrough(&self.model, request)
+        let resp = self
+            .completion_model
+            .call(request)
             .await
-            .map_err(|source| Error::CompletionPassthrough { source })
+            .map_err(|source| Error::CompletionPassthrough {
+                source: Box::new(source),
+            })?;
+        Ok(PassthroughResponse {
+            choice: resp.choice,
+            usage: resp.usage,
+        })
     }
 
     /// Streaming counterpart to `completion_passthrough`. Yields a
@@ -1044,16 +593,13 @@ impl AgentClient {
     pub async fn completion_stream_passthrough(
         &self,
         request: CompletionRequest,
-    ) -> Result<
-        std::pin::Pin<
-            Box<dyn Stream<Item = Result<PassthroughStreamEvent, CompletionError>> + Send>,
-        >,
-        Error,
-    > {
-        self.client
-            .completion_stream_passthrough(&self.model, request)
-            .await
-            .map_err(|source| Error::CompletionPassthrough { source })
+    ) -> Result<PassthroughStream, Error> {
+        let stream = self.completion_model.stream(request).map_err(|source| {
+            Error::CompletionPassthrough {
+                source: Box::new(source),
+            }
+        })?;
+        Ok(passthrough_events(stream))
     }
 }
 
@@ -1063,13 +609,10 @@ mod tests {
     use crate::completion::CompletionUsage;
 
     fn make_usage(input: u64, output: u64) -> Usage {
-        Usage {
-            input_tokens: input,
-            output_tokens: output,
-            total_tokens: input + output,
-            cached_input_tokens: 0,
-            cache_creation_input_tokens: 0,
-        }
+        Usage::new()
+            .input_tokens(input)
+            .output_tokens(output)
+            .total_tokens(input + output)
     }
 
     #[test]
@@ -1081,9 +624,9 @@ mod tests {
         match chunk {
             CompletionChunk::Final { text, usage } => {
                 assert_eq!(text, "hello");
-                assert_eq!(usage.input_tokens, 10);
-                assert_eq!(usage.output_tokens, 5);
-                assert_eq!(usage.total_tokens, 15);
+                assert_eq!(usage.input_tokens, Some(10));
+                assert_eq!(usage.output_tokens, Some(5));
+                assert_eq!(usage.total_tokens, Some(15));
             }
             other => panic!("expected Final variant, got {other:?}"),
         }
@@ -1094,9 +637,9 @@ mod tests {
         let event = PassthroughStreamEvent::Done(Some(make_usage(100, 200)));
         match event {
             PassthroughStreamEvent::Done(Some(u)) => {
-                assert_eq!(u.input_tokens, 100);
-                assert_eq!(u.output_tokens, 200);
-                assert_eq!(u.total_tokens, 300);
+                assert_eq!(u.input_tokens, Some(100));
+                assert_eq!(u.output_tokens, Some(200));
+                assert_eq!(u.total_tokens, Some(300));
             }
             _ => panic!("expected Done(Some(_))"),
         }
@@ -1125,5 +668,35 @@ mod tests {
         assert_eq!(converted.prompt_tokens, 42);
         assert_eq!(converted.completion_tokens, 7);
         assert_eq!(converted.total_tokens, 49);
+    }
+
+    #[test]
+    fn rig_usage_without_total_sums_input_and_output() {
+        let rig_usage = Usage::new().input_tokens(42).output_tokens(7);
+        let converted: CompletionUsage = rig_usage.into();
+        assert_eq!(converted.total_tokens, 49);
+    }
+
+    #[test]
+    fn a_streamed_rate_limit_is_retried_and_a_bad_request_is_not() {
+        let retryable = |status: http::StatusCode| {
+            let error = PromptError::from(ProviderError::from_http_response(status, ""));
+            match completion_chunk(Err(error), &ToolRuns::new()) {
+                Some(CompletionChunk::Error { retryable, .. }) => retryable,
+                other => panic!("expected an error chunk, got {other:?}"),
+            }
+        };
+
+        assert!(retryable(http::StatusCode::TOO_MANY_REQUESTS));
+        assert!(retryable(http::StatusCode::BAD_GATEWAY));
+        assert!(!retryable(http::StatusCode::BAD_REQUEST));
+    }
+
+    #[test]
+    fn unreported_usage_converts_to_zeroes() {
+        let converted: CompletionUsage = Usage::new().into();
+        assert_eq!(converted.prompt_tokens, 0);
+        assert_eq!(converted.completion_tokens, 0);
+        assert_eq!(converted.total_tokens, 0);
     }
 }

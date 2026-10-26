@@ -61,7 +61,6 @@ export const navigation: NavSection[] = [
 			{ title: 'Credentials', href: '/concepts/credentials' },
 			{ title: 'Authentication', href: '/concepts/auth' },
 			{ title: 'Authoring', href: '/concepts/authoring' },
-			{ title: 'Sandboxing', href: '/concepts/sandboxing' },
 			{ title: 'Telemetry', href: '/concepts/telemetry' },
 			{ title: 'Configuration', href: '/concepts/configuration' }
 		]
@@ -184,8 +183,8 @@ export const navigation: NavSection[] = [
 		icon: '/icons/nats.svg',
 		items: [
 			{ title: 'Overview', href: '/nats' },
-			{ title: 'Subscriber', href: '/nats/subscriber' },
-			{ title: 'Publisher', href: '/nats/publisher' },
+			{ title: 'Subscribe', href: '/nats/subscribe' },
+			{ title: 'Publish', href: '/nats/publish' },
 			{ title: 'KV Store', href: '/nats/kv-store' }
 		]
 	},

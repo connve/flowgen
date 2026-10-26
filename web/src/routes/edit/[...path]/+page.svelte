@@ -25,6 +25,7 @@
 		targetOf
 	} from '$lib/changes';
 	import { m } from '$lib/paraglide/messages.js';
+	import { pageTitle } from '$lib/pageTitle';
 	import type { PageProps } from './$types';
 
 	let { data }: PageProps = $props();
@@ -257,7 +258,7 @@
 </script>
 
 <svelte:head>
-	<title>{label || leafName || placeholder} | Flowgen</title>
+	<title>{pageTitle(label || leafName || placeholder, isFlow ? m.nav_flows() : m.nav_resources())}</title>
 </svelte:head>
 
 <section class="flex h-[calc(100vh-4rem)] flex-col p-6">

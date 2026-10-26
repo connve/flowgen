@@ -1,4 +1,4 @@
-//! The `salesforce_pubsubapi_subscriber` task: subscribes to a Pub/Sub API
+//! The `salesforce_pubsubapi_subscribe` task: subscribes to a Pub/Sub API
 //! topic and emits each event, reconnecting whenever the stream breaks.
 
 use crate::processor::{Error, PubSub};
@@ -27,7 +27,7 @@ const DEFAULT_TOPIC_PREFIX_EVENT: &str = "/event/";
 /// # Examples
 ///
 /// ```yaml
-/// salesforce_pubsubapi_subscriber:
+/// salesforce_pubsubapi_subscribe:
 ///   name: opportunity_changes
 ///   credentials_path: /path/to/salesforce_creds.json
 ///   topic:
@@ -40,7 +40,7 @@ const DEFAULT_TOPIC_PREFIX_EVENT: &str = "/event/";
 /// ```
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, TaskConfig)]
 #[serde(deny_unknown_fields)]
-pub struct Subscriber {
+pub struct Subscribe {
     /// The unique name / identifier of the task.
     pub name: String,
     /// Path to credentials file containing Salesforce authentication details.
@@ -63,7 +63,7 @@ pub struct Subscriber {
     pub retry: Option<flowgen_core::retry::RetryConfig>,
 }
 
-impl ConfigExt for Subscriber {}
+impl ConfigExt for Subscribe {}
 
 /// A Pub/Sub topic and how it is read.
 ///
@@ -148,7 +148,7 @@ pub struct EventHandler {
     /// would hand every retry the same dead connection.
     pubsub: PubSub,
     /// Subscriber configuration
-    config: Arc<Subscriber>,
+    config: Arc<Subscribe>,
     /// Channel sender for processed events
     tx: Option<Sender<Event>>,
     /// Task identifier for event tracking
@@ -494,7 +494,7 @@ impl EventHandler {
 /// whenever the stream fails.
 #[derive(Debug)]
 pub struct Processor {
-    config: Arc<Subscriber>,
+    config: Arc<Subscribe>,
     tx: Option<Sender<Event>>,
     task_id: usize,
     task_context: Arc<flowgen_core::task::context::TaskContext>,
@@ -610,7 +610,7 @@ impl flowgen_core::task::runner::Runner for Processor {
 /// Builds a [`Processor`].
 #[derive(Default)]
 pub struct ProcessorBuilder {
-    config: Option<Arc<Subscriber>>,
+    config: Option<Arc<Subscribe>>,
     tx: Option<Sender<Event>>,
     task_id: usize,
     task_context: Option<Arc<flowgen_core::task::context::TaskContext>>,
@@ -624,7 +624,7 @@ impl ProcessorBuilder {
     }
 
     /// The task's config.
-    pub fn config(mut self, config: Arc<Subscriber>) -> Self {
+    pub fn config(mut self, config: Arc<Subscribe>) -> Self {
         self.config = Some(config);
         self
     }
@@ -701,7 +701,7 @@ mod tests {
 
     #[test]
     fn test_subscriber_config_serialization() {
-        let subscriber = Subscriber {
+        let subscriber = Subscribe {
             name: "test_subscriber".to_string(),
             credentials_path: PathBuf::from("test_creds"),
             topic: Topic {
@@ -721,7 +721,7 @@ mod tests {
         };
 
         let json = serde_json::to_string(&subscriber).unwrap();
-        let deserialized: Subscriber = serde_json::from_str(&json).unwrap();
+        let deserialized: Subscribe = serde_json::from_str(&json).unwrap();
         assert_eq!(subscriber, deserialized);
     }
 

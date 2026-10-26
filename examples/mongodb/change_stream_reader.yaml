@@ -14,7 +14,7 @@ flow:
         credentials_path: /etc/mongodb/credentials.json
         db_name: sales
 
-    - nats_jetstream_publisher:
+    - nats_jetstream_publish:
         name: publish_events
         credentials_path: /etc/nats/credentials.json
         subject: pubsub.data.mongocdc

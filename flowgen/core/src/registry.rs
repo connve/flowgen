@@ -60,6 +60,8 @@ pub struct ToolStep {
     pub name: String,
     /// Arguments the tool was called with.
     pub arguments: serde_json::Value,
+    /// `correlation_id` of the flow run the call started.
+    pub run: Option<String>,
 }
 
 /// Channels for delivering results back to a waiting response stream.
@@ -102,10 +104,19 @@ impl ResponseRegistry {
         }
     }
 
-    /// Registers a new correlation ID with its response channels.
-    pub async fn insert(&self, correlation_id: String, sender: ResponseSender) {
+    /// Registers response channels under `requested` when no entry holds it,
+    /// otherwise under a new UUID v7, and returns the correlation ID used.
+    pub async fn register(&self, requested: Option<String>, sender: ResponseSender) -> String {
         let mut entries = self.entries.lock().await;
-        entries.insert(correlation_id, sender);
+        let mut correlation_id = match requested {
+            Some(id) => id,
+            None => uuid::Uuid::now_v7().to_string(),
+        };
+        while entries.contains_key(&correlation_id) {
+            correlation_id = uuid::Uuid::now_v7().to_string();
+        }
+        entries.insert(correlation_id.clone(), sender);
+        correlation_id
     }
 
     /// Removes and returns the response sender for a correlation ID.
@@ -119,12 +130,11 @@ impl ResponseRegistry {
     /// Returns `true` if the progress was sent successfully, `false` if the
     /// correlation ID was not found or the receiver was dropped.
     pub async fn send_progress(&self, correlation_id: &str, progress: ProgressEvent) -> bool {
-        let entries = self.entries.lock().await;
-        if let Some(sender) = entries.get(correlation_id) {
-            sender.progress_tx.send(progress).await.is_ok()
-        } else {
-            false
-        }
+        let progress_tx = match self.entries.lock().await.get(correlation_id) {
+            Some(sender) => sender.progress_tx.clone(),
+            None => return false,
+        };
+        progress_tx.send(progress).await.is_ok()
     }
 }
 
@@ -132,21 +142,30 @@ impl ResponseRegistry {
 mod tests {
     use super::*;
 
+    fn progress(status: &str) -> ProgressEvent {
+        ProgressEvent {
+            task: "test_task".to_string(),
+            status: status.to_string(),
+            tool: None,
+        }
+    }
+
     #[tokio::test]
     async fn test_registry_insert_and_remove() {
         let registry = ResponseRegistry::new();
         let (progress_tx, _progress_rx) = mpsc::channel(16);
         let (result_tx, _result_rx) = oneshot::channel();
 
-        registry
-            .insert(
-                "corr-123".to_string(),
+        let id = registry
+            .register(
+                Some("corr-123".to_string()),
                 ResponseSender {
                     progress_tx,
                     result_tx: Some(result_tx),
                 },
             )
             .await;
+        assert_eq!(id, "corr-123");
 
         let sender = registry.remove("corr-123").await;
         assert!(sender.is_some());
@@ -156,14 +175,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_registration_without_a_requested_id_gets_a_new_uuid() {
+        let registry = ResponseRegistry::new();
+        let (progress_tx, _progress_rx) = mpsc::channel(1);
+
+        let id = registry
+            .register(
+                None,
+                ResponseSender {
+                    progress_tx,
+                    result_tx: None,
+                },
+            )
+            .await;
+
+        assert!(uuid::Uuid::parse_str(&id).is_ok());
+        assert!(registry.remove(&id).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_requested_id_already_registered_gets_a_new_one_and_the_first_entry_keeps_its_channel(
+    ) {
+        let registry = ResponseRegistry::new();
+        let (first_tx, mut first_rx) = mpsc::channel(2);
+        let (second_tx, mut second_rx) = mpsc::channel(2);
+        let first = registry
+            .register(
+                Some("run".to_string()),
+                ResponseSender {
+                    progress_tx: first_tx,
+                    result_tx: None,
+                },
+            )
+            .await;
+
+        let second = registry
+            .register(
+                Some("run".to_string()),
+                ResponseSender {
+                    progress_tx: second_tx,
+                    result_tx: None,
+                },
+            )
+            .await;
+        registry.send_progress(&first, progress("first")).await;
+        registry.send_progress(&second, progress("second")).await;
+
+        assert_eq!(first, "run");
+        assert_ne!(second, "run");
+        assert_eq!(first_rx.recv().await.unwrap().status, "first");
+        assert_eq!(second_rx.recv().await.unwrap().status, "second");
+    }
+
+    #[tokio::test]
+    async fn a_progress_send_waiting_on_a_full_channel_does_not_block_other_runs() {
+        let registry = ResponseRegistry::new();
+        let (slow_tx, _slow_rx) = mpsc::channel(1);
+        let (fast_tx, mut fast_rx) = mpsc::channel(1);
+        let slow = registry
+            .register(
+                None,
+                ResponseSender {
+                    progress_tx: slow_tx,
+                    result_tx: None,
+                },
+            )
+            .await;
+        let fast = registry
+            .register(
+                None,
+                ResponseSender {
+                    progress_tx: fast_tx,
+                    result_tx: None,
+                },
+            )
+            .await;
+        registry.send_progress(&slow, progress("fills")).await;
+        let blocked = {
+            let registry = registry.clone();
+            tokio::spawn(async move { registry.send_progress(&slow, progress("waits")).await })
+        };
+        tokio::task::yield_now().await;
+
+        let sent = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            registry.send_progress(&fast, progress("passes")),
+        )
+        .await;
+
+        assert_eq!(sent.ok(), Some(true));
+        assert_eq!(fast_rx.recv().await.unwrap().status, "passes");
+        assert!(!blocked.is_finished());
+        blocked.abort();
+    }
+
+    #[tokio::test]
     async fn test_registry_send_progress() {
         let registry = ResponseRegistry::new();
         let (progress_tx, mut progress_rx) = mpsc::channel(16);
         let (result_tx, _result_rx) = oneshot::channel();
 
         registry
-            .insert(
-                "corr-456".to_string(),
+            .register(
+                Some("corr-456".to_string()),
                 ResponseSender {
                     progress_tx,
                     result_tx: Some(result_tx),
@@ -211,8 +325,8 @@ mod tests {
         let (result_tx, result_rx) = oneshot::channel();
 
         registry
-            .insert(
-                "corr-789".to_string(),
+            .register(
+                Some("corr-789".to_string()),
                 ResponseSender {
                     progress_tx,
                     result_tx: Some(result_tx),

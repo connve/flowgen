@@ -74,6 +74,8 @@ Format: [JSON](https://docs.rs/serde_json/latest/serde_json/enum.Value.html)
 |---|---|---|
 | `arguments` | object | Tool input parameters from the MCP `tools/call` request, structured per the configured `input_schema`. |
 
+The event's `correlation_id` meta is the UUID the request's `_meta` gives as `correlation_id`, or a new one. Task logs carry it, so a caller that names the run can find its records in `/api/logs`. `ai_completion` names each MCP tool call this way.
+
 ## `mcp_resource`
 
 Publishes curated read-only content. The content is served by `resources/read` on request; concrete resources resolve once at task init, while templated URIs defer rendering to per-read so `{placeholder}` bindings drive distinct output.

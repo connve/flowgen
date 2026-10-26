@@ -10,9 +10,9 @@ kubectl = "1.34"
 description = "Enable the pre-commit hook and install the MSRV toolchain"
 run = [
   "git config --local core.hooksPath .githooks",
-  "rustup toolchain install 1.88 --profile minimal",
+  "rustup toolchain install 1.97.1 --profile minimal",
 ]
 
 [tasks.msrv]
 description = "Check the workspace builds with the minimum supported Rust version"
-run = "cargo +1.88 check --workspace --all-targets"
+run = "cargo +1.97.1 check --workspace --all-targets"

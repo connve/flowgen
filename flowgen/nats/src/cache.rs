@@ -16,7 +16,7 @@ const DEFAULT_HISTORY: i64 = 64;
 /// underlying JetStream stream (`allow_message_ttl`), which makes per-key
 /// TTLs work at all. One hour is plenty for flowgen's usage — we do not
 /// have watchers that need to observe delete events after long disconnects.
-const DEFAULT_TOMBSTONE_TTL: Duration = Duration::from_secs(3600);
+pub(crate) const DEFAULT_TOMBSTONE_TTL: Duration = Duration::from_secs(3600);
 
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
