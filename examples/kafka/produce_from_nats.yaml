@@ -10,7 +10,7 @@ flow:
     tags: ["kafka", "nats", "producer", "example"]
   tasks:
 
-    - nats_jetstream_subscriber:
+    - nats_jetstream_subscribe:
         name: consume_events
         credentials_path: /etc/nats/credentials.json
         url: "{{env.NATS_URL}}"

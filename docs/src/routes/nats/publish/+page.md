@@ -1,11 +1,11 @@
-# NATS JetStream Publisher
+# NATS JetStream Publish
 
 Publishes events to a NATS JetStream subject.
 
 ## Configuration
 
 ```yaml
-- nats_jetstream_publisher:
+- nats_jetstream_publish:
     name: publish_results
     credentials_path: /etc/nats/credentials.json
     url: "{{env.NATS_URL}}"
@@ -21,7 +21,7 @@ Publishes events to a NATS JetStream subject.
 | `url` | string | `localhost:4222` | NATS server URL. |
 | `subject` | string | required | Subject to publish to. Supports templating. |
 | `msg_id` | string | | NATS message ID for server-side deduplication. Can be a static string or templated from event data (e.g. `"{{event.data.record_id}}"`, `"fixed-key"`). Overrides `event.id` as the `Nats-Msg-Id` header. Requires `duplicate_window` on the stream to take effect. |
-| `stream` | object | | Optional stream configuration (same as subscriber). |
+| `stream` | object | | Optional stream configuration (same as `nats_jetstream_subscribe`). |
 | `stream.name` | string | required | Stream name. |
 | `stream.subjects` | list | `[]` | Subject patterns for the stream. If empty when creating, defaults to `">"` (all subjects). |
 | `stream.create_or_update` | bool | `false` | Create the stream if it does not exist, or update it to merge subjects and inherit limits. |
@@ -64,7 +64,7 @@ Using `max_messages: 1` on a stream with multiple subjects means the entire stre
 If two tasks share a stream and one task sets `max_messages_per_subject`, the other task's subjects inherit the same cap through `create_or_update`:
 
 ```yaml
-- nats_jetstream_publisher:
+- nats_jetstream_publish:
     name: publish_created
     credentials_path: /etc/nats/credentials.json
     subject: "orders.created"
@@ -76,7 +76,7 @@ If two tasks share a stream and one task sets `max_messages_per_subject`, the ot
       discard: new
       max_messages_per_subject: 1
 
-- nats_jetstream_publisher:
+- nats_jetstream_publish:
     name: publish_updated
     credentials_path: /etc/nats/credentials.json
     subject: "orders.updated"
@@ -112,7 +112,7 @@ With this flag, a second publish to the same subject is rejected and the task em
 The safest way to avoid accidental cross-task interference is to use a separate stream for each task:
 
 ```yaml
-- nats_jetstream_publisher:
+- nats_jetstream_publish:
     name: publish_created
     subject: "orders.created"
     stream:
@@ -128,7 +128,7 @@ The safest way to avoid accidental cross-task interference is to use a separate 
 ## Example
 
 ```yaml
-- nats_jetstream_publisher:
+- nats_jetstream_publish:
     name: publish_orders
     credentials_path: /etc/nats/credentials.json
     subject: "orders.processed.{{event.data.region}}"

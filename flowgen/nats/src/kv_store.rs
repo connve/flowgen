@@ -84,6 +84,11 @@ pub struct KvStore {
     /// still appear in `keys`.
     #[serde(default)]
     pub include_values: bool,
+    /// For `put`: how long the value lives before NATS removes it, e.g.
+    /// `"30d"`. Needs a bucket with per-key TTL, which NATS 2.11+ supports;
+    /// the task fails at start when an existing bucket does not allow it.
+    #[serde(default, with = "humantime_serde")]
+    pub ttl: Option<std::time::Duration>,
     /// Optional list of upstream task names this task depends on.
     #[serde(default)]
     pub depends_on: Option<Vec<String>>,
@@ -201,6 +206,15 @@ pub enum Error {
         #[source]
         source: async_nats::jetstream::kv::PutError,
     },
+    #[error("KV put with TTL error: {source}")]
+    KvPutWithTtl {
+        #[source]
+        source: async_nats::jetstream::context::PublishError,
+    },
+    #[error("Invalid key '{key}': KV keys use only letters, digits and '-/_=.' and cannot start or end with '.'")]
+    InvalidKey { key: String },
+    #[error("KV bucket '{bucket}' does not allow per-key TTL, which `ttl` needs; enable per-message TTL on the bucket (NATS 2.11+) or remove `ttl`")]
+    TtlNotAllowed { bucket: String },
     #[error("KV bucket creation error: {source}")]
     KvBucketCreate {
         #[source]
@@ -281,20 +295,39 @@ pub enum Error {
 impl Error {
     /// Whether retrying the same event cannot succeed.
     fn is_permanent(&self) -> bool {
-        matches!(
-            self,
+        match self {
+            Error::KvPutWithTtl { source } => rejects_ttl(source),
             Error::MissingKey { .. }
-                | Error::MissingContent
-                | Error::NotJson { .. }
-                | Error::InvalidEntries { .. }
-                | Error::MissingKeyPrefix
-                | Error::EmptyPrune { .. }
-                | Error::UnsafePrunePrefix { .. }
-                | Error::InvalidEntryKey { .. }
-                | Error::ConfigRender { .. }
-                | Error::EventBuilder { .. }
-                | Error::SerdeJson { .. }
-        )
+            | Error::MissingContent
+            | Error::NotJson { .. }
+            | Error::InvalidEntries { .. }
+            | Error::MissingKeyPrefix
+            | Error::EmptyPrune { .. }
+            | Error::UnsafePrunePrefix { .. }
+            | Error::InvalidEntryKey { .. }
+            | Error::InvalidKey { .. }
+            | Error::TtlNotAllowed { .. }
+            | Error::ConfigRender { .. }
+            | Error::EventBuilder { .. }
+            | Error::SerdeJson { .. } => true,
+            _ => false,
+        }
+    }
+}
+
+/// Whether the server refused the write because of its `Nats-TTL` header.
+fn rejects_ttl(error: &async_nats::jetstream::context::PublishError) -> bool {
+    use std::error::Error as _;
+    match error
+        .source()
+        .and_then(|source| source.downcast_ref::<async_nats::jetstream::Error>())
+    {
+        Some(error) => matches!(
+            error.error_code(),
+            async_nats::jetstream::ErrorCode::MESSAGE_TTL_DISABLED
+                | async_nats::jetstream::ErrorCode::MESSAGE_TTL_INVALID
+        ),
+        None => false,
     }
 }
 
@@ -375,6 +408,7 @@ where
 pub struct EventHandler {
     config: Arc<KvStore>,
     store: async_nats::jetstream::kv::Store,
+    jetstream: async_nats::jetstream::Context,
     tx: Option<Sender<Event>>,
     task_id: usize,
     task_type: &'static str,
@@ -470,11 +504,7 @@ impl EventHandler {
             None => return Err(Error::MissingContent),
         };
 
-        let revision = self
-            .store
-            .put(key, value)
-            .await
-            .map_err(|source| Error::KvPut { source })?;
+        let revision = self.put_value(key, value).await?;
 
         let result = PutResult {
             key: key.to_string(),
@@ -511,10 +541,7 @@ impl EventHandler {
             match current {
                 Some(current) if current.as_ref() == value.as_bytes() => result.unchanged += 1,
                 _ => {
-                    self.store
-                        .put(key.as_str(), bytes::Bytes::from(value))
-                        .await
-                        .map_err(|source| Error::KvPut { source })?;
+                    self.put_value(&key, bytes::Bytes::from(value)).await?;
                     result.put.push(key.clone());
                 }
             }
@@ -536,6 +563,49 @@ impl EventHandler {
             }
         }
         serde_json::to_value(&result).map_err(|source| Error::SerdeJson { source })
+    }
+
+    async fn put_value(&self, key: &str, value: bytes::Bytes) -> Result<u64, Error> {
+        match self.config.ttl {
+            None => self
+                .store
+                .put(key, value)
+                .await
+                .map_err(|source| Error::KvPut { source }),
+            Some(ttl) => self.put_with_ttl(key, value, ttl).await,
+        }
+    }
+
+    /// The KV API has no put with a TTL, so this publishes to the key's subject
+    /// with the `Nats-TTL` header, as the cache does.
+    async fn put_with_ttl(
+        &self,
+        key: &str,
+        value: bytes::Bytes,
+        ttl: std::time::Duration,
+    ) -> Result<u64, Error> {
+        if !is_valid_key(key) {
+            return Err(Error::InvalidKey {
+                key: key.to_string(),
+            });
+        }
+        let prefix = match &self.store.put_prefix {
+            Some(prefix) => prefix,
+            None => &self.store.prefix,
+        };
+        let mut headers = async_nats::HeaderMap::new();
+        headers.insert(
+            async_nats::header::NATS_MESSAGE_TTL,
+            async_nats::HeaderValue::from(ttl.as_secs().max(1)),
+        );
+        let ack = self
+            .jetstream
+            .publish_with_headers(format!("{prefix}{key}"), headers, value)
+            .await
+            .map_err(|source| Error::KvPutWithTtl { source })?
+            .await
+            .map_err(|source| Error::KvPutWithTtl { source })?;
+        Ok(ack.sequence)
     }
 
     async fn keys_under(&self, prefix: &str) -> Result<Vec<String>, Error> {
@@ -639,7 +709,8 @@ impl flowgen_core::task::runner::Runner for Processor {
     type EventHandler = EventHandler;
 
     /// Opens the bucket when it exists and creates it only when missing, so a
-    /// bucket created elsewhere keeps its settings.
+    /// bucket created elsewhere keeps its settings; with `ttl`, that bucket
+    /// must allow per-key TTL.
     async fn init(&self) -> Result<EventHandler, Error> {
         let config = self
             .config
@@ -684,15 +755,22 @@ impl flowgen_core::task::runner::Runner for Processor {
             Err(_) => jetstream
                 .create_key_value(async_nats::jetstream::kv::Config {
                     bucket: config.bucket.clone(),
+                    limit_markers: config.ttl.map(|_| crate::cache::DEFAULT_TOMBSTONE_TTL),
                     ..Default::default()
                 })
                 .await
                 .map_err(|source| Error::KvBucketCreate { source })?,
         };
+        if config.ttl.is_some() && !store.stream.cached_info().config.allow_message_ttl {
+            return Err(Error::TtlNotAllowed {
+                bucket: config.bucket,
+            });
+        }
 
         Ok(EventHandler {
             config: Arc::clone(&self.config),
             store,
+            jetstream,
             tx: self.tx.clone(),
             task_id: self.task_id,
             task_type: self.task_type,
@@ -713,7 +791,10 @@ impl flowgen_core::task::runner::Runner for Processor {
                     Ok(handler) => Ok(handler),
                     Err(e) => {
                         error!(error = %e, "Failed to initialize NATS KV store processor");
-                        Err(tokio_retry::RetryError::transient(e))
+                        match e.is_permanent() {
+                            true => Err(tokio_retry::RetryError::permanent(e)),
+                            false => Err(tokio_retry::RetryError::transient(e)),
+                        }
                     }
                 }
             },
@@ -915,6 +996,7 @@ mod tests {
             prune: false,
             allow_empty: false,
             include_values: false,
+            ttl: Some(std::time::Duration::from_secs(3600)),
             depends_on: Some(vec!["a".to_string()]),
             retry: None,
             max_in_flight: None,
@@ -1230,9 +1312,30 @@ mod tests {
             Error::InvalidEntries {
                 source: serde_json::from_str::<Entries>("{}").unwrap_err(),
             },
+            Error::InvalidKey {
+                key: "a b".to_string(),
+            },
+            Error::TtlNotAllowed {
+                bucket: "b".to_string(),
+            },
+            server_rejected_put(async_nats::jetstream::ErrorCode::MESSAGE_TTL_DISABLED),
+            server_rejected_put(async_nats::jetstream::ErrorCode::MESSAGE_TTL_INVALID),
         ];
         for error in permanent {
             assert!(error.is_permanent(), "{error} should be permanent");
+        }
+    }
+
+    fn server_rejected_put(code: async_nats::jetstream::ErrorCode) -> Error {
+        let response = format!(
+            r#"{{"code":400,"err_code":{},"description":"rejected"}}"#,
+            code.0
+        );
+        Error::KvPutWithTtl {
+            source: async_nats::jetstream::context::PublishError::with_source(
+                async_nats::jetstream::context::PublishErrorKind::Other,
+                serde_json::from_str::<async_nats::jetstream::Error>(&response).unwrap(),
+            ),
         }
     }
 
@@ -1249,6 +1352,12 @@ mod tests {
                     async_nats::jetstream::kv::WatcherErrorKind::Consumer,
                 ),
             },
+            Error::KvPutWithTtl {
+                source: async_nats::jetstream::context::PublishError::new(
+                    async_nats::jetstream::context::PublishErrorKind::TimedOut,
+                ),
+            },
+            server_rejected_put(async_nats::jetstream::ErrorCode::STREAM_STORE_FAILED),
         ];
         for error in transient {
             assert!(!error.is_permanent(), "{error} should be retried");

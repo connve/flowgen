@@ -35,7 +35,7 @@ Upsert records into Salesforce using the Composite SObject Collections API. Each
 
 <Mermaid chart={`
 graph LR
-  NATS[(NATS)] --> SUB[nats_jetstream_subscriber]
+  NATS[(NATS)] --> SUB[nats_jetstream_subscribe]
   SUB --> UPSERT[salesforce_restapi_composite]
   UPSERT --> SF[(Salesforce)]
 `} />
@@ -44,7 +44,7 @@ graph LR
 flow:
   tasks:
 
-    - nats_jetstream_subscriber:
+    - nats_jetstream_subscribe:
         name: start_subscription
         credentials_path: /etc/nats/credentials.json
         url: "{{env.NATS_URL}}"
@@ -108,8 +108,8 @@ Publish platform events to Salesforce to trigger automation — Salesforce Flows
 
 <Mermaid chart={`
 graph LR
-  NATS[(NATS)] --> SUB[nats_jetstream_subscriber]
-  SUB --> PUB[salesforce_pubsubapi_publisher]
+  NATS[(NATS)] --> SUB[nats_jetstream_subscribe]
+  SUB --> PUB[salesforce_pubsubapi_publish]
   PUB --> SF[(Salesforce Pub/Sub)]
 `} />
 
@@ -117,7 +117,7 @@ graph LR
 flow:
   tasks:
 
-    - nats_jetstream_subscriber:
+    - nats_jetstream_subscribe:
         name: start_subscription
         credentials_path: /etc/nats/credentials.json
         url: "{{env.NATS_URL}}"
@@ -139,7 +139,7 @@ flow:
           - "1m"
           - "5m"
 
-    - salesforce_pubsubapi_publisher:
+    - salesforce_pubsubapi_publish:
         name: publish_order_status
         credentials_path: /etc/sfdc/credentials.json
         topic: /event/OrderStatus__e
@@ -154,7 +154,7 @@ The publisher sends the event payload to the specified platform event topic. The
 Instead of `from_event: true`, you can map fields explicitly with template expressions:
 
 ```yaml
-    - salesforce_pubsubapi_publisher:
+    - salesforce_pubsubapi_publish:
         name: publish_order_status
         credentials_path: /etc/sfdc/credentials.json
         topic: /event/OrderStatus__e

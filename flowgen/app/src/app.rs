@@ -1359,6 +1359,7 @@ impl App {
                         }
                         None => None,
                     },
+                    replies: Default::default(),
                 };
                 let web_handle = tokio::spawn(async move {
                     if let Err(source) = crate::web::start_web_server(port, &path, web_state).await

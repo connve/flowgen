@@ -11,10 +11,10 @@ use tokio::sync::{
 };
 use tracing::error;
 
-/// `nats_jetstream_publisher` task config.
+/// `nats_jetstream_publish` task config.
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, TaskConfig)]
 #[serde(transparent)]
-pub struct Publisher(pub super::config::Config);
+pub struct Publish(pub super::config::Config);
 
 /// Serializable representation of a NATS JetStream publish acknowledgment.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]

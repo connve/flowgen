@@ -125,5 +125,5 @@ Flowgen discovers all YAML files in the configured flows directory and starts pr
 ## Next steps
 
 - Learn about [Flows](/docs/flowgen/concepts/flows) and how tasks connect.
-- Explore [NATS JetStream](/docs/flowgen/nats/subscriber) for durable message consumption.
+- Explore [NATS JetStream](/docs/flowgen/nats/subscribe) for durable message consumption.
 - See [Script (Rhai)](/docs/flowgen/core/script) for the full scripting API.

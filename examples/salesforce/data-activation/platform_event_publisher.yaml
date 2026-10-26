@@ -14,7 +14,7 @@ flow:
     tags: ["salesforce", "platform-events", "nats", "pubsub", "example"]
   tasks:
 
-    - nats_jetstream_subscriber:
+    - nats_jetstream_subscribe:
         name: start_subscription
         credentials_path: /etc/nats/credentials.json
         url: "{{env.NATS_URL}}"
@@ -36,7 +36,7 @@ flow:
           - "1m"
           - "5m"
 
-    - salesforce_pubsubapi_publisher:
+    - salesforce_pubsubapi_publish:
         name: publish_order_status
         credentials_path: /etc/sfdc/credentials.json
         topic: /event/OrderStatus__e

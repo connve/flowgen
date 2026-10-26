@@ -5,6 +5,8 @@
 //! management. It coordinates multiple processing flows and manages shared
 //! resources like HTTP servers and caches.
 
+/// Agent replies the server writes into Agents conversations.
+pub mod agent_reply;
 /// Application lifecycle and flow orchestration.
 pub mod app;
 /// Workspace change proposals and their publishing.

@@ -1,0 +1,3 @@
+/nats/subscriber /docs/flowgen/nats/subscribe 301
+/nats/publisher /docs/flowgen/nats/publish 301
+/concepts/sandboxing /docs/flowgen/ai/completion 301

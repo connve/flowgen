@@ -9,6 +9,7 @@
 	import { auth } from '$lib/auth.svelte';
 	import { actor, ownLabel } from '$lib/changes';
 	import { m } from '$lib/paraglide/messages.js';
+	import { pageTitle } from '$lib/pageTitle';
 	import { MINUTE, SECOND, formatAbsolute, formatRelative } from '$lib/time';
 	import type { PageProps } from './$types';
 
@@ -147,6 +148,10 @@
 		return '';
 	}
 </script>
+
+<svelte:head>
+	<title>{pageTitle(data.change?.title, m.changes_breadcrumb())}</title>
+</svelte:head>
 
 <div class="flex min-h-0 flex-1 flex-col">
 	<div class="shrink-0 border-b border-base-200 bg-base-100 px-6 pb-4 pt-6">

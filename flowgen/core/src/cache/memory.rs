@@ -132,16 +132,20 @@ impl super::Cache for MemoryCache {
         _ttl_secs: Option<u64>,
     ) -> Result<u64, super::Error> {
         match self.data.entry(key.to_string()) {
-            dashmap::Entry::Occupied(_) => Err(super::CacheError::AlreadyExists),
+            dashmap::Entry::Occupied(_) => return Err(super::CacheError::AlreadyExists),
             dashmap::Entry::Vacant(entry) => {
                 entry.insert(CacheEntry {
-                    value,
+                    value: value.clone(),
                     revision: 1,
                     history: VecDeque::new(),
                 });
-                Ok(1)
             }
         }
+        self.broadcast(super::WatchEvent::Put {
+            key: key.to_string(),
+            value,
+        });
+        Ok(1)
     }
 
     async fn update(
@@ -152,7 +156,7 @@ impl super::Cache for MemoryCache {
         _ttl_secs: Option<u64>,
     ) -> Result<u64, super::Error> {
         let history_cap = self.history;
-        match self.data.entry(key.to_string()) {
+        let new_revision = match self.data.entry(key.to_string()) {
             dashmap::Entry::Occupied(mut entry) => {
                 let current_revision = entry.get().revision;
                 if current_revision != expected_revision {
@@ -164,12 +168,17 @@ impl super::Cache for MemoryCache {
                 let new_revision = current_revision + 1;
                 let previous = entry.get().value.clone();
                 push_history(&mut entry.get_mut().history, previous, history_cap);
-                entry.get_mut().value = value;
+                entry.get_mut().value = value.clone();
                 entry.get_mut().revision = new_revision;
-                Ok(new_revision)
+                new_revision
             }
-            dashmap::Entry::Vacant(_) => Err(super::CacheError::NotFound),
-        }
+            dashmap::Entry::Vacant(_) => return Err(super::CacheError::NotFound),
+        };
+        self.broadcast(super::WatchEvent::Put {
+            key: key.to_string(),
+            value,
+        });
+        Ok(new_revision)
     }
 
     async fn get_with_revision(&self, key: &str) -> Result<Option<(Bytes, u64)>, super::Error> {
@@ -194,10 +203,13 @@ impl super::Cache for MemoryCache {
                     });
                 }
                 entry.remove();
-                Ok(())
             }
-            dashmap::Entry::Vacant(_) => Err(super::CacheError::NotFound),
+            dashmap::Entry::Vacant(_) => return Err(super::CacheError::NotFound),
         }
+        self.broadcast(super::WatchEvent::Delete {
+            key: key.to_string(),
+        });
+        Ok(())
     }
 
     async fn get_revision(&self, key: &str) -> Result<Option<u64>, super::Error> {
@@ -412,6 +424,36 @@ mod tests {
             }
             _ => panic!("Expected Delete event"),
         }
+    }
+
+    #[tokio::test]
+    async fn watchers_see_creates_updates_and_revision_deletes() {
+        let cache = MemoryCache::new();
+        let mut stream = cache.watch("test.", false).await.unwrap();
+
+        let revision = cache
+            .create("test.a", Bytes::from("1"), None)
+            .await
+            .unwrap();
+        let revision = cache
+            .update("test.a", Bytes::from("2"), revision, None)
+            .await
+            .unwrap();
+        cache
+            .delete_with_revision("test.a", revision)
+            .await
+            .unwrap();
+
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            seen.push(match stream.next().await.unwrap().unwrap() {
+                crate::cache::WatchEvent::Put { value, .. } => {
+                    String::from_utf8(value.to_vec()).unwrap()
+                }
+                crate::cache::WatchEvent::Delete { .. } => "deleted".to_string(),
+            });
+        }
+        assert_eq!(seen, vec!["1", "2", "deleted"]);
     }
 
     #[tokio::test]

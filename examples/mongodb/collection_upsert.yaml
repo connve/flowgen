@@ -10,7 +10,7 @@ flow:
     tags: ["mongo", "upsert", "example"]
   tasks:
 
-    - nats_jetstream_subscriber:
+    - nats_jetstream_subscribe:
         name: consume_events
         credentials_path: /etc/nats/credentials.json
         url: "127.0.0.1:4222"
@@ -36,7 +36,7 @@ flow:
         filter:
           email: "ada@example.com"
 
-    - nats_jetstream_publisher:
+    - nats_jetstream_publish:
         name: publish_upsert_results
         credentials_path: /etc/nats/credentials.json
         subject: pubsub.data.mongo.upserts

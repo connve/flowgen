@@ -31,13 +31,6 @@ pub mod http_server;
 pub mod identity;
 /// Peer discovery and flow distribution via consistent hashing.
 pub mod peer;
-/// NsJail sandbox for secure script execution.
-pub mod nsjail {
-    /// Sandbox executor using nsjail for process isolation.
-    pub mod sandbox;
-
-    pub use sandbox::{Error, SandboxConfig, SandboxExecutor, SandboxResult};
-}
 /// Response registry for correlating requests with pipeline results.
 pub mod registry;
 /// Resource loading system for external assets.

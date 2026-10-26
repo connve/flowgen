@@ -16,12 +16,15 @@ serde_json = { workspace = true }
 futures-util = { workspace = true }
 flowgen_core = { path = "../core" }
 flowgen_mcp = { path = "../mcp" }
-tokio = { workspace = true, features = ["fs", "process", "io-util"] }
+tokio = { workspace = true, features = ["fs", "process", "io-util", "net"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }
 async-trait = { workspace = true }
 rig-core = { workspace = true }
+rig-agent = { workspace = true }
+rig-reqwest = { workspace = true }
+rig-rmcp = { workspace = true }
 rig-vertexai = { workspace = true }
 rmcp = { workspace = true }
 tokio-retry = { workspace = true }
@@ -37,6 +40,7 @@ tokio-util = { workspace = true }
 http = { workspace = true }
 reqwest = { workspace = true }
 secrecy = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
 bytes = { workspace = true }

@@ -12,8 +12,8 @@ Subscribers are source tasks that ingest data into the flow. They connect to ext
 
 | Task | Description |
 |---|---|
-| `nats_jetstream_subscriber` | Consumes messages from a NATS JetStream stream with durable consumers. |
-| `salesforce_pubsubapi_subscriber` | Subscribes to Salesforce Platform Events via gRPC. |
+| `nats_jetstream_subscribe` | Consumes messages from a NATS JetStream stream with durable consumers. |
+| `salesforce_pubsubapi_subscribe` | Subscribes to Salesforce Platform Events via gRPC. |
 | `mongodb_change_stream` | Watches a MongoDB database for real-time document changes. |
 | `kafka_subscribe` | Consumes every partition of a Kafka topic. |
 | `http_endpoint` | Listens for incoming HTTP requests and converts them to events. |
@@ -34,9 +34,9 @@ Processors receive events, do something with them, and emit events to the next t
 | `log` | Logs event data for debugging. |
 | `http_request` | Makes outbound HTTP calls. |
 | `html_scrape` | Extracts rows from HTML with CSS selectors. |
-| `nats_jetstream_publisher` | Publishes events to a NATS JetStream subject. |
+| `nats_jetstream_publish` | Publishes events to a NATS JetStream subject. |
 | `nats_kv_store` | Read, write, list, and delete keys in a NATS KV bucket. |
-| `salesforce_pubsubapi_publisher` | Publishes Salesforce Platform Events. |
+| `salesforce_pubsubapi_publish` | Publishes Salesforce Platform Events. |
 | `salesforce_restapi_sobject` | Salesforce CRUD operations (create, get, update, upsert, delete). |
 | `salesforce_restapi_composite` | Batch Salesforce operations. |
 | `salesforce_bulkapi_query_job` | Salesforce Bulk API query jobs. |

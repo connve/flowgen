@@ -140,9 +140,9 @@ http_server:
 #   enabled: true
 #   port: 8080
 #   path: "/flowgen"
-#   # Base URL the built-in Agents chat proxies to. Omit to target the
-#   # same-process AI gateway on loopback; set when the gateway runs in a
-#   # separate process or pod.
+#   # Base URL of the AI gateway the Agents tab replies through. Omit to
+#   # target the same-process AI gateway on loopback; set when the gateway
+#   # runs in a separate process or pod.
 #   ai_gateway_url: "http://127.0.0.1:3002/v1"
 #   # The Agents tab and /api/agents. Omit to hide the tab.
 #   agents:
@@ -157,9 +157,17 @@ http_server:
 #     # provider must accept the token. Replaces any Authorization header in
 #     # web.headers.
 #     # on_behalf_of_user: true
-#   # HTTP headers sent with every outbound request the web server makes
-#   # (currently the Agents chat proxy to the AI gateway). Identifies this
-#   # web server to llm_proxy/mcp_tool `headers` scoping.
+#     # Cache key prefix for conversations, read state and folders. A flow
+#     # opens a conversation under `<cache_prefix>.conversations.`.
+#     # cache_prefix: agents
+#     # How often a reply in progress is saved (default 3s).
+#     # reply_save_interval: 3s
+#     # How long a reply may go without any output from the AI gateway
+#     # before it fails (default 10m).
+#     # reply_idle_timeout: 10m
+#   # HTTP headers sent with every request the web server makes to the AI
+#   # gateway for the Agents tab. Identifies this web server to
+#   # llm_proxy/mcp_tool `headers` scoping.
 #   headers:
 #     X-Flowgen-Client: flowgen-ui
 #
@@ -198,6 +206,9 @@ http_server:
 #   # session: {"api_keys": [{"name": "operator-agent", "key": "..."}]}.
 #   # Keys can read and propose changes, never approve them.
 #   # api_credentials_path: "/etc/flowgen/credentials/api.json"
+#   # Who may show the web UI in a frame (Content-Security-Policy
+#   # frame-ancestors). Defaults to the UI's own origin.
+#   # frame_ancestors: ["'self'", "https://console.example.com"]
 #   # Change proposals for flows and resources, approved in the web UI.
 #   # authoring:
 #   #   enabled: true

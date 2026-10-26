@@ -7,6 +7,7 @@
 	import { activitiesFor, releaseFlowSubscription } from '$lib/activityStore.svelte';
 	import { editUrl, flowFilePath, targetOf } from '$lib/changes';
 	import { m } from '$lib/paraglide/messages.js';
+	import { pageTitle } from '$lib/pageTitle';
 	import type { PageProps } from './$types';
 
 	let { data }: PageProps = $props();
@@ -27,7 +28,7 @@
 </script>
 
 <svelte:head>
-	<title>{m.flow_page_title({ name: data.detail.display_name ?? data.identity })}</title>
+	<title>{pageTitle(data.detail.display_name ?? data.identity, m.nav_flows())}</title>
 </svelte:head>
 
 <section class="flex h-[calc(100vh-4rem)] flex-col p-6">

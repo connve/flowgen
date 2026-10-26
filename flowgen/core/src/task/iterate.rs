@@ -6,13 +6,18 @@ use crate::event::{
     SharedCompletionTx,
 };
 use crate::task::TaskConfig;
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::oneshot;
 use tracing::error;
+
+/// Meta key with the number of elements in the array an event came from.
+pub const ITERATE_COUNT_META: &str = "iterate_count";
+
+/// Meta key with the identity of the array an event came from, unique per fanned-out array.
+pub const ITERATE_ID_META: &str = "iterate_id";
 
 /// Configuration for loop processor tasks that iterate over JSON arrays.
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, TaskConfig)]
@@ -85,48 +90,29 @@ pub enum Error {
 /// finishes, the fan-in emits exactly that many upstream signals so the
 /// original source's leaf-count contract is satisfied.
 ///
-/// Per-element errors are not propagated upstream: failed downstream tasks
-/// emit error events of their own, and the source falls back to its
-/// acknowledgement timeout when no completion arrives. Missing per-element
-/// signals are treated as success to avoid deadlocking the source on buggy
-/// downstream handlers.
+/// The source gets the payload of the last element to finish with one.
+/// Elements that finish without a payload or with an error don't change it,
+/// so per-element errors aren't passed on.
 fn spawn_fan_in_completion(
     upstream: SharedCompletionTx,
     per_event_receivers: Vec<CompletionRx>,
     upstream_leaf_share: usize,
 ) {
     tokio::spawn(async move {
-        let total = per_event_receivers.len();
-        let remaining = Arc::new(AtomicUsize::new(total));
-        let (done_tx, done_rx) = oneshot::channel::<()>();
-        let done_tx = Arc::new(std::sync::Mutex::new(Some(done_tx)));
-
-        for rx in per_event_receivers {
-            let remaining = Arc::clone(&remaining);
-            let done_tx = Arc::clone(&done_tx);
-            tokio::spawn(async move {
-                // Drop the result regardless of outcome; errors flow as
-                // downstream events, not through completion channels.
-                let _ = rx.await;
-                if remaining.fetch_sub(1, Ordering::SeqCst) == 1 {
-                    if let Ok(mut guard) = done_tx.lock() {
-                        if let Some(tx) = guard.take() {
-                            tx.send(()).ok();
-                        }
-                    }
-                }
-            });
+        let mut pending: FuturesUnordered<CompletionRx> = per_event_receivers.into_iter().collect();
+        let mut payload = None;
+        while let Some(result) = pending.next().await {
+            if let Ok(Ok(Some(value))) = result {
+                payload = Some(value);
+            }
         }
-
-        // Wait for all per-event completions to report in.
-        done_rx.await.ok();
 
         // Emit one upstream signal per leaf in iterate's subtree. The source
         // sized its completion channel for the full leaf set; collapsing the
         // entire subtree into a single signal would leave the source waiting
         // for the rest forever.
         for _ in 0..upstream_leaf_share.max(1) {
-            upstream.signal_completion(None);
+            upstream.signal_completion(payload.clone());
         }
     });
 }
@@ -207,12 +193,8 @@ impl crate::task::runner::Handler for EventHandler {
                 if let Some(arc) = completion_tx_arc.as_ref() {
                     let upstream_leaf_share = self.task_context.leaf_count.max(1);
                     let payload = event.data_as_json().ok();
-                    // Send the payload on the first signal; remaining signals
-                    // carry no payload since only the last one delivered to
-                    // the source survives anyway.
-                    arc.signal_completion(payload);
-                    for _ in 1..upstream_leaf_share {
-                        arc.signal_completion(None);
+                    for _ in 0..upstream_leaf_share {
+                        arc.signal_completion(payload.clone());
                     }
                 }
                 return Ok(());
@@ -237,6 +219,7 @@ impl crate::task::runner::Handler for EventHandler {
             // are handled correctly. See spawn_fan_in_completion for details.
             let downstream_leaves = self.task_context.leaf_count.max(1);
             let mut per_event_receivers = Vec::with_capacity(array_len);
+            let array_id = uuid::Uuid::now_v7().to_string();
 
             for element in array.iter() {
                 if self.task_context.cancellation_token.is_cancelled() {
@@ -251,6 +234,9 @@ impl crate::task::runner::Handler for EventHandler {
                     .build()
                     .map_err(|source| Error::EventBuilder { source })?;
 
+                let meta = e.meta.get_or_insert_with(Default::default);
+                meta.insert(ITERATE_COUNT_META.to_string(), Value::from(array_len));
+                meta.insert(ITERATE_ID_META.to_string(), Value::from(array_id.as_str()));
                 let (per_state, per_rx) = new_completion_channel(downstream_leaves);
                 e.completion_tx = Some(per_state);
                 per_event_receivers.push(per_rx);
@@ -725,6 +711,124 @@ mod tests {
             result.is_ok(),
             "expected Ok aggregate completion, got {result:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_event_handler_passes_the_last_result_to_the_source() {
+        let config = Arc::new(Iterate {
+            name: "test".to_string(),
+            iterate_key: None,
+            depends_on: None,
+            retry: None,
+            max_in_flight: None,
+        });
+        let (tx, mut rx) = mpsc::channel(100);
+        let event_handler = EventHandler {
+            config,
+            tx: Some(tx),
+            task_id: 1,
+            task_type: "test",
+            task_context: create_mock_task_context(),
+        };
+        let (upstream_state, upstream_rx) = new_completion_channel(1);
+        let input_event = Event {
+            data: EventData::Json(json!([{"id": 1}, {"id": 2}])),
+            subject: "input.subject".to_string(),
+            task_id: 0,
+            id: None,
+            timestamp: 123456789,
+            task_type: "test",
+            meta: None,
+            error: None,
+            completion_tx: Some(upstream_state),
+            session: None,
+            call_stack: Vec::new(),
+        };
+
+        tokio::spawn(async move {
+            let _ = event_handler.handle(input_event).await;
+        });
+        let first = rx.recv().await.unwrap();
+        assert_eq!(first.meta.as_ref().unwrap()[ITERATE_COUNT_META], json!(2));
+        let first = first.completion_tx.unwrap();
+        let second = rx.recv().await.unwrap().completion_tx.unwrap();
+        first.signal_completion(Some(json!({"n": 1})));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        second.signal_completion(Some(json!({"n": 2})));
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), upstream_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.unwrap(), Some(json!({"n": 2})));
+    }
+
+    #[tokio::test]
+    async fn an_element_finishing_without_a_payload_keeps_the_last_payload_for_the_source() {
+        let (tx, mut rx) = mpsc::channel(100);
+        let event_handler = EventHandler {
+            config: Arc::new(Iterate::default()),
+            tx: Some(tx),
+            task_id: 1,
+            task_type: "test",
+            task_context: create_mock_task_context(),
+        };
+        let (upstream_state, upstream_rx) = new_completion_channel(1);
+        let mut input_event = EventBuilder::new()
+            .data(EventData::Json(json!([1, 2])))
+            .subject("input.subject".to_string())
+            .task_id(0)
+            .task_type("test")
+            .build()
+            .unwrap();
+        input_event.completion_tx = Some(upstream_state);
+
+        tokio::spawn(async move {
+            let _ = event_handler.handle(input_event).await;
+        });
+        let first = rx.recv().await.unwrap().completion_tx.unwrap();
+        let second = rx.recv().await.unwrap().completion_tx.unwrap();
+        first.signal_completion(Some(json!({"n": 1})));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        second.signal_completion(None);
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), upstream_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.unwrap(), Some(json!({"n": 1})));
+    }
+
+    #[tokio::test]
+    async fn every_element_of_an_array_carries_the_array_id_and_each_array_gets_its_own() {
+        let (tx, mut rx) = mpsc::channel(100);
+        let event_handler = EventHandler {
+            config: Arc::new(Iterate::default()),
+            tx: Some(tx),
+            task_id: 1,
+            task_type: "test",
+            task_context: create_mock_task_context(),
+        };
+        let array = |data: Value| {
+            EventBuilder::new()
+                .data(EventData::Json(data))
+                .subject("input.subject".to_string())
+                .task_id(0)
+                .task_type("test")
+                .build()
+                .unwrap()
+        };
+
+        event_handler.handle(array(json!([1, 2]))).await.unwrap();
+        event_handler.handle(array(json!([3]))).await.unwrap();
+
+        let mut ids = Vec::new();
+        for _ in 0..3 {
+            let meta = rx.recv().await.unwrap().meta.unwrap();
+            ids.push(meta[ITERATE_ID_META].as_str().unwrap().to_string());
+        }
+        assert_eq!(ids[0], ids[1]);
+        assert_ne!(ids[1], ids[2]);
     }
 
     /// Verifies that when a processor is the last in a flow (no downstream

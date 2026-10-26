@@ -8,7 +8,7 @@
 //! - **Cache**: Distributed cache, resource keys resolve to cache keys with a configured prefix.
 
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs;
 
@@ -139,6 +139,8 @@ pub enum Error {
     },
     #[error("Resource not found: {}", key)]
     ResourceNotFound { key: String },
+    #[error("Resource key '{key}' must be a relative path inside the resources")]
+    InvalidKey { key: String },
     #[error("Resource path is not configured in config.yaml")]
     ResourcePathNotConfigured,
     #[error("Template rendering error: {source}")]
@@ -250,6 +252,15 @@ impl ResourceLoader {
     /// # Returns
     /// The resource content as a String.
     pub async fn load(&self, key: &str) -> Result<String, Error> {
+        let inside = Path::new(key)
+            .components()
+            .all(|component| matches!(component, Component::Normal(_) | Component::CurDir));
+        if !inside {
+            return Err(Error::InvalidKey {
+                key: key.to_string(),
+            });
+        }
+
         // Filesystem first when configured.
         if let Some(base_path) = &self.base_path {
             let full_path = base_path.join(key);
@@ -343,6 +354,26 @@ mod tests {
             .with_cache(cache, "flowgen.resources".to_string());
         let result = loader.load(key).await.unwrap();
         assert_eq!(result, "from filesystem");
+
+        tokio::fs::remove_dir_all(&tmp).await.ok();
+    }
+
+    #[tokio::test]
+    async fn files_outside_the_resources_are_not_read() {
+        let tmp = std::env::temp_dir().join(format!("flowgen_test_{}", uuid::Uuid::now_v7()));
+        let resources = tmp.join("resources");
+        tokio::fs::create_dir_all(&resources).await.unwrap();
+        let secret = tmp.join("secret.json");
+        tokio::fs::write(&secret, "secret").await.unwrap();
+        let loader = ResourceLoader::new(Some(resources));
+
+        for key in ["../secret.json", secret.to_str().unwrap()] {
+            let result = loader.load(key).await;
+            assert!(
+                matches!(result, Err(Error::InvalidKey { .. })),
+                "{key}: {result:?}"
+            );
+        }
 
         tokio::fs::remove_dir_all(&tmp).await.ok();
     }

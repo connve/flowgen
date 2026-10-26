@@ -4,7 +4,8 @@
 //! Exercises the four supported operations — `Put`, `Get`, `List`,
 //! `Delete` — with the same event-flow shape a YAML task uses in
 //! production: an upstream event drives the operation, the processor
-//! emits a result event downstream.
+//! emits a result event downstream. Also covers per-key `ttl`, which
+//! only a real server enforces.
 //!
 //! Requires a running Docker daemon. Marked `#[ignore]` so a default
 //! `cargo test` skips it; CI runs the ignored set explicitly.
@@ -153,6 +154,165 @@ async fn put_operation_writes_value_and_emits_put_result() {
         result.get("revision").and_then(|r| r.as_u64()).is_some(),
         "put result must carry a revision"
     );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
+async fn put_with_ttl_expires_the_value() {
+    let (_nats, url) = start_nats().await;
+    flowgen_nats::cache::CacheBuilder::new()
+        .url(url.clone())
+        .tombstone_ttl(Duration::from_secs(1))
+        .build()
+        .expect("build cache")
+        .init("kv_ttl_bucket")
+        .await
+        .expect("create bucket with per-key TTL");
+    let (put_tx, mut put_rx) = spawn_processor(KvStore {
+        name: "kv_put".to_string(),
+        url: url.clone(),
+        bucket: "kv_ttl_bucket".to_string(),
+        operation: Operation::Put,
+        key: Some("short".to_string()),
+        ttl: Some(Duration::from_secs(1)),
+        ..Default::default()
+    })
+    .await;
+    put_tx
+        .send(drive_event(
+            "trigger",
+            serde_json::json!({"content": "gone soon"}),
+        ))
+        .await
+        .expect("send put");
+    tokio::time::timeout(STEP_TIMEOUT, put_rx.recv())
+        .await
+        .expect("put ack")
+        .expect("channel open");
+
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    let (get_tx, mut get_rx) = spawn_processor(KvStore {
+        name: "kv_get".to_string(),
+        url,
+        bucket: "kv_ttl_bucket".to_string(),
+        operation: Operation::Get,
+        key: Some("short".to_string()),
+        ..Default::default()
+    })
+    .await;
+    get_tx
+        .send(drive_event("trigger", serde_json::json!({})))
+        .await
+        .expect("send get");
+    let result = tokio::time::timeout(STEP_TIMEOUT, get_rx.recv())
+        .await
+        .expect("get returns")
+        .expect("channel open")
+        .data_as_json()
+        .expect("json");
+    assert_eq!(result.get("found").and_then(|f| f.as_bool()), Some(false));
+}
+
+#[tokio::test]
+#[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
+async fn a_short_ttl_expires_on_time_in_a_bucket_the_task_creates() {
+    let (_nats, url) = start_nats().await;
+    let (put_tx, mut put_rx) = spawn_processor(KvStore {
+        name: "kv_put".to_string(),
+        url: url.clone(),
+        bucket: "kv_own_ttl_bucket".to_string(),
+        operation: Operation::Put,
+        key: Some("short".to_string()),
+        ttl: Some(Duration::from_secs(2)),
+        ..Default::default()
+    })
+    .await;
+    put_tx
+        .send(drive_event(
+            "trigger",
+            serde_json::json!({"content": "gone soon"}),
+        ))
+        .await
+        .expect("send put");
+    tokio::time::timeout(STEP_TIMEOUT, put_rx.recv())
+        .await
+        .expect("put ack")
+        .expect("channel open");
+    let (get_tx, mut get_rx) = spawn_processor(KvStore {
+        name: "kv_get".to_string(),
+        url,
+        bucket: "kv_own_ttl_bucket".to_string(),
+        operation: Operation::Get,
+        key: Some("short".to_string()),
+        ..Default::default()
+    })
+    .await;
+
+    let mut found = true;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+    while found && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        get_tx
+            .send(drive_event("trigger", serde_json::json!({})))
+            .await
+            .expect("send get");
+        let result = tokio::time::timeout(STEP_TIMEOUT, get_rx.recv())
+            .await
+            .expect("get returns")
+            .expect("channel open")
+            .data_as_json()
+            .expect("json");
+        found = result["found"].as_bool().expect("found flag");
+    }
+
+    assert!(!found, "A 2s TTL must expire within 6s");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
+async fn ttl_on_a_bucket_without_per_key_ttl_fails_at_start_without_retrying() {
+    let (_nats, url) = start_nats().await;
+    let client = async_nats::connect(url.as_str())
+        .await
+        .expect("connect nats");
+    async_nats::jetstream::new(client)
+        .create_key_value(async_nats::jetstream::kv::Config {
+            bucket: "kv_plain_bucket".to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect("create bucket without per-key TTL");
+    let (_tx, rx) = mpsc::channel(1);
+    let processor = ProcessorBuilder::new()
+        .config(Arc::new(KvStore {
+            name: "kv_put".to_string(),
+            url,
+            bucket: "kv_plain_bucket".to_string(),
+            operation: Operation::Put,
+            key: Some("short".to_string()),
+            ttl: Some(Duration::from_secs(2)),
+            ..Default::default()
+        }))
+        .receiver(rx)
+        .task_id(0)
+        .task_type("nats_kv_store")
+        .task_context(test_task_context())
+        .build()
+        .await
+        .expect("build processor");
+
+    let result = tokio::time::timeout(
+        STEP_TIMEOUT,
+        flowgen_core::task::runner::Runner::run(processor),
+    )
+    .await
+    .expect("fails without retrying");
+
+    assert!(matches!(
+        result,
+        Err(flowgen_nats::kv_store::Error::TtlNotAllowed { ref bucket }) if bucket == "kv_plain_bucket"
+    ));
 }
 
 #[tokio::test]

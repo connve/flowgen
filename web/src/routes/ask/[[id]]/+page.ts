@@ -1,9 +1,7 @@
-import { error } from '@sveltejs/kit';
-import { m } from '$lib/paraglide/messages.js';
+import { redirect } from '@sveltejs/kit';
+import { base } from '$app/paths';
 import type { PageLoad } from './$types';
 
-export const load: PageLoad = async ({ parent }) => {
-	const { agents } = await parent();
-	if (agents === null) error(503, m.common_config_unavailable());
-	if (!agents) error(404, m.agents_not_enabled());
+export const load: PageLoad = ({ params }) => {
+	redirect(308, params.id ? `${base}/agents/${encodeURIComponent(params.id)}` : `${base}/agents`);
 };

@@ -272,9 +272,9 @@ task_type); expect one log line per failed attempt during a transient
 outage — that's normal, not a sign of a bug.
 
 Reference implementations:
-- Subscriber (infinite retry): `flowgen/salesforce/src/pubsubapi/subscriber.rs`,
-  `flowgen/nats/src/jetstream/subscriber.rs`
-- Publisher (circuit breaker): `flowgen/salesforce/src/pubsubapi/publisher.rs`
+- Subscribe (infinite retry): `flowgen/salesforce/src/pubsubapi/subscribe.rs`,
+  `flowgen/nats/src/jetstream/subscribe.rs`
+- Publish (circuit breaker): `flowgen/salesforce/src/pubsubapi/publish.rs`
 - HTTP endpoint (circuit breaker): `flowgen/http/src/endpoint.rs`
 
 ### EventData types
@@ -617,56 +617,15 @@ Reference implementations:
   one error type with its retry classification, pages retried in place
 - `flowgen/braze/src/processor.rs` — generic `Processor<C: Operation>`
 - `flowgen/ai-agent/src/completion.rs` — resource loading, RAG,
-  completion_tx, sandboxing
+  completion_tx
 - `flowgen/gcp/src/bigquery/query.rs` — SQL query with resource loading
-- `flowgen/nats/src/jetstream/publisher.rs` — event publishing
+- `flowgen/nats/src/jetstream/publish.rs` — event publishing
 - `flowgen/object-store/src/read.rs` — file reading
 
-### Sandboxing (nsjail)
+### Running code
 
-Sandboxing isolates LLM-generated tool execution from the host, via nsjail.
-
-Today only the Rhai engine backs the `script` task, and Rhai is sandboxed
-by design — it doesn't need nsjail. The `sandbox` field on the script
-config is wired through for future engines, but in production the only
-task that actually runs sandboxed code is `ai_completion` when its tools
-are invoked.
-
-Use sandboxing for AI agents with tools — they're the case vulnerable to
-prompt injection via LLM-generated tool calls. Rhai scripts don't need it
-(built-in safe sandbox). HTTP/SQL/webhook/connector tasks don't need it
-either — they execute against external systems, not local code.
-
-Sandboxing is optional with sensible defaults; omit `sandbox` to run
-without it:
-
-```yaml
-ai_completion:
-  name: "secure_agent"
-  provider: google
-  model: "gemini-2.5-flash-lite"
-  prompt: "{{event.data}}"
-
-  # Optional: enable sandbox for tool execution (omit for no sandbox)
-  sandbox:
-    memory_limit_mb: 512      # Default: 512 MB
-    time_limit_seconds: 30    # Default: 30 seconds
-    max_pids: 10              # Default: 10 processes
-    allow_network: false      # Default: false (no network access)
-    nsjail_path: "nsjail"     # Default: "nsjail" (searches PATH)
-    user_id: 99999            # Default: 99999 (nobody)
-    group_id: 99999           # Default: 99999 (nogroup)
-```
-
-Defaults: 512 MB memory, 30s time limit, 10 processes, network disabled,
-uid/gid 99999 (nobody/nogroup).
-
-If you ever introduce a new script engine that runs arbitrary host code
-(Python, Bash, ...), sandboxing becomes required rather than optional for
-untrusted code — the `sandbox` field already accepts a full
-`SandboxConfig` for that case.
-
-Reference implementations:
-- `flowgen/core/src/nsjail/sandbox.rs` — nsjail executor with proper error handling
-- `flowgen/core/src/task/script.rs` — script task with optional sandbox
-- `flowgen/ai-agent/src/completion.rs` — AI completion with optional sandbox
+flowgen runs no code it didn't ship besides Rhai, which can't reach files,
+processes or the network beyond what flowgen exposes. The flowgen process
+holds every credential of its workspace, so a feature that runs other code
+(an engine for Python or Bash, code an agent writes) must run it isolated
+outside that process, never in a subprocess next to it.

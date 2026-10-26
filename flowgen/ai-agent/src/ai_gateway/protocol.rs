@@ -91,7 +91,7 @@ pub trait StreamWriter: Send {
 
     /// An informational tool step (the server already ran the tool). Unlike
     /// `tool_calls`, does not terminate the turn as "tool_calls". Default no-op.
-    fn tool_step(&mut self, _name: String, _arguments: serde_json::Value) -> Vec<String> {
+    fn tool_step(&mut self, _step: flowgen_core::registry::ToolStep) -> Vec<String> {
         Vec::new()
     }
 

@@ -1,6 +1,6 @@
 # NATS
 
-Flowgen connects to NATS JetStream via [Subscriber](/docs/flowgen/nats/subscriber), [Publisher](/docs/flowgen/nats/publisher), and [KV Store](/docs/flowgen/nats/kv-store).
+Flowgen connects to NATS JetStream via [Subscribe](/docs/flowgen/nats/subscribe), [Publish](/docs/flowgen/nats/publish), and [KV Store](/docs/flowgen/nats/kv-store).
 
 ## Credentials
 

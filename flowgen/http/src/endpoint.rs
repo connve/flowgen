@@ -650,14 +650,12 @@ async fn dispatch_stream(
         Err(e) => return Err(e),
     };
 
-    let correlation_id = uuid::Uuid::now_v7().to_string();
-
     let (progress_tx, mut progress_rx) = mpsc::channel::<ProgressEvent>(32);
 
-    registration
+    let correlation_id = registration
         .response_registry
-        .insert(
-            correlation_id.clone(),
+        .register(
+            None,
             ResponseSender {
                 progress_tx,
                 result_tx: None,

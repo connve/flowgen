@@ -18,7 +18,7 @@ flow:
         ack_timeout: 60s
         backoff: ["1s", "10s", "1m"]
 
-    - nats_jetstream_publisher:
+    - nats_jetstream_publish:
         name: publish_to_nats
         credentials_path: /etc/nats/credentials.json
         url: "{{env.NATS_URL}}"

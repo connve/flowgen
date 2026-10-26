@@ -4,6 +4,7 @@
 //! and logging functionality for the flowgen event processing pipeline.
 
 use crate::buffer::{ContentType, FromReader, ToWriter};
+use crate::registry::CORRELATION_ID;
 use apache_avro::{from_avro_datum, Reader as AvroReader};
 use arrow::{array::RecordBatchWriter, csv::reader::Format};
 use base64::Engine;
@@ -245,6 +246,7 @@ impl<'a> std::future::IntoFuture for EventLogger<'a> {
                 None => self.event.timestamp.to_string(),
             };
             let subject = self.event.subject.clone();
+            let correlation_id = self.event.correlation_id().to_string();
 
             if let Some(tx) = self.tx {
                 tx.send(self.event).await.map_err(|_| Error::SendMessage)?;
@@ -254,6 +256,7 @@ impl<'a> std::future::IntoFuture for EventLogger<'a> {
                 info!(
                     event.subject = %subject,
                     event.id = %event_id,
+                    correlation_id = %correlation_id,
                 );
             } else {
                 // Serialize context fields as a JSON object so downstream
@@ -267,6 +270,7 @@ impl<'a> std::future::IntoFuture for EventLogger<'a> {
                 info!(
                     event.subject = %subject,
                     event.id = %event_id,
+                    correlation_id = %correlation_id,
                     context = %context_json,
                 );
             }
@@ -359,6 +363,14 @@ impl EventExt for Event {
 }
 
 impl Event {
+    /// The id of the run the event belongs to, from its meta; empty without one.
+    pub fn correlation_id(&self) -> &str {
+        match self.meta.as_ref().and_then(|meta| meta.get(CORRELATION_ID)) {
+            Some(Value::String(id)) => id,
+            _ => "",
+        }
+    }
+
     /// Converts event data to a serde_json::Value for processing.
     ///
     /// This is a convenience method that extracts the raw data payload from EventData
@@ -676,13 +688,13 @@ impl EventBuilder {
         // Ensure every event chain has a correlation_id for end-to-end tracing.
         // Set once at the source, then preserved through all downstream tasks.
         let has_correlation_id = match meta.as_ref() {
-            Some(m) => m.contains_key("correlation_id"),
+            Some(m) => m.contains_key(CORRELATION_ID),
             None => false,
         };
         if !has_correlation_id {
             let correlation_id = uuid::Uuid::now_v7().to_string();
             meta.get_or_insert_with(Map::new)
-                .insert("correlation_id".to_string(), Value::String(correlation_id));
+                .insert(CORRELATION_ID.to_string(), Value::String(correlation_id));
         }
 
         EventBuilder {

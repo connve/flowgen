@@ -1,5 +1,122 @@
 # Changelog
 
+## 0.152.0
+
+### Breaking
+
+- `POST /api/agents/chat` is removed. The Agents tab replies through
+  `/api/agents/conversations/{id}/reply`.
+- Building from source needs Rust 1.97.1 or newer.
+- `max_turns` on `ai_completion` counts model calls, tool calls included. It
+  must be at least 1, and at least 2 with `mcp_servers`; a flow with a lower
+  value fails to load.
+- `sandbox` on `ai_completion` and `script` is removed, with the docs page
+  about it. It never isolated anything: `ai_completion` tools are MCP calls
+  and `script` runs Rhai. A flow that sets it fails to load.
+
+### Changed
+
+- Task types are named with verbs: `nats_jetstream_subscribe`,
+  `nats_jetstream_publish`, `salesforce_pubsubapi_subscribe` and
+  `salesforce_pubsubapi_publish`. Flows with the former `…_subscriber` and
+  `…_publisher` names still load, and logs carry the new names as
+  `task_type`. The docs pages are at `/nats/subscribe` and `/nats/publish`;
+  the former addresses redirect.
+- The web UI's Ask tab is called Agents, at `/agents`; `/ask` links redirect.
+- Agents chat replies run on the server and are saved as they arrive. A
+  reply goes on when the browser leaves, and opening the conversation shows
+  it in progress from any pod. Stop works from any pod. A second message
+  while a reply is in progress gets `409`. A reply that ends unwatched marks
+  the conversation unread.
+- `http_endpoint` and `mcp_tool` respond with what the flow returns after an
+  `iterate`: the result of the element that finishes last with one, or a
+  `buffer`'s merged batch.
+- A `script` that doesn't compile fails at startup without retrying. A
+  missing or unreadable imported module is retried.
+- `ai_completion` retries a provider error on 408, 425, 429, a 5xx or a failed
+  connection. Other 4xx fail at once.
+- With `web.auth`, each signed-in user sees only their own Agents conversations
+  and the shared ones, such as those a flow opens. Conversations stored
+  before stay shared.
+- The flow graph keeps task names readable: a graph too big for the pane
+  opens at its first task and scrolls.
+- Browser tab titles name the page, then its section, e.g.
+  `hello · Agents · Flowgen`.
+
+### Added
+
+- `output_schema` on `ai_completion`: JSON Schema the answer must match.
+- `images` on `ai_completion`: http(s) image URLs or base64 `data:` URLs sent
+  with the prompt as base64, each at most `image_max_bytes` (20 MiB) and
+  fetched within `image_timeout` (30s). A URL must reach a public address;
+  loopback, private and link-local addresses are refused, also after a
+  redirect.
+- `import "path" as name;` in `script` loads `path.rhai` from the resources,
+  so scripts can share functions.
+- `ttl` on `nats_kv_store` `put`: how long the value lives. With `ttl`, the
+  task fails at start on a bucket without per-key TTL.
+- `iterate` puts the array length in `iterate_count` meta and an id shared by
+  the array's elements in `iterate_id`. A `buffer` with `flush_on_completion`
+  keeps each array in its own batch and flushes it once it holds every
+  element; an array longer than `size` flushes in parts. The buffer removes
+  both keys from the batch it sends on.
+- Flows can open conversations in the Agents tab with `nats_kv_store`, shared
+  or for the user who started the flow. A conversation has `origin` and
+  `unread`; the tab shows a badge with the unread count. Each user has their
+  own read state, and can mark a conversation read or unread for themselves.
+  The conversation list updates live from
+  `/api/agents/conversations/stream`.
+- New Agents tab icon.
+- Agents conversations can be renamed and filed in folders, from the ⋮ menu
+  in the history list or from the conversation's header. With `web.auth` each
+  user has their own folders. A flow that opens a conversation can file it
+  with `folder`. Each folder shows its unread count.
+- Tool calls in the Agents chat show the icons of the connectors the tool's
+  flow reaches, from `/api/agents/tools`.
+- Tool calls in the Agents chat show the run of the tool's flow: the task
+  running and elapsed time while it runs, then whether it succeeded, its
+  duration and, expanded, each task with its status and `duration_ms`. The
+  run is saved with the conversation when the reply ends.
+- Task logs carry the event's `correlation_id`.
+- `mcp_tool` runs a call under the `correlation_id` in the request's `_meta`
+  when it is a UUID no other call is using. `ai_completion` sends a new one
+  with each MCP tool call, and `ToolStep.run` in a conversation holds it.
+- `web.agents.cache_prefix`, `web.agents.reply_save_interval` and
+  `web.agents.reply_idle_timeout` (default `10m`): how long a reply waits for
+  the AI gateway's next output before it fails.
+- Workspace validation reports `{{ctx...}}` in templates outside a `script`.
+- The side panels of Flows, Resources and Agents can be resized; the browser
+  keeps the width.
+- On mobile, the web UI's navigation opens from a menu button in the top bar,
+  and the Agents, Flows and Resources side panes start closed and open over
+  the page.
+- One search for the web UI, in the top bar or with ⌘K / Ctrl+K: Agents
+  conversations, flows, resources, connections, changes, pages and actions.
+  It replaces the search fields of Flows, Resources and Agents. Embedded, the
+  top bar shows only the search.
+- The docs serve `llms.txt`, an index of every page for coding agents, with
+  each page as Markdown under `/md/` and all of them in `llms-full.txt`.
+- The web UI sends a Content-Security-Policy that runs only its own scripts,
+  plus `X-Content-Type-Options: nosniff` and `Referrer-Policy`.
+  `web.frame_ancestors` (default `'self'`) sets who may show the UI in a
+  frame.
+
+### Fixed
+
+- Scripts read files only inside the resources. Resource keys with `..` or an
+  absolute path are rejected, and `import` loads modules only from the
+  resources.
+- `git_sync` skips symlinks, so a link in the repository can't expose files
+  outside it.
+- The Agents chat and the Markdown preview of resources show HTML as text,
+  keep only web, email and relative links, and show images as links, so
+  neither a message nor a resource can run code in the web UI or load
+  addresses on its own.
+- A `buffer` with `partition_key` applies `size` from a partition's first
+  event.
+- A slow client of one streaming MCP, `http_endpoint` or AI gateway request
+  doesn't hold up the progress of the others.
+
 ## 0.151.0
 
 ### Breaking

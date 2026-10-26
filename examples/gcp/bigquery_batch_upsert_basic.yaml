@@ -15,7 +15,7 @@ flow:
   tasks:
 
     # One batch at a time; `delay` throttles between batches.
-    - nats_jetstream_subscriber:
+    - nats_jetstream_subscribe:
         name: consume_batch
         credentials_path: /etc/nats/credentials.json
         url: "{{env.NATS_URL}}"

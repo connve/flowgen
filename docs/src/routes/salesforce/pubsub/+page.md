@@ -2,10 +2,10 @@
 
 Subscribe to and publish Salesforce platform events and Change Data Capture events via the gRPC-based Pub/Sub API.
 
-## Subscriber
+## Subscribe
 
 ```yaml
-- salesforce_pubsubapi_subscriber:
+- salesforce_pubsubapi_subscribe:
     name: account_changes
     credentials_path: /etc/salesforce/credentials.json
     topic:
@@ -41,10 +41,10 @@ Subscribe to and publish Salesforce platform events and Change Data Capture even
 | `name` | string | required | Consumer name. |
 | `replay_preset` | string | `latest` | Start position: `latest` or `earliest`. |
 
-## Publisher
+## Publish
 
 ```yaml
-- salesforce_pubsubapi_publisher:
+- salesforce_pubsubapi_publish:
     name: publish_event
     credentials_path: /etc/salesforce/credentials.json
     topic: /event/Order_Update__e

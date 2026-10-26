@@ -37,6 +37,7 @@ Read, write, list, and delete keys in a NATS JetStream Key-Value bucket.
 | `prune` | bool | `false` | For a `put` of entries: delete the keys under `key_prefix` that no entry names. Requires a `key_prefix` ending in `.` or `/`. |
 | `allow_empty` | bool | `false` | With `prune`: let an empty `entries` list delete every key under `key_prefix`. Otherwise it fails and deletes nothing. |
 | `include_values` | bool | `false` | For `list`: also return each key's value under `values`. |
+| `ttl` | duration | | For `put`: how long the value lives, e.g. `30d`. Needs NATS 2.11+ and a bucket with per-key TTL; a bucket this task creates has it. On an existing bucket without it, the task fails at start. |
 | `depends_on` | list | | Upstream task names. |
 | `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
 

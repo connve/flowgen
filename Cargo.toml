@@ -22,11 +22,11 @@ debug = "line-tables-only"
 allow_attributes = "deny"
 
 [workspace.package]
-version = "0.151.0"
+version = "0.152.0"
 authors = ["CONNVE"]
 license = "MPL-2.0"
 edition = "2021"
-rust-version = "1.88"
+rust-version = "1.97.1"
 publish = false
 
 [workspace.dependencies]
@@ -120,7 +120,7 @@ prost-types = { version = "0.14" }
 glob = { version = "0.3" }
 apache-avro = { version = "0.19" }
 regex = { version = "1.12" }
-uuid = { version = "1", features = ["v7"] }
+uuid = { version = "1", features = ["v5", "v7"] }
 axum = { version = "0.8" }
 axum-extra = { version = "0.12", features = [
     "cookie",
@@ -154,9 +154,12 @@ opentelemetry-otlp = { version = "0.27", features = ["grpc-tonic", "metrics"] }
 tracing-opentelemetry = { version = "0.28" }
 rustls = { version = "0.23", features = ["ring"] }
 tempfile = { version = "3.8" }
-rig-core = { version = "0.35", features = ["rmcp"] }
-rig-vertexai = { version = "0.3" }
-rmcp = { version = "1", features = [
+rig-core = { version = "0.45", features = ["reqwest"] }
+rig-agent = { version = "0.45" }
+rig-reqwest = { version = "0.45" }
+rig-rmcp = { version = "0.45" }
+rig-vertexai = { version = "0.45" }
+rmcp = { version = "3.5", features = [
     "client",
     "transport-streamable-http-client-reqwest",
 ] }

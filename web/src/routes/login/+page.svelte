@@ -3,6 +3,7 @@
 	import { apiUrl } from '$lib/api';
 	import StateMessage from '$lib/StateMessage.svelte';
 	import { m } from '$lib/paraglide/messages.js';
+	import { pageTitle } from '$lib/pageTitle';
 	import Icon from '@iconify/svelte';
 
 	// The server sends only these codes, so a crafted link cannot put text here.
@@ -22,7 +23,7 @@
 </script>
 
 <svelte:head>
-	<title>{m.login_page_title()}</title>
+	<title>{pageTitle(m.login_page_title())}</title>
 </svelte:head>
 
 <div class="flex min-h-screen flex-col bg-base-100 text-base-content">

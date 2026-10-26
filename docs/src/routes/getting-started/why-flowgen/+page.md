@@ -51,7 +51,7 @@ flow:
             received_at: timestamp_now()
           }
 
-    - nats_jetstream_publisher:
+    - nats_jetstream_publish:
         name: publish
         credentials_path: /etc/nats/credentials.json
         url: "{{env.NATS_URL}}"

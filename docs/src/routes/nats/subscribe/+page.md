@@ -1,11 +1,11 @@
-# NATS JetStream Subscriber
+# NATS JetStream Subscribe
 
 Consumes messages from a NATS JetStream stream. Source task — typically first in a flow.
 
 ## Configuration
 
 ```yaml
-- nats_jetstream_subscriber:
+- nats_jetstream_subscribe:
     name: order_events
     credentials_path: /etc/nats/credentials.json
     url: "{{env.NATS_URL}}"
@@ -76,7 +76,7 @@ A message is acked when every last task of the flow has finished with it. While 
 ```yaml
 flow:
   tasks:
-    - nats_jetstream_subscriber:
+    - nats_jetstream_subscribe:
         name: orders
         credentials_path: /etc/nats/credentials.json
         subject: "orders.created"

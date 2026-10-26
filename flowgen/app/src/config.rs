@@ -325,14 +325,18 @@ task_types! {
     http_endpoint(flowgen_http::endpoint::Endpoint),
     /// HTML scrape task for extracting structured data using CSS selectors.
     html_scrape(flowgen_html::scrape::Scrape),
-    /// NATS JetStream subscriber task.
-    nats_jetstream_subscriber(flowgen_nats::jetstream::subscriber::Subscriber),
-    /// NATS JetStream publisher task.
-    nats_jetstream_publisher(flowgen_nats::jetstream::publisher::Publisher),
-    /// Salesforce Pub/Sub API subscriber task.
-    salesforce_pubsubapi_subscriber(flowgen_salesforce::pubsubapi::subscriber::Subscriber),
-    /// Salesforce Pub/Sub API publisher task.
-    salesforce_pubsubapi_publisher(flowgen_salesforce::pubsubapi::publisher::Publisher),
+    /// Consumes messages from a NATS JetStream stream.
+    #[serde(alias = "nats_jetstream_subscriber")]
+    nats_jetstream_subscribe(flowgen_nats::jetstream::subscribe::Subscribe),
+    /// Publishes events to NATS JetStream.
+    #[serde(alias = "nats_jetstream_publisher")]
+    nats_jetstream_publish(flowgen_nats::jetstream::publish::Publish),
+    /// Subscribes to a Salesforce Pub/Sub API topic.
+    #[serde(alias = "salesforce_pubsubapi_subscriber")]
+    salesforce_pubsubapi_subscribe(flowgen_salesforce::pubsubapi::subscribe::Subscribe),
+    /// Publishes events to a Salesforce Pub/Sub API topic.
+    #[serde(alias = "salesforce_pubsubapi_publisher")]
+    salesforce_pubsubapi_publish(flowgen_salesforce::pubsubapi::publish::Publish),
     /// Salesforce Bulk API query job operations (create, get, delete, abort, get_results).
     salesforce_bulkapi_query_job(flowgen_salesforce::bulkapi::query_job::QueryJob),
     /// Salesforce REST API SObject operations (create, get, update, upsert, delete).
@@ -458,6 +462,18 @@ pub enum ValidationError {
          while the existing data stays in {db_name:?}. No other cache key changes."
     )]
     RenamedCacheDbName { db_name: String },
+    #[error("`web.agents.{field}` must be longer than 0s, e.g. \"3s\"")]
+    ZeroAgentsDuration { field: &'static str },
+    #[error(
+        "`web.agents.cache_prefix` {prefix:?} must be segments of letters, digits, `_` and `-` \
+         joined by single dots, e.g. \"agents\" or \"team.agents\""
+    )]
+    AgentsCachePrefix { prefix: String },
+    #[error(
+        "`web.frame_ancestors` entry {source_expression:?} must be one CSP source without spaces, \
+         `;` or `,`, e.g. \"'self'\" or \"https://console.example.com\""
+    )]
+    FrameAncestor { source_expression: String },
 }
 
 impl AppConfig {
@@ -465,10 +481,26 @@ impl AppConfig {
     /// meaning. Serde ignores unknown keys, so a renamed field needs an
     /// explicit check to avoid changing behaviour on upgrade without a word.
     pub fn validate(&self) -> Result<(), ValidationError> {
-        match self.cache.as_ref().and_then(|c| c.db_name.as_ref()) {
-            Some(db_name) => Err(ValidationError::RenamedCacheDbName {
+        if let Some(db_name) = self.cache.as_ref().and_then(|c| c.db_name.as_ref()) {
+            return Err(ValidationError::RenamedCacheDbName {
                 db_name: db_name.clone(),
-            }),
+            });
+        }
+        let Some(web) = self.web.as_ref() else {
+            return Ok(());
+        };
+        if let Some(source) = web.frame_ancestors.iter().find(|source| {
+            source.is_empty()
+                || source
+                    .chars()
+                    .any(|c| c.is_whitespace() || c.is_control() || c == ';' || c == ',')
+        }) {
+            return Err(ValidationError::FrameAncestor {
+                source_expression: source.clone(),
+            });
+        }
+        match web.agents.as_ref() {
+            Some(agents) => agents.validate(),
             None => Ok(()),
         }
     }
@@ -770,7 +802,7 @@ pub struct WebOptions {
     /// Path prefix for the web UI. Defaults to "/".
     #[serde(default = "default_web_path")]
     pub path: String,
-    /// Base URL the web server proxies the built-in Agents chat to, e.g.
+    /// Base URL of the AI gateway the Agents tab replies through, e.g.
     /// `http://127.0.0.1:3002/v1`. Omit to target the same-process AI gateway
     /// on loopback. Set when the gateway runs in a separate process or pod.
     #[serde(default)]
@@ -779,8 +811,8 @@ pub struct WebOptions {
     /// `/api/agents`.
     #[serde(default)]
     pub agents: Option<AgentsOptions>,
-    /// HTTP headers sent with every outbound request the web server
-    /// makes (currently the Agents chat proxy to the AI gateway). Used to
+    /// HTTP headers sent with every request the web server makes to the AI
+    /// gateway for the Agents tab. Used to
     /// identify this web server to `llm_proxy`/`mcp_tool` scoping, e.g.
     /// `X-Flowgen-Client: flowgen-ui` matching a proxy's `headers` field.
     #[serde(default)]
@@ -811,6 +843,14 @@ pub struct WebOptions {
     /// Change proposals and their publishing. Omit to disable `/api/changes`.
     #[serde(default)]
     pub authoring: Option<AuthoringOptions>,
+    /// Who may show the web UI in a frame, as CSP `frame-ancestors` sources,
+    /// e.g. `["'self'", "https://console.example.com"]`. Defaults to `'self'`.
+    #[serde(default = "default_frame_ancestors")]
+    pub frame_ancestors: Vec<String>,
+}
+
+pub(crate) fn default_frame_ancestors() -> Vec<String> {
+    vec!["'self'".to_string()]
 }
 
 fn default_cookie_secure() -> bool {
@@ -832,6 +872,7 @@ impl PartialEq for WebOptions {
             && self.cookie_secure == other.cookie_secure
             && self.api_credentials_path == other.api_credentials_path
             && self.authoring == other.authoring
+            && self.frame_ancestors == other.frame_ancestors
     }
 }
 
@@ -950,6 +991,57 @@ pub struct AgentsOptions {
     /// Calls the AI gateway as the signed-in user, with their login token as the bearer.
     #[serde(default)]
     pub on_behalf_of_user: bool,
+    /// Cache key prefix for conversations, read state and folders; a flow
+    /// opens a conversation under `<prefix>.conversations.`.
+    #[serde(default = "default_agents_cache_prefix")]
+    pub cache_prefix: String,
+    /// How often a reply in progress is saved. A pending reply not saved for
+    /// ten times this long is shown as interrupted.
+    #[serde(default = "default_reply_save_interval", with = "humantime_serde")]
+    pub reply_save_interval: Duration,
+    /// How long a reply waits for the AI gateway to send anything, e.g. `5m`,
+    /// before it ends with an error. Defaults to 10 minutes.
+    #[serde(default = "default_reply_idle_timeout", with = "humantime_serde")]
+    pub reply_idle_timeout: Duration,
+}
+
+impl AgentsOptions {
+    fn validate(&self) -> Result<(), ValidationError> {
+        if self.reply_save_interval.is_zero() {
+            return Err(ValidationError::ZeroAgentsDuration {
+                field: "reply_save_interval",
+            });
+        }
+        if self.reply_idle_timeout.is_zero() {
+            return Err(ValidationError::ZeroAgentsDuration {
+                field: "reply_idle_timeout",
+            });
+        }
+        let segment = |segment: &str| {
+            !segment.is_empty()
+                && segment
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        };
+        match self.cache_prefix.split('.').all(segment) {
+            true => Ok(()),
+            false => Err(ValidationError::AgentsCachePrefix {
+                prefix: self.cache_prefix.clone(),
+            }),
+        }
+    }
+}
+
+pub(crate) fn default_agents_cache_prefix() -> String {
+    "agents".to_string()
+}
+
+pub(crate) fn default_reply_save_interval() -> Duration {
+    Duration::from_secs(3)
+}
+
+pub(crate) fn default_reply_idle_timeout() -> Duration {
+    Duration::from_secs(10 * 60)
 }
 
 /// Default conversation history TTL for the built-in Agents chat: 30 days.
@@ -1553,6 +1645,48 @@ flows:
         assert_eq!(cache.runtime.db_name, "flowgen_cache");
         assert_eq!(cache.system.db_name, "flowgen_system");
         config.validate().expect("defaults are accepted");
+    }
+
+    fn with_agents(agents: &str) -> AppConfig {
+        let indented: String = agents.lines().map(|line| format!("    {line}\n")).collect();
+        serde_yaml::from_str(&format!(
+            "flows:\n  path: /flows\nweb:\n  enabled: true\n  agents:\n    enabled: true\n{indented}"
+        ))
+        .expect("parses")
+    }
+
+    #[test]
+    fn agents_defaults_are_accepted() {
+        let config = with_agents("");
+        let agents = config.web.as_ref().unwrap().agents.as_ref().unwrap();
+
+        assert_eq!(agents.reply_idle_timeout, Duration::from_secs(600));
+        config.validate().expect("defaults are accepted");
+    }
+
+    #[test]
+    fn agents_reply_durations_must_be_longer_than_zero() {
+        for field in ["reply_save_interval", "reply_idle_timeout"] {
+            let err = with_agents(&format!("{field}: 0s"))
+                .validate()
+                .expect_err("zero is rejected");
+
+            assert!(err.to_string().contains(field), "{err}");
+        }
+    }
+
+    #[test]
+    fn agents_cache_prefix_must_be_dotted_key_segments() {
+        for prefix in ["a", "a.b", "a_1.b-2"] {
+            with_agents(&format!("cache_prefix: {prefix:?}"))
+                .validate()
+                .expect("accepted");
+        }
+        for prefix in ["", ".a", "a.", "a..b", "a.*", "a.>", "a b", "a/b"] {
+            let rejected = with_agents(&format!("cache_prefix: {prefix:?}")).validate();
+
+            assert!(rejected.is_err(), "{prefix:?} is accepted");
+        }
     }
 
     #[test]

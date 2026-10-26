@@ -12,7 +12,7 @@ flow:
     tags: ["cloudflare", "email", "nats", "object-store", "example"]
   tasks:
 
-    - nats_jetstream_subscriber:
+    - nats_jetstream_subscribe:
         name: start_subscription
         credentials_path: /etc/nats/credentials.json
         url: "{{env.NATS_URL}}"

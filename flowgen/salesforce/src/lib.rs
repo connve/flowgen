@@ -16,8 +16,8 @@ pub mod bulkapi {
 pub mod processor;
 /// Pub/Sub API tasks.
 pub mod pubsubapi {
-    pub mod publisher;
-    pub mod subscriber;
+    pub mod publish;
+    pub mod subscribe;
 }
 /// REST API tasks.
 pub mod restapi {
@@ -64,8 +64,8 @@ macro_rules! salesforce_task_meta {
 }
 
 salesforce_task_meta!(
-    pubsubapi::subscriber::Subscriber,
-    pubsubapi::publisher::Publisher,
+    pubsubapi::subscribe::Subscribe,
+    pubsubapi::publish::Publish,
     bulkapi::query_job::QueryJob { const CPU_INTENSIVE: bool = true; },
     restapi::sobject::SObject,
     restapi::composite::Composite,
@@ -109,9 +109,9 @@ salesforce_task!(
     toolingapi::Tooling,
 );
 
-impl Task for pubsubapi::subscriber::Subscriber {
+impl Task for pubsubapi::subscribe::Subscribe {
     async fn run(self, io: TaskIo, context: Arc<TaskContext>) -> Result<(), TaskError> {
-        let mut builder = pubsubapi::subscriber::ProcessorBuilder::new()
+        let mut builder = pubsubapi::subscribe::ProcessorBuilder::new()
             .config(Arc::new(self))
             .task_id(io.task_id)
             .task_type(io.task_type)
@@ -124,9 +124,9 @@ impl Task for pubsubapi::subscriber::Subscriber {
     }
 }
 
-impl Task for pubsubapi::publisher::Publisher {
+impl Task for pubsubapi::publish::Publish {
     async fn run(self, io: TaskIo, context: Arc<TaskContext>) -> Result<(), TaskError> {
-        let mut builder = pubsubapi::publisher::ProcessorBuilder::new()
+        let mut builder = pubsubapi::publish::ProcessorBuilder::new()
             .config(Arc::new(self))
             .task_id(io.task_id)
             .task_type(io.task_type)

@@ -49,10 +49,6 @@ pub struct Script {
     ///   resource: "scripts/transform_data.rhai"
     /// ```
     pub code: crate::resource::Source,
-    /// Optional sandbox configuration for script execution.
-    /// Required for Python/Bash scripts, not needed for Rhai (safe embedded language).
-    #[serde(default)]
-    pub sandbox: Option<crate::nsjail::SandboxConfig>,
     /// Optional list of upstream task names this task depends on.
     /// When set, this task only receives events from the named tasks.
     /// When not set, the task receives from the previous task in the list (linear chain).
@@ -75,7 +71,6 @@ impl Default for Script {
             name: String::new(),
             engine: ScriptEngine::default(),
             code: crate::resource::Source::Inline(String::new()),
-            sandbox: None,
             limits: RhaiLimits::default(),
             depends_on: None,
             retry: None,
@@ -252,11 +247,39 @@ pub enum Error {
         #[source]
         source: crate::resource::Error,
     },
+    #[error("Script does not compile: {source}")]
+    Compile {
+        #[source]
+        source: Box<rhai::EvalAltResult>,
+    },
     #[error("Task failed after all retry attempts: {source}")]
     RetryExhausted {
         #[source]
         source: Box<Error>,
     },
+}
+
+/// Whether a failed start may succeed on a later try. A script that does not
+/// compile only may when a module it imports is missing or could not be read.
+fn init_retryable(error: &Error) -> bool {
+    match error {
+        Error::Compile { source } => module_unavailable(source),
+        _ => true,
+    }
+}
+
+fn module_unavailable(error: &rhai::EvalAltResult) -> bool {
+    match error {
+        rhai::EvalAltResult::ErrorInModule(_, inner, _) => module_unavailable(inner),
+        rhai::EvalAltResult::ErrorModuleNotFound(..) => true,
+        rhai::EvalAltResult::ErrorSystem(_, source) => matches!(
+            source.downcast_ref::<crate::resource::Error>(),
+            Some(
+                crate::resource::Error::ReadResource { .. } | crate::resource::Error::Cache { .. }
+            )
+        ),
+        _ => false,
+    }
 }
 
 /// A string the script throws is its error message as written.
@@ -271,8 +294,8 @@ fn execution_error(source: Box<rhai::EvalAltResult>) -> Error {
 
 /// Handles individual script execution operations.
 pub struct EventHandler {
-    /// Resolved script code (inline or loaded from resource file).
-    code: String,
+    /// The script, compiled at startup with its imported modules.
+    ast: rhai::AST,
     /// Channel sender for processed events.
     tx: Option<Sender<Event>>,
     /// Task identifier for event tracking.
@@ -314,6 +337,90 @@ struct CacheHandle {
 struct ResourceHandle {
     /// The resource loader for resolving file paths.
     resource_loader: crate::resource::ResourceLoader,
+}
+
+/// Loads `import "path"` from the flow's resources as `path.rhai`.
+struct ResourceModuleResolver {
+    resource_loader: crate::resource::ResourceLoader,
+}
+
+thread_local! {
+    /// Modules this thread is loading. Rhai resolves imports synchronously,
+    /// so a path that comes up again on the same thread is an import cycle.
+    static LOADING_MODULES: std::cell::RefCell<std::collections::HashSet<String>> =
+        Default::default();
+}
+
+/// Marks a module as loading on this thread until dropped, also when loading panics.
+struct LoadingModule<'a>(&'a str);
+
+impl<'a> LoadingModule<'a> {
+    /// Marks `path` as loading, or returns `None` when it already is: an import cycle.
+    fn start(path: &'a str) -> Option<Self> {
+        match LOADING_MODULES.with_borrow_mut(|loading| loading.insert(path.to_string())) {
+            true => Some(Self(path)),
+            false => None,
+        }
+    }
+}
+
+impl Drop for LoadingModule<'_> {
+    fn drop(&mut self) {
+        LOADING_MODULES.with_borrow_mut(|loading| loading.remove(self.0));
+    }
+}
+
+impl ResourceModuleResolver {
+    fn load(
+        &self,
+        engine: &Engine,
+        path: &str,
+        pos: rhai::Position,
+    ) -> Result<rhai::Shared<rhai::Module>, Box<rhai::EvalAltResult>> {
+        let key = match path.ends_with(".rhai") {
+            true => path.to_string(),
+            false => format!("{path}.rhai"),
+        };
+        let loader = self.resource_loader.clone();
+        let loaded = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async move { loader.load(&key).await })
+        });
+        let in_module = |source: Box<rhai::EvalAltResult>| {
+            rhai::EvalAltResult::ErrorInModule(path.to_string(), source, pos)
+        };
+        let code = match loaded {
+            Ok(code) => code,
+            Err(crate::resource::Error::ResourceNotFound { .. }) => {
+                return Err(rhai::EvalAltResult::ErrorModuleNotFound(path.to_string(), pos).into());
+            }
+            Err(error) => {
+                let system = rhai::EvalAltResult::ErrorSystem(String::new(), Box::new(error));
+                return Err(in_module(system.into()).into());
+            }
+        };
+        let ast = engine
+            .compile(code)
+            .map_err(|source| in_module(source.into()))?;
+        let module =
+            rhai::Module::eval_ast_as_new(Scope::new(), &ast, engine).map_err(in_module)?;
+        Ok(module.into())
+    }
+}
+
+impl rhai::ModuleResolver for ResourceModuleResolver {
+    fn resolve(
+        &self,
+        engine: &Engine,
+        _source: Option<&str>,
+        path: &str,
+        pos: rhai::Position,
+    ) -> Result<rhai::Shared<rhai::Module>, Box<rhai::EvalAltResult>> {
+        let Some(_loading) = LoadingModule::start(path) else {
+            let cycle = "Import cycle".into();
+            return Err(rhai::EvalAltResult::ErrorInModule(path.to_string(), cycle, pos).into());
+        };
+        self.load(engine, path, pos)
+    }
 }
 
 #[async_trait::async_trait]
@@ -404,7 +511,7 @@ impl crate::task::runner::Handler for EventHandler {
 
             let result: Dynamic = self
                 .engine
-                .eval_with_scope(&mut scope, &self.code)
+                .eval_ast_with_scope(&mut scope, &self.ast)
                 .map_err(execution_error)?;
 
             // Extract ctx from scope after script execution.
@@ -899,8 +1006,18 @@ impl crate::task::runner::Runner for Processor {
             },
         );
 
+        match &self.task_context.resource_loader {
+            Some(loader) => engine.set_module_resolver(ResourceModuleResolver {
+                resource_loader: loader.clone(),
+            }),
+            None => engine.set_module_resolver(rhai::module_resolvers::DummyModuleResolver::new()),
+        };
+        let ast = engine
+            .compile_into_self_contained(&Scope::new(), &script_code)
+            .map_err(|source| Error::Compile { source })?;
+
         let event_handler = EventHandler {
-            code: script_code,
+            ast,
             tx: self.tx.clone(),
             task_id: self.task_id,
             engine,
@@ -923,7 +1040,10 @@ impl crate::task::runner::Runner for Processor {
                     Ok(handler) => Ok(handler),
                     Err(e) => {
                         error!(error = %e, "Failed to initialize script processor");
-                        Err(tokio_retry::RetryError::transient(e))
+                        match init_retryable(&e) {
+                            true => Err(tokio_retry::RetryError::transient(e)),
+                            false => Err(tokio_retry::RetryError::permanent(e)),
+                        }
                     }
                 }
             },
@@ -1270,6 +1390,7 @@ pub(crate) fn register_helpers(engine: &mut Engine) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache::Cache as _;
     use crate::task::runner::{Handler, Runner};
     use serde_json::{json, Map, Value};
     use tokio::sync::mpsc;
@@ -1398,7 +1519,6 @@ mod tests {
             name: "test".to_string(),
             engine: ScriptEngine::Rhai,
             code: crate::resource::Source::Inline("event".to_string()),
-            sandbox: None,
             limits: RhaiLimits::default(),
             depends_on: None,
             retry: None,
@@ -1438,7 +1558,9 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(100);
 
         let event_handler = EventHandler {
-            code: r#"#{ original: event.data, transformed: true }"#.to_string(),
+            ast: Engine::new()
+                .compile(r#"#{ original: event.data, transformed: true }"#)
+                .unwrap(),
             tx: Some(tx.clone()),
             task_id: 1,
             engine: Engine::new(),
@@ -1555,7 +1677,9 @@ mod tests {
         let tx_clone = tx.clone();
 
         let event_handler = EventHandler {
-            code: r#"if data.age < 18 { null } else { data }"#.to_string(),
+            ast: Engine::new()
+                .compile(r#"if event.data.age < 18 { () } else { event }"#)
+                .unwrap(),
             tx: Some(tx_clone),
             task_id: 1,
             engine: Engine::new(),
@@ -1577,16 +1701,9 @@ mod tests {
             timestamp: 123456789,
         };
 
-        tokio::spawn(async move {
-            event_handler.handle(input_event).await.unwrap();
-        });
+        event_handler.handle(input_event).await.unwrap();
 
-        // Should not receive any event (filtered out)
-        let result = tokio::time::timeout(tokio::time::Duration::from_millis(100), rx.recv()).await;
-        assert!(
-            result.is_err(),
-            "Expected no event to be sent (filtered out by null)"
-        );
+        assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -1694,7 +1811,9 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(100);
 
         let event_handler = EventHandler {
-            code: r#"[#{ id: 1 }, #{ id: 2 }, #{ id: 3 }]"#.to_string(),
+            ast: Engine::new()
+                .compile(r#"[#{ id: 1 }, #{ id: 2 }, #{ id: 3 }]"#)
+                .unwrap(),
             tx: Some(tx),
             task_id: 1,
             engine: Engine::new(),
@@ -1744,7 +1863,9 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(100);
 
         let event_handler = EventHandler {
-            code: r#"[#{ n: 1 }, #{ n: 2 }, #{ id: "explicit", n: 3 }]"#.to_string(),
+            ast: Engine::new()
+                .compile(r#"[#{ n: 1 }, #{ n: 2 }, #{ id: "explicit", n: 3 }]"#)
+                .unwrap(),
             tx: Some(tx),
             task_id: 1,
             engine: Engine::new(),
@@ -1790,12 +1911,15 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(100);
 
         let event_handler = EventHandler {
-            code: r#"
+            ast: Engine::new()
+                .compile(
+                    r#"
                 event.data.map(|row| #{
                     full_name: row.first_name + " " + row.last_name
                 })
-            "#
-            .to_string(),
+            "#,
+                )
+                .unwrap(),
             tx: Some(tx),
             task_id: 1,
             engine: Engine::new(),
@@ -1849,7 +1973,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(100);
 
         let event_handler = EventHandler {
-            code: "event".to_string(),
+            ast: Engine::new().compile("event").unwrap(),
             tx: Some(tx),
             task_id: 1,
             engine: Engine::new(),
@@ -1903,7 +2027,6 @@ mod tests {
                 code: crate::resource::Source::Inline(
                     r#"let id = sha256("campaign_1_ref_42"); #{ id: id }"#.to_string(),
                 ),
-                sandbox: None,
                 limits: RhaiLimits::default(),
                 depends_on: None,
                 retry: None,
@@ -1963,7 +2086,6 @@ mod tests {
                 code: crate::resource::Source::Inline(
                     r#"let id = sha512("campaign_1_ref_42"); #{ id: id }"#.to_string(),
                 ),
-                sandbox: None,
                 limits: RhaiLimits::default(),
                 depends_on: None,
                 retry: None,
@@ -2025,7 +2147,6 @@ mod tests {
                     name: "test_deterministic".to_string(),
                     engine: ScriptEngine::Rhai,
                     code: crate::resource::Source::Inline(code.to_string()),
-                    sandbox: None,
                     limits: RhaiLimits::default(),
                     depends_on: None,
                     retry: None,
@@ -2093,7 +2214,6 @@ mod tests {
                     "#
                     .to_string(),
                 ),
-                sandbox: None,
                 limits: RhaiLimits::default(),
                 depends_on: None,
                 retry: None,
@@ -2162,7 +2282,6 @@ mod tests {
                     "#
                     .to_string(),
                 ),
-                sandbox: None,
                 limits: RhaiLimits::default(),
                 depends_on: None,
                 retry: None,
@@ -2233,7 +2352,6 @@ mod tests {
                     "#
                     .to_string(),
                 ),
-                sandbox: None,
                 limits: RhaiLimits::default(),
                 depends_on: None,
                 retry: None,
@@ -2301,7 +2419,6 @@ mod tests {
                 "#
                 .to_string(),
             ),
-            sandbox: None,
             limits: RhaiLimits::default(),
             depends_on: None,
             retry: None,
@@ -2366,7 +2483,6 @@ mod tests {
                 "#
                 .to_string(),
             ),
-            sandbox: None,
             limits: RhaiLimits::default(),
             depends_on: None,
             retry: None,
@@ -2432,7 +2548,6 @@ mod tests {
                     "#
                     .to_string(),
                 ),
-                sandbox: None,
                 limits: RhaiLimits::default(),
                 depends_on: None,
                 retry: None,
@@ -2506,7 +2621,6 @@ mod tests {
             name: "test_script".to_string(),
             engine: ScriptEngine::Rhai,
             code: crate::resource::Source::Inline("data + 1".to_string()),
-            sandbox: None,
             limits: RhaiLimits::default(),
             depends_on: None,
             retry: None,
@@ -2528,7 +2642,6 @@ mod tests {
         assert_eq!(config.name, "");
         assert_eq!(config.engine, ScriptEngine::Rhai);
         assert_eq!(config.code, crate::resource::Source::Inline("".to_string()));
-        assert!(config.sandbox.is_none());
         assert!(config.retry.is_none());
     }
 
@@ -2544,7 +2657,6 @@ mod tests {
             name: "transform".to_string(),
             engine: ScriptEngine::Rhai,
             code: crate::resource::Source::Inline("data * 2".to_string()),
-            sandbox: None,
             limits: RhaiLimits::default(),
             depends_on: None,
             retry: None,
@@ -2563,7 +2675,6 @@ mod tests {
             name: "clone_test".to_string(),
             engine: ScriptEngine::Rhai,
             code: crate::resource::Source::Inline("data".to_string()),
-            sandbox: None,
             limits: RhaiLimits::default(),
             depends_on: None,
             retry: None,
@@ -2583,7 +2694,6 @@ mod tests {
             code: crate::resource::Source::Resource {
                 resource: "scripts/transform.rhai".to_string(),
             },
-            sandbox: None,
             limits: RhaiLimits::default(),
             depends_on: None,
             retry: None,
@@ -2598,5 +2708,194 @@ mod tests {
             }
             _ => panic!("Expected Resource variant"),
         }
+    }
+
+    async fn processor_with_resources(
+        code: &str,
+        resources: &[(&str, &str)],
+    ) -> (Processor, mpsc::Receiver<Event>) {
+        let cache = Arc::new(crate::cache::memory::MemoryCache::new());
+        for (key, content) in resources {
+            cache
+                .put(&format!("r.{key}"), content.to_string().into(), None)
+                .await
+                .unwrap();
+        }
+        let task_context = crate::task::context::TaskContextBuilder::new()
+            .flow_name("test-flow".to_string())
+            .task_manager(Arc::new(
+                crate::task::manager::TaskManagerBuilder::new()
+                    .build()
+                    .unwrap(),
+            ))
+            .cache(Arc::new(crate::cache::memory::MemoryCache::new()))
+            .resource_loader(Some(crate::resource::ResourceLoader::from_cache(
+                cache,
+                "r".to_string(),
+            )))
+            .build()
+            .unwrap();
+        let (tx, rx) = mpsc::channel(10);
+        let processor = Processor {
+            config: Arc::new(Script {
+                code: crate::resource::Source::Inline(code.to_string()),
+                ..Default::default()
+            }),
+            tx: Some(tx),
+            rx: mpsc::channel(10).1,
+            task_id: 1,
+            task_context: Arc::new(task_context),
+            task_type: "test",
+        };
+        (processor, rx)
+    }
+
+    fn json_event(data: Value) -> Event {
+        EventBuilder::new()
+            .data(EventData::Json(data))
+            .subject("s".to_string())
+            .task_id(0)
+            .task_type("test")
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_script_imports_functions_from_resources() {
+        let (processor, mut rx) = processor_with_resources(
+            r#"import "lib/math" as math; #{ total: math::double(event.data.n) }"#,
+            &[
+                (
+                    "lib/math.rhai",
+                    r#"import "lib/one" as one; fn double(n) { n * 2 + one::zero() }"#,
+                ),
+                ("lib/one.rhai", "fn zero() { 0 }"),
+            ],
+        )
+        .await;
+        let handler = processor.init().await.unwrap();
+
+        handler.handle(json_event(json!({"n": 21}))).await.unwrap();
+
+        let output = rx.recv().await.unwrap();
+        assert_eq!(output.data_as_json().unwrap(), json!({"total": 42}));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_script_importing_a_missing_module_fails_at_start_and_is_retried() {
+        let (processor, _rx) =
+            processor_with_resources(r#"import "lib/missing" as m; event"#, &[]).await;
+
+        let Err(error) = processor.init().await else {
+            panic!("A missing module must fail the start");
+        };
+
+        assert!(matches!(error, Error::Compile { .. }));
+        assert!(init_retryable(&error));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_nested_import_of_a_missing_module_is_retried() {
+        let (processor, _rx) = processor_with_resources(
+            r#"import "a" as a; event"#,
+            &[("a.rhai", r#"import "lib/missing" as m; fn x() { 1 }"#)],
+        )
+        .await;
+
+        let Err(error) = processor.init().await else {
+            panic!("A missing module must fail the start");
+        };
+
+        assert!(init_retryable(&error));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_import_cycle_fails_at_start_without_retrying() {
+        let (processor, _rx) = processor_with_resources(
+            r#"import "a" as a; event"#,
+            &[
+                ("a.rhai", r#"import "b" as b; fn x() { 1 }"#),
+                ("b.rhai", r#"import "a" as a; fn y() { 2 }"#),
+            ],
+        )
+        .await;
+
+        let Err(error) = processor.init().await else {
+            panic!("An import cycle must fail the start");
+        };
+
+        assert!(matches!(error, Error::Compile { .. }));
+        assert!(!init_retryable(&error));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_syntax_error_in_the_script_fails_at_start_without_retrying() {
+        let (processor, _rx) = processor_with_resources("let x = ;", &[]).await;
+
+        let Err(error) = processor.init().await else {
+            panic!("A syntax error must fail the start");
+        };
+
+        assert!(matches!(error, Error::Compile { .. }));
+        assert!(!init_retryable(&error));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_syntax_error_in_an_imported_module_stops_the_task_without_retrying() {
+        let (processor, _rx) = processor_with_resources(
+            r#"import "lib/broken" as broken; event"#,
+            &[("lib/broken.rhai", "fn x( { 1 }")],
+        )
+        .await;
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), processor.run())
+            .await
+            .expect("A module that does not compile must not be retried");
+
+        assert!(matches!(result, Err(Error::Compile { .. })));
+    }
+
+    #[test]
+    fn a_module_whose_load_panics_can_be_loaded_again() {
+        let panicked = std::panic::catch_unwind(|| {
+            let _loading = LoadingModule::start("a");
+            panic!("Module load failed");
+        });
+
+        assert!(panicked.is_err());
+        assert!(LoadingModule::start("a").is_some());
+    }
+
+    #[test]
+    fn a_module_already_loading_on_the_thread_is_an_import_cycle() {
+        let _loading = LoadingModule::start("a");
+
+        assert!(LoadingModule::start("a").is_none());
+    }
+
+    #[tokio::test]
+    async fn without_resources_a_script_cannot_import_files_from_disk() {
+        let dir = std::env::temp_dir().join(format!("flowgen_test_{}", uuid::Uuid::now_v7()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("module.rhai"), "fn x() { 1 }")
+            .await
+            .unwrap();
+        let code = format!(r#"import "{}" as m; event"#, dir.join("module").display());
+        let processor = Processor {
+            config: Arc::new(Script {
+                code: crate::resource::Source::Inline(code),
+                ..Default::default()
+            }),
+            tx: None,
+            rx: mpsc::channel(10).1,
+            task_id: 1,
+            task_context: create_mock_task_context(),
+            task_type: "test",
+        };
+
+        let result = processor.init().await;
+
+        tokio::fs::remove_dir_all(&dir).await.ok();
+        assert!(matches!(result, Err(Error::Compile { .. })));
     }
 }

@@ -63,15 +63,11 @@ pub struct Buffer {
     /// When specified, events are partitioned by the rendered key value and each partition
     /// is buffered and flushed independently based on size and timeout.
     pub partition_key: Option<String>,
-    /// When true, flush as soon as an incoming event carries a
-    /// completion signal from its upstream source. Sources that emit a
-    /// known-finite batch (`git_sync`, `oci_sync`) attach the
-    /// completion handle to the final event in the batch; with this
-    /// flag set, the buffer treats that as "no more events coming
-    /// from this batch" and flushes immediately instead of waiting
-    /// for `size` or `timeout`. Avoids tuning timeout against the
-    /// slowest layer pull when the source already knows when it's
-    /// done. Defaults to false to keep existing flows unchanged.
+    /// When true, flush as soon as the source's batch is complete instead
+    /// of waiting for `size` or `timeout`. Sources that emit a known-finite
+    /// batch (`git_sync`, `oci_sync`) attach a completion handle to its
+    /// final event. Events from an `iterate` are batched per array, and
+    /// the array's batches flush once every element has arrived.
     #[serde(default)]
     pub flush_on_completion: bool,
     /// Optional list of upstream task names this task depends on.
@@ -141,8 +137,8 @@ enum FlushReason {
     Timeout,
     /// Shutdown signal received.
     Shutdown,
-    /// An incoming event carried a completion signal and the buffer
-    /// was configured with `flush_on_completion`.
+    /// The source's batch is complete and the buffer was configured with
+    /// `flush_on_completion`.
     Completion,
 }
 
@@ -218,6 +214,155 @@ pub struct Processor {
     task_type: &'static str,
 }
 
+/// The `iterate` array an event came from.
+struct IterateArray {
+    id: String,
+    count: usize,
+}
+
+/// Removes the `iterate` meta from an event, so it never reaches the meta a
+/// batch passes on, and returns the array it names.
+fn take_iterate_array(meta: &mut Option<Map<String, Value>>) -> Option<IterateArray> {
+    let meta = meta.as_mut()?;
+    match (
+        meta.remove(super::iterate::ITERATE_ID_META),
+        meta.remove(super::iterate::ITERATE_COUNT_META),
+    ) {
+        (Some(Value::String(id)), Some(Value::Number(count))) => Some(IterateArray {
+            id,
+            count: usize::try_from(count.as_u64()?).ok()?,
+        }),
+        _ => None,
+    }
+}
+
+/// When an event shows the source's batch is complete: an `iterate` array once
+/// every element arrived, any other batch once its final event arrives.
+enum CompletionCue {
+    Never,
+    FinalEvent,
+    Array(IterateArray),
+}
+
+impl CompletionCue {
+    fn of(flush_on_completion: bool, array: Option<IterateArray>, final_event: bool) -> Self {
+        match (flush_on_completion, array, final_event) {
+            (false, _, _) => Self::Never,
+            (true, Some(array), _) => Self::Array(array),
+            (true, None, true) => Self::FinalEvent,
+            (true, None, false) => Self::Never,
+        }
+    }
+}
+
+/// Identifies a batch: its rendered partition key and, with
+/// `flush_on_completion`, the `iterate` array its events came from.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct BatchKey {
+    partition: Option<String>,
+    array: Option<String>,
+}
+
+/// Events collected under one key until they are flushed.
+struct Batch {
+    events: Vec<Value>,
+    origin: Origin,
+    /// Distinct upstream completions to signal once the batch is flushed.
+    completions: Vec<SharedCompletionTx>,
+    /// When the batch got its first event; the timeout runs from here.
+    started: Instant,
+}
+
+impl Batch {
+    fn new() -> Self {
+        Self {
+            events: Vec::new(),
+            origin: Origin::default(),
+            completions: Vec::new(),
+            started: Instant::now(),
+        }
+    }
+
+    fn push(&mut self, data: Value, event: Event) {
+        match self.events.is_empty() {
+            true => self.origin = Origin::new(event.meta, event.session, event.call_stack),
+            false => self.origin.add(event.session.as_ref()),
+        }
+        self.events.push(data);
+        if let Some(tx) = event.completion_tx {
+            absorb_completion(&mut self.completions, tx);
+        }
+    }
+}
+
+/// How many elements of an `iterate` array arrived, across its batches' flushes.
+struct ArrayProgress {
+    received: usize,
+    /// When the last element arrived; the progress is dropped a timeout later.
+    last_received: Instant,
+}
+
+/// The batches being collected and the `iterate` arrays they count.
+#[derive(Default)]
+struct Batches {
+    open: HashMap<BatchKey, Batch>,
+    arrays: HashMap<String, ArrayProgress>,
+}
+
+impl Batches {
+    fn is_empty(&self) -> bool {
+        self.open.is_empty() && self.arrays.is_empty()
+    }
+
+    /// Time until the earliest batch or array progress times out.
+    fn until_timeout(&self, timeout: Duration) -> Duration {
+        self.open
+            .values()
+            .map(|batch| batch.started)
+            .chain(self.arrays.values().map(|progress| progress.last_received))
+            .map(|since| timeout.saturating_sub(since.elapsed()))
+            .min()
+            .unwrap_or(timeout)
+    }
+
+    /// Removes the batch under `key`.
+    fn take(&mut self, key: &BatchKey) -> Vec<(BatchKey, Batch)> {
+        self.open.remove_entry(key).into_iter().collect()
+    }
+
+    /// Counts an element of `array`; once every element arrived, removes the
+    /// array's batches in all partitions.
+    fn receive_element(&mut self, array: &IterateArray) -> Option<Vec<(BatchKey, Batch)>> {
+        let progress = self
+            .arrays
+            .entry(array.id.clone())
+            .or_insert(ArrayProgress {
+                received: 0,
+                last_received: Instant::now(),
+            });
+        progress.received += 1;
+        progress.last_received = Instant::now();
+        if progress.received < array.count {
+            return None;
+        }
+        self.arrays.remove(&array.id);
+        Some(
+            self.open
+                .extract_if(|key, _| key.array.as_deref() == Some(array.id.as_str()))
+                .collect(),
+        )
+    }
+
+    /// Drops array progress and removes batches whose timeout elapsed.
+    fn take_expired(&mut self, timeout: Duration) -> Vec<(BatchKey, Batch)> {
+        self.arrays
+            .retain(|_, progress| progress.last_received.elapsed() < timeout);
+        self.open
+            .extract_if(|_, batch| batch.started.elapsed() >= timeout)
+            .collect()
+    }
+}
+
 /// Adds an upstream completion tx to the absorbed set if not already present.
 /// Dedupes by Arc pointer so cloned-from-same-source events do not produce
 /// duplicate signals on flush. Same source = same Arc; concurrent sources =
@@ -270,29 +415,17 @@ impl Processor {
     /// Waits until the next task takes the batch, so a slow task also slows
     /// down the buffer and everything before it.
     ///
-    /// # Arguments
-    /// * `buffer` - Vector of accumulated events to flush.
-    /// * `reason` - The reason this flush was triggered.
-    /// * `partition_key` - Optional key that was used to group these events.
-    /// * `origin` - Meta and session the batch's events pass on.
-    /// * `upstream_completions` - Deduped completion channels from every distinct
-    ///   source event absorbed into this batch. The buffer attaches a single
-    ///   completion to the flushed event downstream; once that completion fires,
-    ///   it is fanned back out to every absorbed upstream so every source gets
-    ///   acked. When the buffer is itself a leaf, all upstreams are signalled
-    ///   directly.
-    async fn flush_buffer(
-        &self,
-        buffer: Vec<Value>,
-        reason: FlushReason,
-        partition_key: Option<String>,
-        origin: Origin,
-        upstream_completions: Vec<SharedCompletionTx>,
-    ) {
-        if buffer.is_empty() {
-            return;
-        }
-
+    /// The flushed event carries a single completion downstream; once it fires,
+    /// it is fanned back out to every distinct source absorbed into the batch,
+    /// so every source gets acked. When the buffer is itself a leaf, every
+    /// source is signalled directly.
+    async fn flush_buffer(&self, batch: Batch, reason: FlushReason, partition_key: Option<String>) {
+        let Batch {
+            events: buffer,
+            origin,
+            completions: upstream_completions,
+            ..
+        } = batch;
         let tx = self.tx.clone();
         let config_name = self.config.name.clone();
         let task_id = self.task_id;
@@ -363,321 +496,108 @@ impl Processor {
         .await
     }
 
+    async fn flush_all(&self, batches: Vec<(BatchKey, Batch)>, reason: FlushReason) {
+        for (key, batch) in batches {
+            self.flush_buffer(batch, reason, key.partition).await;
+        }
+    }
+
     /// Processes the main event loop with buffer accumulation and flush triggers.
     ///
     /// Uses `tokio::select!` to handle three concurrent conditions:
-    /// 1. Receiving new events and accumulating them in the buffer(s)
+    /// 1. Receiving new events and accumulating them in their batch
     /// 2. Timeout expiration to flush partial batches
     /// 3. Shutdown signal to flush remaining events
     ///
-    /// When partition_key is configured, maintains separate buffers per key with independent
-    /// size and timeout tracking. Otherwise uses a single buffer.
+    /// Each partition, and with `flush_on_completion` each `iterate` array,
+    /// has its own batch with independent size and timeout tracking.
     async fn process_events(&mut self) -> Result<(), Error> {
-        let timeout_duration = self.config.timeout.unwrap_or(Duration::from_secs(30));
-
-        // If partition_key is configured, use HashMap for keyed buffers.
-        if self.config.partition_key.is_some() {
-            self.process_events_keyed(timeout_duration).await
-        } else {
-            self.process_events_single(timeout_duration).await
-        }
-    }
-
-    /// Passes on an event whose upstream task failed, and returns the others.
-    async fn pass_on_failed(&self, mut event: Event) -> Option<Event> {
-        match event.error.take() {
-            Some(error) => {
-                event.forward_failure(self.tx.as_ref(), error).await;
-                None
-            }
-            None => Some(event),
-        }
-    }
-
-    /// Processes events with a single buffer (no keying).
-    async fn process_events_single(&mut self, timeout_duration: Duration) -> Result<(), Error> {
-        let mut buffer: Vec<Value> = Vec::with_capacity(self.config.size);
-        let mut buffer_origin = Origin::default();
-        // Distinct upstream completion handles absorbed by the current batch.
-        // Each source event carries its own `CompletionState`; concurrent
-        // sources (webhooks, NATS, MCP) produce distinct Arcs. The buffer must
-        // ack every one of them when the flush completes — keeping only the
-        // last would silently drop N-1 source acks per flush.
-        let mut buffer_completions: Vec<SharedCompletionTx> = Vec::new();
-        // The timeout runs from the batch's first event, so an idle gap
-        // longer than the timeout cannot split the next burst.
-        let mut batch_started = Instant::now();
+        let timeout = self.config.timeout.unwrap_or(Duration::from_secs(30));
+        let mut batches = Batches::default();
 
         loop {
             if self.task_context.cancellation_token.is_cancelled() {
                 return Ok(());
             }
 
-            // Calculate remaining time until next timeout flush.
-            let time_until_flush = timeout_duration
-                .checked_sub(batch_started.elapsed())
-                .unwrap_or(Duration::ZERO);
-
+            let until_timeout = batches.until_timeout(timeout);
             tokio::select! {
-                // Receive and buffer incoming events.
-                result = self.rx.recv() => {
-                    match result {
-                        Some(event) => {
-                            let Some(event) = self.pass_on_failed(event).await else {
-                                continue;
-                            };
-                            // Capture meta and start the timeout on the first event in buffer.
-                            match buffer.is_empty() {
-                                true => {
-                                    buffer_origin = Origin::new(event.meta.clone(), event.session.clone(), event.call_stack.clone());
-                                    batch_started = Instant::now();
-                                }
-                                false => buffer_origin.add(event.session.as_ref()),
-                            }
-
-                            // Extract JSON data from event.
-                            let json_data = match event.data {
-                                EventData::Json(data) => data,
-                                EventData::ArrowRecordBatch(_) => {
-                                    return Err(Error::ExpectedJsonGotArrowRecordBatch);
-                                }
-                                EventData::Avro(_) => {
-                                    return Err(Error::ExpectedJsonGotAvro);
-                                }
-                                EventData::Bytes(_) => {
-                                    return Err(Error::ExpectedJsonGotBytes);
-                                }
-                            };
-
-                            buffer.push(json_data);
-
-                            // Sources that emit a known-finite batch attach
-                            // a completion handle to the final event in the
-                            // batch. When `flush_on_completion` is set, that
-                            // is also the cue to flush the buffer right
-                            // away instead of waiting for `size`/`timeout`.
-                            let trigger_completion_flush =
-                                self.config.flush_on_completion && event.completion_tx.is_some();
-
-                            if let Some(tx) = event.completion_tx {
-                                absorb_completion(&mut buffer_completions, tx);
-                            }
-
-                            // Flush if buffer reached size limit OR the
-                            // upstream source signalled completion.
-                            let reached_size = buffer.len() >= self.config.size;
-                            if reached_size || trigger_completion_flush {
-                                let flush_buffer = std::mem::replace(&mut buffer, Vec::with_capacity(self.config.size));
-                                let flush_origin = std::mem::take(&mut buffer_origin);
-                                let flush_completions = std::mem::take(&mut buffer_completions);
-                                let reason = if reached_size {
-                                    FlushReason::Size
-                                } else {
-                                    FlushReason::Completion
-                                };
-                                self.flush_buffer(flush_buffer, reason, None, flush_origin, flush_completions).await;
-                            }
-                        }
-                        None => {
-                            // Channel closed, flush remaining events and exit.
-                            if !buffer.is_empty() {
-                                self.flush_buffer(buffer, FlushReason::Shutdown, None, buffer_origin, buffer_completions).await;
-                            }
-                            return Ok(());
-                        }
+                result = self.rx.recv() => match result {
+                    Some(event) => self.receive(&mut batches, event).await?,
+                    None => {
+                        let remaining = batches.open.drain().collect();
+                        self.flush_all(remaining, FlushReason::Shutdown).await;
+                        return Ok(());
                     }
-                }
-
-                // Timeout trigger to flush partial batches.
-                _ = sleep(time_until_flush), if !buffer.is_empty() => {
-                    let flush_buffer = std::mem::replace(&mut buffer, Vec::with_capacity(self.config.size));
-                    let flush_origin = std::mem::take(&mut buffer_origin);
-                    let flush_completions = std::mem::take(&mut buffer_completions);
-                    self.flush_buffer(flush_buffer, FlushReason::Timeout, None, flush_origin, flush_completions).await;
+                },
+                _ = sleep(until_timeout), if !batches.is_empty() => {
+                    let expired = batches.take_expired(timeout);
+                    self.flush_all(expired, FlushReason::Timeout).await;
                 }
             }
         }
     }
 
-    /// Processes events with keyed buffers (separate buffer per key).
-    async fn process_events_keyed(&mut self, timeout_duration: Duration) -> Result<(), Error> {
-        // Pre-allocate capacity for typical partition count (e.g., 16 partitions).
-        let mut buffers: HashMap<String, Vec<Value>> = HashMap::with_capacity(16);
-        let mut buffer_origins: HashMap<String, Origin> = HashMap::with_capacity(16);
-        // Per-key list of distinct upstream completions to ack on flush. See
-        // `process_events_single` for why we keep all of them rather than
-        // the last.
-        let mut buffer_completions: HashMap<String, Vec<SharedCompletionTx>> =
-            HashMap::with_capacity(16);
-        // Start of each active keyed batch; an entry exists only while its
-        // key has a buffer, so idle keys cannot drive the flush timer to zero.
-        let mut batch_started_times: HashMap<String, Instant> = HashMap::with_capacity(16);
-
-        loop {
-            if self.task_context.cancellation_token.is_cancelled() {
-                return Ok(());
-            }
-
-            // Find the earliest timeout across all active keyed buffers.
-            // Only calculated once per loop iteration, not on every event.
-            let min_time_until_flush = if buffers.is_empty() {
-                timeout_duration
-            } else {
-                batch_started_times
-                    .values()
-                    .filter_map(|started| timeout_duration.checked_sub(started.elapsed()))
-                    .min()
-                    .unwrap_or(Duration::ZERO)
-            };
-
-            tokio::select! {
-                // Receive and buffer incoming events.
-                result = self.rx.recv() => {
-                    match result {
-                        Some(event) => {
-                            let Some(mut event) = self.pass_on_failed(event).await else {
-                                continue;
-                            };
-                            // Render the config with event data to get the rendered buffer key.
-                            let rendered_config = self.config.render_for_event(&event)
-                                .map_err(|source| Error::Render { source })?;
-
-                            // Extract the rendered key from the config.
-                            let rendered_key = rendered_config.partition_key.ok_or(Error::MissingPartitionKey)?;
-
-                            // Extract JSON data from event (after rendering to avoid unnecessary clone).
-                            let json_data = match event.data {
-                                EventData::Json(data) => data,
-                                EventData::ArrowRecordBatch(_) => {
-                                    return Err(Error::ExpectedJsonGotArrowRecordBatch);
-                                }
-                                EventData::Avro(_) => {
-                                    return Err(Error::ExpectedJsonGotAvro);
-                                }
-                                EventData::Bytes(_) => {
-                                    return Err(Error::ExpectedJsonGotBytes);
-                                }
-                            };
-
-                            let completion_tx = event.completion_tx.take();
-                            // Sources that emit a known-finite batch attach
-                            // a completion handle to the final event in the
-                            // batch. When `flush_on_completion` is set, that
-                            // is also the cue to flush the buffer right
-                            // away instead of waiting for `size`/`timeout`.
-                            let trigger_completion_flush =
-                                self.config.flush_on_completion && completion_tx.is_some();
-
-                            // Get or create buffer for this key with pre-allocated capacity.
-                            use std::collections::hash_map::Entry;
-                            let buffer_size = self.config.size;
-                            let flushed_key = match buffers.entry(rendered_key.clone()) {
-                                Entry::Vacant(vacant) => {
-                                    let key = vacant.key().clone();
-                                    let mut buffer = Vec::with_capacity(buffer_size);
-                                    buffer.push(json_data);
-                                    vacant.insert(buffer);
-                                    buffer_origins.insert(key.clone(), Origin::new(event.meta, event.session, event.call_stack));
-                                    if let Some(tx) = completion_tx {
-                                        buffer_completions.insert(key.clone(), vec![tx]);
-                                    }
-                                    batch_started_times.insert(key.clone(), Instant::now());
-                                    if trigger_completion_flush {
-                                        Some(key)
-                                    } else {
-                                        None
-                                    }
-                                }
-                                Entry::Occupied(mut occupied) => {
-                                    // Get key before any mutable borrows.
-                                    let key = occupied.key().clone();
-
-                                    let buffer = occupied.get_mut();
-                                    buffer.push(json_data);
-                                    if let Some(origin) = buffer_origins.get_mut(&key) {
-                                        origin.add(event.session.as_ref());
-                                    }
-
-                                    if let Some(tx) = completion_tx {
-                                        let absorbed = buffer_completions
-                                            .entry(key.clone())
-                                            .or_default();
-                                        absorb_completion(absorbed, tx);
-                                    }
-
-                                    // Flush if this key's buffer reached size limit.
-                                    if buffer.len() >= buffer_size {
-                                        let buffer_to_flush = occupied.remove();
-                                        let buffer_origin = buffer_origins.remove(&key).unwrap_or_default();
-                                        let buffer_completion = buffer_completions.remove(&key).unwrap_or_default();
-                                        self.flush_buffer(buffer_to_flush, FlushReason::Size, Some(key.clone()), buffer_origin, buffer_completion).await;
-                                        batch_started_times.remove(&key);
-                                        None
-                                    } else if trigger_completion_flush {
-                                        Some(key)
-                                    } else {
-                                        None
-                                    }
-                                }
-                            };
-
-                            if let Some(key) = flushed_key {
-                                if let Some(buffer_to_flush) = buffers.remove(&key) {
-                                    let buffer_origin = buffer_origins.remove(&key).unwrap_or_default();
-                                    let buffer_completion =
-                                        buffer_completions.remove(&key).unwrap_or_default();
-                                    self.flush_buffer(
-                                        buffer_to_flush,
-                                        FlushReason::Completion,
-                                        Some(key.clone()),
-                                        buffer_origin,
-                                        buffer_completion,
-                                    )
-                                    .await;
-                                    batch_started_times.remove(&key);
-                                }
-                            }
-                        }
-                        None => {
-                            // Channel closed, flush all remaining buffers and exit.
-                            for (key, buffer) in buffers {
-                                if !buffer.is_empty() {
-                                    let buffer_origin = buffer_origins.remove(&key).unwrap_or_default();
-                                    let buffer_completion = buffer_completions.remove(&key).unwrap_or_default();
-                                    self.flush_buffer(buffer, FlushReason::Shutdown, Some(key), buffer_origin, buffer_completion).await;
-                                }
-                            }
-                            return Ok(());
-                        }
-                    }
-                }
-
-                // Timeout trigger to flush buffers that have exceeded timeout.
-                _ = sleep(min_time_until_flush), if !buffers.is_empty() => {
-                    let now = Instant::now();
-                    let mut keys_to_flush = Vec::new();
-
-                    // Find all keys with active buffers whose timeout has been exceeded.
-                    for (key, started) in &batch_started_times {
-                        if now.duration_since(*started) >= timeout_duration && buffers.contains_key(key) {
-                            keys_to_flush.push(key.clone());
-                        }
-                    }
-
-                    // Flush timed-out buffers.
-                    for key in keys_to_flush {
-                        if let Some(buffer) = buffers.remove(&key) {
-                            if !buffer.is_empty() {
-                                let buffer_origin = buffer_origins.remove(&key).unwrap_or_default();
-                                let buffer_completion = buffer_completions.remove(&key).unwrap_or_default();
-                                self.flush_buffer(buffer, FlushReason::Timeout, Some(key.clone()), buffer_origin, buffer_completion).await;
-                            }
-                        }
-                        batch_started_times.remove(&key);
-                    }
+    /// Adds an event to its batch and flushes the batches it fills or completes.
+    ///
+    /// An event whose upstream task failed is passed on instead, and still
+    /// counts as an arrived element of its `iterate` array.
+    async fn receive(&self, batches: &mut Batches, mut event: Event) -> Result<(), Error> {
+        if let Some(error) = event.error.take() {
+            let array = take_iterate_array(&mut event.meta);
+            event.forward_failure(self.tx.as_ref(), error).await;
+            if let (true, Some(array)) = (self.config.flush_on_completion, array) {
+                if let Some(completed) = batches.receive_element(&array) {
+                    self.flush_all(completed, FlushReason::Completion).await;
                 }
             }
+            return Ok(());
         }
+
+        let partition = match self.config.partition_key {
+            Some(_) => {
+                let rendered = self
+                    .config
+                    .render_for_event(&event)
+                    .map_err(|source| Error::Render { source })?;
+                Some(rendered.partition_key.ok_or(Error::MissingPartitionKey)?)
+            }
+            None => None,
+        };
+        let cue = CompletionCue::of(
+            self.config.flush_on_completion,
+            take_iterate_array(&mut event.meta),
+            event.completion_tx.is_some(),
+        );
+        let data = match std::mem::replace(&mut event.data, EventData::Json(Value::Null)) {
+            EventData::Json(data) => data,
+            EventData::ArrowRecordBatch(_) => return Err(Error::ExpectedJsonGotArrowRecordBatch),
+            EventData::Avro(_) => return Err(Error::ExpectedJsonGotAvro),
+            EventData::Bytes(_) => return Err(Error::ExpectedJsonGotBytes),
+        };
+
+        let key = BatchKey {
+            partition,
+            array: match &cue {
+                CompletionCue::Array(array) => Some(array.id.clone()),
+                CompletionCue::FinalEvent | CompletionCue::Never => None,
+            },
+        };
+        let batch = batches.open.entry(key.clone()).or_insert_with(Batch::new);
+        batch.push(data, event);
+        let full = batch.events.len() >= self.config.size;
+
+        let completed = match &cue {
+            CompletionCue::Array(array) => batches.receive_element(array),
+            CompletionCue::FinalEvent => Some(batches.take(&key)),
+            CompletionCue::Never => None,
+        };
+        match (completed, full) {
+            (Some(completed), _) => self.flush_all(completed, FlushReason::Completion).await,
+            (None, true) => self.flush_all(batches.take(&key), FlushReason::Size).await,
+            (None, false) => {}
+        }
+        Ok(())
     }
 }
 
@@ -1361,6 +1281,319 @@ mod tests {
 
         drop(upstream_tx);
         let _ = handle.await;
+    }
+
+    fn buffer_config(
+        size: usize,
+        partition_key: Option<&str>,
+        flush_on_completion: bool,
+    ) -> Buffer {
+        Buffer {
+            name: "test".to_string(),
+            size,
+            timeout: Some(Duration::from_secs(30)),
+            partition_key: partition_key.map(String::from),
+            flush_on_completion,
+            depends_on: None,
+            retry: None,
+        }
+    }
+
+    async fn spawn_buffer(config: Buffer) -> (mpsc::Sender<Event>, mpsc::Receiver<Event>) {
+        let (downstream_tx, downstream_rx) = mpsc::channel(100);
+        let (upstream_tx, upstream_rx) = mpsc::channel(100);
+        let processor = ProcessorBuilder::new()
+            .config(Arc::new(config))
+            .sender(downstream_tx)
+            .receiver(upstream_rx)
+            .task_id(1)
+            .task_type("buffer")
+            .task_context(create_mock_task_context())
+            .build()
+            .await
+            .unwrap();
+        tokio::spawn(async move {
+            use crate::task::runner::Runner;
+            let _ = processor.run().await;
+        });
+        (upstream_tx, downstream_rx)
+    }
+
+    fn element(data: Value, array_id: &str, count: usize) -> Event {
+        use super::super::iterate::{ITERATE_COUNT_META, ITERATE_ID_META};
+        let (completion, _) = new_completion_channel(1);
+        let mut event = EventBuilder::new()
+            .data(EventData::Json(data))
+            .subject("element".into())
+            .task_id(0)
+            .task_type("test")
+            .completion_tx(completion)
+            .build()
+            .unwrap();
+        let meta = event.meta.get_or_insert_with(Default::default);
+        meta.insert("correlation_id".to_string(), Value::from("c1"));
+        meta.insert(ITERATE_ID_META.to_string(), Value::from(array_id));
+        meta.insert(ITERATE_COUNT_META.to_string(), Value::from(count));
+        event
+    }
+
+    async fn next_flush(downstream_rx: &mut mpsc::Receiver<Event>) -> Event {
+        tokio::time::timeout(Duration::from_secs(1), downstream_rx.recv())
+            .await
+            .expect("no flush within a second")
+            .expect("downstream channel closed")
+    }
+
+    fn has_iterate_meta(event: &Event) -> bool {
+        use super::super::iterate::{ITERATE_COUNT_META, ITERATE_ID_META};
+        match &event.meta {
+            Some(meta) => {
+                meta.contains_key(ITERATE_COUNT_META) || meta.contains_key(ITERATE_ID_META)
+            }
+            None => false,
+        }
+    }
+
+    async fn an_iterate_completes_once_every_element_arrived(partition_key: Option<&str>) {
+        use serde_json::json;
+        let (upstream_tx, mut downstream_rx) =
+            spawn_buffer(buffer_config(100, partition_key, true)).await;
+
+        upstream_tx.send(element(json!(0), "a1", 3)).await.unwrap();
+        upstream_tx.send(element(json!(1), "a1", 3)).await.unwrap();
+        let early = tokio::time::timeout(Duration::from_millis(200), downstream_rx.recv()).await;
+        upstream_tx.send(element(json!(2), "a1", 3)).await.unwrap();
+        let flushed = next_flush(&mut downstream_rx).await;
+
+        assert!(early.is_err());
+        let data = flushed.data_as_json().unwrap();
+        assert_eq!(data["batch_size"], 3);
+        assert_eq!(data["flush_reason"], "completion");
+        assert!(!has_iterate_meta(&flushed));
+    }
+
+    #[tokio::test]
+    async fn an_iterate_completes_once_every_element_arrived_without_partitions() {
+        an_iterate_completes_once_every_element_arrived(None).await;
+    }
+
+    #[tokio::test]
+    async fn an_iterate_completes_once_every_element_arrived_per_partition() {
+        an_iterate_completes_once_every_element_arrived(Some("{{event.meta.correlation_id}}"))
+            .await;
+    }
+
+    async fn an_array_longer_than_size_flushes_its_tail_on_completion(partition_key: Option<&str>) {
+        use serde_json::json;
+        let (upstream_tx, mut downstream_rx) =
+            spawn_buffer(buffer_config(2, partition_key, true)).await;
+
+        for i in 0..5 {
+            upstream_tx.send(element(json!(i), "a1", 5)).await.unwrap();
+        }
+        let mut flushes = Vec::new();
+        for _ in 0..3 {
+            let data = next_flush(&mut downstream_rx).await.data_as_json().unwrap();
+            flushes.push((data["batch_size"].clone(), data["flush_reason"].clone()));
+        }
+
+        assert_eq!(
+            flushes,
+            vec![
+                (json!(2), json!("size")),
+                (json!(2), json!("size")),
+                (json!(1), json!("completion")),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_array_longer_than_size_flushes_its_tail_on_completion_without_partitions() {
+        an_array_longer_than_size_flushes_its_tail_on_completion(None).await;
+    }
+
+    #[tokio::test]
+    async fn an_array_longer_than_size_flushes_its_tail_on_completion_per_partition() {
+        an_array_longer_than_size_flushes_its_tail_on_completion(Some(
+            "{{event.meta.correlation_id}}",
+        ))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn arrays_arriving_interleaved_under_one_correlation_id_are_batched_apart() {
+        use serde_json::json;
+        let (upstream_tx, mut downstream_rx) = spawn_buffer(buffer_config(100, None, true)).await;
+
+        upstream_tx
+            .send(element(json!("x1"), "x", 2))
+            .await
+            .unwrap();
+        upstream_tx
+            .send(element(json!("y1"), "y", 2))
+            .await
+            .unwrap();
+        upstream_tx
+            .send(element(json!("x2"), "x", 2))
+            .await
+            .unwrap();
+        upstream_tx
+            .send(element(json!("y2"), "y", 2))
+            .await
+            .unwrap();
+        let first = next_flush(&mut downstream_rx).await.data_as_json().unwrap();
+        let second = next_flush(&mut downstream_rx).await.data_as_json().unwrap();
+
+        assert_eq!(first["batch"], json!(["x1", "x2"]));
+        assert_eq!(first["flush_reason"], "completion");
+        assert_eq!(second["batch"], json!(["y1", "y2"]));
+        assert_eq!(second["flush_reason"], "completion");
+    }
+
+    #[tokio::test]
+    async fn nested_iterates_give_each_inner_array_its_own_batch() {
+        use crate::task::iterate::{Iterate, ProcessorBuilder as IterateBuilder};
+        use crate::task::runner::Runner;
+        use serde_json::json;
+        let (source_tx, outer_rx) = mpsc::channel(10);
+        let (outer_tx, inner_rx) = mpsc::channel(10);
+        let (inner_tx, buffer_rx) = mpsc::channel(10);
+        let (buffer_tx, mut downstream_rx) = mpsc::channel(10);
+        for (name, rx, tx) in [("outer", outer_rx, outer_tx), ("inner", inner_rx, inner_tx)] {
+            let iterate = IterateBuilder::new()
+                .config(Arc::new(Iterate {
+                    name: name.to_string(),
+                    ..Default::default()
+                }))
+                .receiver(rx)
+                .sender(tx)
+                .task_type("iterate")
+                .task_context(create_mock_task_context())
+                .build()
+                .await
+                .unwrap();
+            tokio::spawn(async move {
+                let _ = iterate.run().await;
+            });
+        }
+        let buffer = ProcessorBuilder::new()
+            .config(Arc::new(buffer_config(100, None, true)))
+            .receiver(buffer_rx)
+            .sender(buffer_tx)
+            .task_type("buffer")
+            .task_context(create_mock_task_context())
+            .build()
+            .await
+            .unwrap();
+        tokio::spawn(async move {
+            let _ = buffer.run().await;
+        });
+
+        let source = EventBuilder::new()
+            .data(EventData::Json(json!([["a", "b", "c"], ["d"]])))
+            .subject("source".into())
+            .task_id(0)
+            .task_type("test")
+            .build()
+            .unwrap();
+        source_tx.send(source).await.unwrap();
+        let mut batches = Vec::new();
+        for _ in 0..2 {
+            let flushed = next_flush(&mut downstream_rx).await;
+            assert!(!has_iterate_meta(&flushed));
+            let data = flushed.data_as_json().unwrap();
+            assert_eq!(data["flush_reason"], "completion");
+            batches.push(data["batch"].clone());
+        }
+        batches.sort_by_key(|batch| batch.to_string());
+
+        assert_eq!(batches, vec![json!(["a", "b", "c"]), json!(["d"])]);
+    }
+
+    #[tokio::test]
+    async fn an_array_split_across_partitions_flushes_every_partition_on_completion() {
+        use serde_json::json;
+        let (upstream_tx, mut downstream_rx) =
+            spawn_buffer(buffer_config(100, Some("{{event.data.k}}"), true)).await;
+
+        for k in ["p", "q", "p"] {
+            upstream_tx
+                .send(element(json!({ "k": k }), "a1", 3))
+                .await
+                .unwrap();
+        }
+        let mut flushes = Vec::new();
+        for _ in 0..2 {
+            let data = next_flush(&mut downstream_rx).await.data_as_json().unwrap();
+            flushes.push((
+                data["partition_key"].clone(),
+                data["batch_size"].clone(),
+                data["flush_reason"].clone(),
+            ));
+        }
+        flushes.sort_by_key(|flush| flush.0.to_string());
+
+        assert_eq!(
+            flushes,
+            vec![
+                (json!("p"), json!(2), json!("completion")),
+                (json!("q"), json!(1), json!("completion")),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_element_is_passed_on_and_still_counts_toward_its_array() {
+        use serde_json::json;
+        let (upstream_tx, mut downstream_rx) = spawn_buffer(buffer_config(100, None, true)).await;
+
+        upstream_tx.send(element(json!(0), "a1", 3)).await.unwrap();
+        upstream_tx.send(element(json!(1), "a1", 3)).await.unwrap();
+        let mut failed = element(json!(2), "a1", 3);
+        failed.error = Some("upstream failed".to_string());
+        upstream_tx.send(failed).await.unwrap();
+        let passed_on = next_flush(&mut downstream_rx).await;
+        let batch = next_flush(&mut downstream_rx).await;
+
+        assert_eq!(passed_on.error.as_deref(), Some("upstream failed"));
+        assert!(!has_iterate_meta(&passed_on));
+        let data = batch.data_as_json().unwrap();
+        assert_eq!(data["batch"], json!([0, 1]));
+        assert_eq!(data["flush_reason"], "completion");
+    }
+
+    #[tokio::test]
+    async fn iterate_meta_never_reaches_the_batch_meta_without_flush_on_completion() {
+        use serde_json::json;
+        let (upstream_tx, mut downstream_rx) = spawn_buffer(buffer_config(2, None, false)).await;
+
+        upstream_tx.send(element(json!(0), "a1", 2)).await.unwrap();
+        upstream_tx.send(element(json!(1), "a1", 2)).await.unwrap();
+        let flushed = next_flush(&mut downstream_rx).await;
+
+        assert_eq!(flushed.data_as_json().unwrap()["flush_reason"], "size");
+        assert!(!has_iterate_meta(&flushed));
+    }
+
+    #[tokio::test]
+    async fn the_first_event_of_a_partition_flushes_when_it_fills_the_batch() {
+        use serde_json::json;
+        let (upstream_tx, mut downstream_rx) =
+            spawn_buffer(buffer_config(1, Some("{{event.data.k}}"), false)).await;
+        let event = EventBuilder::new()
+            .data(EventData::Json(json!({ "k": "p" })))
+            .subject("a".into())
+            .task_id(0)
+            .task_type("test")
+            .build()
+            .unwrap();
+
+        upstream_tx.send(event).await.unwrap();
+        let data = next_flush(&mut downstream_rx).await.data_as_json().unwrap();
+
+        assert_eq!(data["batch_size"], 1);
+        assert_eq!(data["flush_reason"], "size");
+        assert_eq!(data["partition_key"], "p");
     }
 
     #[tokio::test]

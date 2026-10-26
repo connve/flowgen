@@ -23,12 +23,12 @@ pub mod jetstream {
     pub mod config;
     /// Message conversion utilities for JetStream integration.
     pub mod message;
-    /// JetStream publisher implementation for reliable message publishing.
-    pub mod publisher;
+    /// Publishes events to JetStream.
+    pub mod publish;
     /// Stream management utilities for creating and updating JetStream streams.
     pub mod stream;
-    /// JetStream subscriber implementation for reliable message consumption.
-    pub mod subscriber;
+    /// Consumes messages from JetStream.
+    pub mod subscribe;
 }
 
 /// JetStream Key-Value store operations (get, put, list, delete).
@@ -48,7 +48,7 @@ impl jetstream::config::Config {
     }
 }
 
-impl TaskMeta for jetstream::publisher::Publisher {
+impl TaskMeta for jetstream::publish::Publish {
     const CONNECTOR: Connector = CONNECTOR;
 
     fn connections(&self) -> Vec<Connection> {
@@ -56,7 +56,7 @@ impl TaskMeta for jetstream::publisher::Publisher {
     }
 }
 
-impl TaskMeta for jetstream::subscriber::Subscriber {
+impl TaskMeta for jetstream::subscribe::Subscribe {
     const CONNECTOR: Connector = CONNECTOR;
 
     fn connections(&self) -> Vec<Connection> {
@@ -72,9 +72,9 @@ impl TaskMeta for kv_store::KvStore {
     }
 }
 
-impl Task for jetstream::publisher::Publisher {
+impl Task for jetstream::publish::Publish {
     async fn run(self, io: TaskIo, context: Arc<TaskContext>) -> Result<(), TaskError> {
-        let mut builder = jetstream::publisher::ProcessorBuilder::new()
+        let mut builder = jetstream::publish::ProcessorBuilder::new()
             .config(Arc::new(self.0))
             .task_id(io.task_id)
             .task_type(io.task_type)
@@ -90,9 +90,9 @@ impl Task for jetstream::publisher::Publisher {
     }
 }
 
-impl Task for jetstream::subscriber::Subscriber {
+impl Task for jetstream::subscribe::Subscribe {
     async fn run(self, io: TaskIo, context: Arc<TaskContext>) -> Result<(), TaskError> {
-        let mut builder = jetstream::subscriber::ProcessorBuilder::new()
+        let mut builder = jetstream::subscribe::ProcessorBuilder::new()
             .config(Arc::new(self.0))
             .task_id(io.task_id)
             .task_type(io.task_type)

@@ -31,7 +31,7 @@ flow:
     - iterate:
         name: split_rows
 
-    - nats_jetstream_publisher:
+    - nats_jetstream_publish:
         name: publish_to_queue
         credentials_path: /etc/nats/credentials.json
         url: "{{env.NATS_URL}}"

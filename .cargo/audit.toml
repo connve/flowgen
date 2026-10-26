@@ -10,4 +10,24 @@
 # for `webpki-roots` 0.26.11 from `async-nats` via `tokio-websockets`. That
 # version re-exports `webpki-roots` v1, which Cargo.lock pins at the patched
 # 1.0.10. Remove the entry once `async-nats` depends on `webpki-roots` v1.
-ignore = ["RUSTSEC-2023-0071", "RUSTSEC-2026-0381"]
+#
+# RUSTSEC-2026-0387 (timing variability in `crypto-bigint` 0.5): it comes in
+# through `elliptic-curve`, an optional dependency of `ssh-key` behind its
+# `p256`/`p384` features, which are never compiled
+# (`cargo tree -i elliptic-curve --all-features --target all` prints nothing).
+# Remove the entry if `cargo tree` ever shows `elliptic-curve`.
+#
+# RUSTSEC-2026-0391, RUSTSEC-2026-0398, RUSTSEC-2026-0403 (`zstd` 0.13 /
+# `zstd-safe` 7): they come in through `parquet` 58, and only `parquet` 60
+# moves to the fixed `zstd` 0.14. `parquet` 60 needs arrow 60, which the
+# BigQuery client (`connve/google-cloud-rust`, on arrow 58) doesn't build with
+# yet. `parquet` uses only the `zstd::bulk` API: no `Seekable` and no
+# streaming decompression. Remove the entries once flowgen is on `parquet` 60.
+ignore = [
+    "RUSTSEC-2023-0071",
+    "RUSTSEC-2026-0381",
+    "RUSTSEC-2026-0387",
+    "RUSTSEC-2026-0391",
+    "RUSTSEC-2026-0398",
+    "RUSTSEC-2026-0403",
+]
