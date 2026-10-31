@@ -67,10 +67,11 @@
   acks and `ack_timeout` run from receipt, also while the message waits for a
   busy next task, and a message held for more than 5 minutes is logged every
   5 minutes. The subscriber's JetStream requests use the client's request
-  timeout, independent of `ack_timeout`. Messages that arrive while the
-  subscriber stops are handed back, a message the flow completes as the
-  subscriber stops is acked, and a flow without a next task acks each
-  message once read.
+  timeout, independent of `ack_timeout`. A stopping subscriber ends its pull
+  request before it hands messages back, so NATS delivers them to the next
+  subscriber at once, and waits up to 5 seconds for NATS to take its last
+  acks. A message the flow completes as the subscriber stops is acked, and a
+  flow without a next task acks each message once read.
 - A pod that loses the leadership of a flow gives its tasks up to 5 seconds
   to hand back the messages they hold, so the new leader gets them at once.
 - A leader that cannot renew its lease for 45 seconds stops the flow and

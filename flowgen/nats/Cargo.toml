@@ -31,11 +31,11 @@ chrono = { workspace = true }
 bincode = { workspace = true }
 tokio-retry = { workspace = true }
 humantime-serde = { workspace = true }
+tokio-util = { workspace = true }
 
 [dev-dependencies]
 flowgen_core = { path = "../core", features = ["test-util"] }
 testcontainers = { workspace = true }
-tokio-util = { workspace = true }
 tempfile = { workspace = true }
 reqwest = { workspace = true }
 
