@@ -1,10 +1,10 @@
 # Poll SQL Server every 5 minutes with a parameterised query loaded
-# from a resource file. Parameters are positional (@p1, @p2, ...) and
-# the driver escapes them safely.
+# from a resource file. Parameters are positional (@P1, @P2, ...) and
+# bound by the driver, never spliced into the SQL.
 #
 # Required:
 #   - SQL Server credentials at /etc/mssql/credentials.json
-#   - resources/mssql/queries/fetch_orders.sql (referencing @p1, @p2)
+#   - resources/mssql/queries/fetch_orders.sql (referencing @P1, @P2)
 flow:
   labels:
     display_name: "MSSQL Parameterized Query"

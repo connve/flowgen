@@ -17,8 +17,13 @@ pub mod client;
 pub mod client_registry;
 /// Configuration structures and serialization support.
 pub mod config;
+/// Tests every source task passes against its real server.
+#[cfg(feature = "test-util")]
+pub mod conformance;
 /// Shared credential types for authenticating with external services.
 pub mod credentials;
+/// Completion of source events delivered to the flow.
+pub mod delivery;
 /// Event system with data formats, subject generation, and logging.
 pub mod event;
 /// Executor for distributed coordination via cache-based leases.

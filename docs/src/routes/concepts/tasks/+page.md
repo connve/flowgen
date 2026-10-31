@@ -14,7 +14,7 @@ Subscribers are source tasks that ingest data into the flow. They connect to ext
 |---|---|
 | `nats_jetstream_subscribe` | Consumes messages from a NATS JetStream stream with durable consumers. |
 | `salesforce_pubsubapi_subscribe` | Subscribes to Salesforce Platform Events via gRPC. |
-| `mongodb_change_stream` | Watches a MongoDB database for real-time document changes. |
+| `mongodb_cdc` | Watches a MongoDB database for real-time document changes. |
 | `kafka_subscribe` | Consumes every partition of a Kafka topic. |
 | `http_endpoint` | Listens for incoming HTTP requests and converts them to events. |
 | `generate` | Produces events on a schedule (cron or interval). |
@@ -46,6 +46,9 @@ Processors receive events, do something with them, and emit events to the next t
 | `gcp_bigquery_storage_write` | BigQuery Storage Write API. |
 | `gcp_bigquery_job` | BigQuery async jobs (load, monitor, cancel). |
 | `mssql_query` | Microsoft SQL Server queries. |
+| `postgres_query` | PostgreSQL queries. |
+| `postgres_write` | Appends, upserts or deletes rows in a PostgreSQL table with `COPY`. |
+| `postgres_cdc` | Emits each row change of the tables in a PostgreSQL publication. |
 | `braze_export_user_data` | Exports Braze user profiles. |
 | `braze_messaging` | Sends Braze messages, campaigns, and Canvases. |
 | `klaviyo_templates` | Reads and writes Klaviyo email templates. |

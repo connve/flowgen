@@ -1,0 +1,39 @@
+# Poll PostgreSQL every 5 minutes for recent orders, convert to JSON, log per row.
+#
+# Required:
+#   - PostgreSQL credentials at /etc/postgres/credentials.json
+flow:
+  labels:
+    display_name: "PostgreSQL Parameterized Query"
+    description: "Polls PostgreSQL every 5 minutes for orders with a given status, converts the Arrow result to JSON, and logs one event per row."
+    tags: ["postgres", "query", "parameterized", "example"]
+  require_leader_election: true
+  tasks:
+
+    # Tick every 5 minutes.
+    - generate:
+        name: generate_jobs
+        interval: 300s
+
+    # Parameterised query; parameters are bound as $1, $2.
+    - postgres_query:
+        name: fetch_orders
+        credentials_path: /etc/postgres/credentials.json
+        query: "SELECT id, customer_id, total, placed_at FROM orders WHERE status = $1 AND placed_at > now() - $2::interval ORDER BY placed_at"
+        parameters:
+          - "completed"
+          - "1 day"
+
+    # Arrow → JSON for downstream JSON-shaped tasks.
+    - convert:
+        name: arrow_to_json
+        target_format: json
+
+    # Split the JSON array into one event per row.
+    - iterate:
+        name: split_rows
+
+    # Log each row.
+    - log:
+        name: log
+        level: info

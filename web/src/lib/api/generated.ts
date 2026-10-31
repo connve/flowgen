@@ -1171,6 +1171,8 @@ export interface components {
             pending?: boolean;
             /** @description Why the agent's reply ended without finishing, e.g. the AI gateway failed. */
             error?: string;
+            /** @description The user stopped the agent's reply before it finished. */
+            stopped?: boolean;
         };
         /** @description Body for `PATCH /api/agents/conversations/{id}`; fields left out stay as they are. */
         ConversationUpdate: {

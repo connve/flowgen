@@ -292,6 +292,13 @@ impl<D: Dispatcher> HttpServer<D> {
         }
     }
 
+    /// Whether `flow_name` holds the registration under `key`.
+    pub fn is_registered_by(&self, key: &str, flow_name: &str) -> bool {
+        self.table
+            .get(key)
+            .is_some_and(|registration| registration.flow_name() == flow_name)
+    }
+
     /// Removes every registration owned by the named flow.
     pub fn deregister_flow(&self, flow_name: &str) {
         let before = self.table.len();
@@ -446,6 +453,20 @@ mod tests {
         assert_eq!(rejected.flow_name(), "flow_b");
         // Original entry remains unchanged.
         assert_eq!(server.table.get("key1").unwrap().flow_name(), "flow_a");
+    }
+
+    #[test]
+    fn is_registered_by_names_the_owning_flow() {
+        let server = HttpServer::<TestDispatcher>::new("/hook".to_string());
+        server.register(
+            "key1".to_string(),
+            TestReg {
+                flow: "flow_a".to_string(),
+            },
+        );
+        assert!(server.is_registered_by("key1", "flow_a"));
+        assert!(!server.is_registered_by("key1", "flow_b"));
+        assert!(!server.is_registered_by("key2", "flow_a"));
     }
 
     #[test]

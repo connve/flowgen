@@ -170,6 +170,10 @@ pub trait TaskMeta {
     /// Starts without the startup jitter.
     const STARTS_AT_ONCE: bool = Self::REGISTERS;
 
+    /// Reads from a source until the flow stops, such as a subscriber; one
+    /// that returns on its own has stopped reading and fails its flow.
+    const RUNS_UNTIL_STOPPED: bool = false;
+
     /// The external systems the task connects to.
     fn connections(&self) -> Vec<Connection> {
         Vec::new()

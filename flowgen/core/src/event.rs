@@ -608,19 +608,10 @@ impl TryFrom<&EventData> for Value {
 
     fn try_from(event_data: &EventData) -> Result<Self, Self::Error> {
         let data = match event_data {
-            EventData::ArrowRecordBatch(data) => {
-                let buf = Vec::new();
-                let mut writer = arrow_json::ArrayWriter::new(buf);
-                writer
-                    .write_batches(&[data])
-                    .map_err(|e| Error::Arrow { source: e })?;
-                writer.finish().map_err(|e| Error::Arrow { source: e })?;
-                let json_data = writer.into_inner();
-                let json_rows: Vec<Map<String, Value>> =
-                    serde_json::from_reader(json_data.as_slice())
-                        .map_err(|e| Error::SerdeJson { source: e })?;
-                json_rows.into()
-            }
+            EventData::ArrowRecordBatch(data) => record_batch_rows(data, |bytes| {
+                base64::engine::general_purpose::STANDARD.encode(bytes)
+            })?
+            .into(),
             EventData::Avro(data) => {
                 let schema = apache_avro::Schema::parse_str(&data.schema)
                     .map_err(|e| Error::Avro { source: e })?;
@@ -635,6 +626,80 @@ impl TryFrom<&EventData> for Value {
             }
         };
         Ok(data)
+    }
+}
+
+/// The rows of `batch` as JSON objects for a writer: every column is a key,
+/// also where the value is null, and binary values are strings as `binary`
+/// writes them, for example base64 or a database's hex format.
+pub fn record_batch_rows(
+    batch: &arrow::record_batch::RecordBatch,
+    binary: fn(&[u8]) -> String,
+) -> Result<Vec<Map<String, Value>>, Error> {
+    let mut writer = arrow_json::WriterBuilder::new()
+        .with_explicit_nulls(true)
+        .with_encoder_factory(Arc::new(BinaryAsText(binary)))
+        .build::<_, arrow_json::writer::JsonArray>(Vec::new());
+    writer
+        .write(batch)
+        .map_err(|source| Error::Arrow { source })?;
+    writer.finish().map_err(|source| Error::Arrow { source })?;
+    serde_json::from_slice(&writer.into_inner()).map_err(|source| Error::SerdeJson { source })
+}
+
+/// Encodes binary columns as JSON strings of the text a function makes.
+#[derive(Debug)]
+struct BinaryAsText(fn(&[u8]) -> String);
+
+impl arrow_json::EncoderFactory for BinaryAsText {
+    fn make_default_encoder<'a>(
+        &self,
+        _field: &'a arrow_schema::FieldRef,
+        array: &'a dyn arrow::array::Array,
+        _options: &'a arrow_json::EncoderOptions,
+    ) -> Result<Option<arrow_json::writer::NullableEncoder<'a>>, arrow::error::ArrowError> {
+        use arrow::array::AsArray;
+        use arrow::datatypes::DataType;
+        let text = self.0;
+        let encoder: Box<dyn arrow_json::Encoder + 'a> = match array.data_type() {
+            DataType::Binary => Box::new(TextEncoder {
+                array: array.as_binary::<i32>(),
+                text,
+            }),
+            DataType::LargeBinary => Box::new(TextEncoder {
+                array: array.as_binary::<i64>(),
+                text,
+            }),
+            DataType::BinaryView => Box::new(TextEncoder {
+                array: array.as_binary_view(),
+                text,
+            }),
+            DataType::FixedSizeBinary(_) => Box::new(TextEncoder {
+                array: array.as_fixed_size_binary(),
+                text,
+            }),
+            _ => return Ok(None),
+        };
+        Ok(Some(arrow_json::writer::NullableEncoder::new(
+            encoder,
+            array.nulls().cloned(),
+        )))
+    }
+}
+
+/// Writes each value of a binary array as a JSON string.
+struct TextEncoder<A> {
+    array: A,
+    text: fn(&[u8]) -> String,
+}
+
+impl<'a, A> arrow_json::Encoder for TextEncoder<A>
+where
+    A: arrow::array::ArrayAccessor<Item = &'a [u8]>,
+{
+    fn encode(&mut self, index: usize, out: &mut Vec<u8>) {
+        let text = Value::String((self.text)(self.array.value(index)));
+        out.extend_from_slice(text.to_string().as_bytes());
     }
 }
 
@@ -922,6 +987,37 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::io::Cursor;
+
+    #[test]
+    fn record_batch_rows_keep_null_columns_and_write_binary_as_given() {
+        use arrow::array::{Array, BinaryArray, Int32Array, StringArray};
+        let batch = arrow::record_batch::RecordBatch::try_from_iter([
+            (
+                "id",
+                Arc::new(Int32Array::from(vec![1, 2])) as Arc<dyn Array>,
+            ),
+            (
+                "note",
+                Arc::new(StringArray::from(vec![None::<&str>, None])) as Arc<dyn Array>,
+            ),
+            (
+                "data",
+                Arc::new(BinaryArray::from(vec![Some(b"\x01\xff".as_slice()), None]))
+                    as Arc<dyn Array>,
+            ),
+        ])
+        .unwrap();
+
+        let rows = record_batch_rows(&batch, |bytes| format!("\\{}", bytes.len())).unwrap();
+
+        assert_eq!(
+            Value::from(rows),
+            json!([
+                {"id": 1, "note": null, "data": "\\2"},
+                {"id": 2, "note": null, "data": null}
+            ])
+        );
+    }
 
     #[test]
     fn test_event_builder_success() {

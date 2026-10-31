@@ -41,6 +41,7 @@ impl TaskMeta for produce::Produce {
 
 impl TaskMeta for subscribe::Subscribe {
     const CONNECTOR: Connector = CONNECTOR;
+    const RUNS_UNTIL_STOPPED: bool = true;
 
     fn connections(&self) -> Vec<Connection> {
         vec![Connection::new(CONNECTOR, self.credentials_path.as_deref()).target(&[&self.brokers])]

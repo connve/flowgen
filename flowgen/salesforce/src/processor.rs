@@ -129,6 +129,21 @@ pub enum Error {
     },
     #[error("The Pub/Sub stream ended, the connection may have been lost")]
     StreamEnded,
+    #[error("The Pub/Sub subscription stopped accepting requests")]
+    RequestClosed,
+    #[error("Topic `num_requested` must be between 1 and 100, got {num_requested}")]
+    InvalidNumRequested { num_requested: i32 },
+    #[error("Failed to read the stored replay ID under '{key}': {source}")]
+    ReplayIdCache {
+        key: String,
+        #[source]
+        source: flowgen_core::cache::Error,
+    },
+    #[error("Event delivery task failed: {source}")]
+    DeliveryTask {
+        #[source]
+        source: tokio::task::JoinError,
+    },
     #[error("Failed to bind the query parameters: {source}")]
     Bind {
         #[source]

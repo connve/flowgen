@@ -68,7 +68,7 @@ flow:
         &cache,
     );
     flow.init().await.unwrap();
-    let _handles = flow.spawn_all_tasks().await.unwrap();
+    let _running = flow.run();
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     let mut seen = None;
@@ -108,18 +108,15 @@ flow:
         &cache,
     );
     flow.init().await.unwrap();
-    let handles = flow.spawn_all_tasks().await.unwrap();
+    let stop = flow.cancellation_token();
+    let running = flow.run();
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    handles.task_context.cancellation_token.cancel();
-    let stopped = tokio::time::timeout(
-        Duration::from_secs(10),
-        futures_util::future::join_all(handles.background_handles),
-    )
-    .await;
+    stop.cancel();
+    let stopped = tokio::time::timeout(Duration::from_secs(10), running).await;
 
     assert!(
         stopped.is_ok(),
-        "every task stops once the flow is cancelled"
+        "every task stops once the flow is cancelled, before the drain timeout"
     );
 }

@@ -64,7 +64,13 @@ macro_rules! salesforce_task_meta {
 }
 
 salesforce_task_meta!(
-    pubsubapi::subscribe::Subscribe,
+    pubsubapi::subscribe::Subscribe {
+        const RUNS_UNTIL_STOPPED: bool = true;
+
+        fn validate(&self) -> Result<(), TaskError> {
+            Ok(pubsubapi::subscribe::Subscribe::validate(self)?)
+        }
+    },
     pubsubapi::publish::Publish,
     bulkapi::query_job::QueryJob { const CPU_INTENSIVE: bool = true; },
     restapi::sobject::SObject,

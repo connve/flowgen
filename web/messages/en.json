@@ -375,6 +375,7 @@
 	"agents_tool_succeeded": "Succeeded",
 	"agents_tool_failed": "Failed",
 	"agents_reply_empty": "(no content returned)",
+	"agents_reply_stopped": "Stopped",
 	"agents_chat_failed": "The chat request failed",
 	"agents_reply_in_progress": "A reply is already in progress. Send again once it finishes.",
 	"monitor_tabs_label": "Monitor",

@@ -19,9 +19,10 @@ pub const DEFAULT_MAX_ATTEMPTS: usize = 10;
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Hash)]
 #[serde(deny_unknown_fields)]
 pub struct RetryConfig {
-    /// Maximum number of retry attempts (default: 10 = ~15 minutes total).
+    /// Maximum number of attempts per event (default: 10 = ~15 minutes total).
     /// With 1s initial backoff: 1s, 2s, 4s, 8s, 16s, 32s, 64s, 128s, 256s, 512s.
-    /// Set to None for infinite retries (not recommended).
+    /// Set to None for infinite retries (not recommended). Does not limit
+    /// task startup.
     #[serde(default = "default_max_attempts")]
     pub max_attempts: Option<usize>,
 
@@ -93,16 +94,31 @@ impl RetryConfig {
         jitter(self.initial_backoff / 2)
     }
 
-    /// Like `strategy()` but prepends a startup delay when present.
+    /// `reconnect_strategy()` after the startup delay, when present.
     pub fn init_strategy(
         &self,
         startup_delay: Option<Duration>,
     ) -> Box<dyn Iterator<Item = Duration> + Send> {
-        let base = self.strategy();
+        let base = self.reconnect_strategy();
         match startup_delay {
             Some(delay) => Box::new(std::iter::once(delay).chain(base)),
             None => base,
         }
+    }
+
+    /// Longest delay between reconnects, restarts and redeliveries.
+    pub fn max_delay(&self) -> Duration {
+        MAX_RECONNECT_BACKOFF
+    }
+
+    /// Delay before delivering an event again after its `deliveries`-th failed
+    /// delivery: `initial_backoff` doubled per failure, capped at 5 minutes.
+    pub fn redelivery_delay(&self, deliveries: u32) -> Duration {
+        let factor = 2u32.saturating_pow(deliveries.saturating_sub(1));
+        std::cmp::min(
+            self.initial_backoff.saturating_mul(factor),
+            MAX_RECONNECT_BACKOFF,
+        )
     }
 
     /// Infinite exponential backoff for subscriber reconnect loops, capped at 5 minutes.
@@ -287,17 +303,39 @@ mod tests {
     }
 
     #[test]
+    fn test_redelivery_delay_doubles_up_to_the_cap() {
+        let config = RetryConfig {
+            max_attempts: Some(3),
+            initial_backoff: Duration::from_secs(1),
+        };
+        let delays: Vec<Duration> = [1, 2, 3, 9, 10, u32::MAX]
+            .into_iter()
+            .map(|deliveries| config.redelivery_delay(deliveries))
+            .collect();
+        assert_eq!(
+            delays,
+            [1, 2, 4, 256, 300, 300].map(Duration::from_secs).to_vec()
+        );
+    }
+
+    #[test]
     fn test_init_strategy_prepends_delay() {
         let config = RetryConfig {
             max_attempts: Some(3),
             initial_backoff: Duration::from_millis(100),
         };
-        let without: Vec<Duration> = config.init_strategy(None).collect();
-        assert_eq!(without.len(), 2);
-
         let delay = Duration::from_secs(5);
-        let with: Vec<Duration> = config.init_strategy(Some(delay)).collect();
-        assert_eq!(with.len(), 3);
-        assert_eq!(with[0], delay);
+        let mut with = config.init_strategy(Some(delay));
+        assert_eq!(with.next(), Some(delay));
+        assert!(with.next().is_some_and(|d| d > Duration::ZERO));
+    }
+
+    #[test]
+    fn test_init_strategy_ignores_max_attempts() {
+        let config = RetryConfig {
+            max_attempts: Some(3),
+            initial_backoff: Duration::from_millis(100),
+        };
+        assert_eq!(config.init_strategy(None).take(50).count(), 50);
     }
 }

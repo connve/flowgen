@@ -14,7 +14,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tracing::error;
+use tracing::{error, warn};
 
 /// Default NATS server URL function for serde.
 fn default_nats_url() -> String {
@@ -407,6 +407,8 @@ where
 /// Event handler for KV store operations.
 pub struct EventHandler {
     config: Arc<KvStore>,
+    /// The config rendered at init, which the bucket was opened with.
+    init_config: KvStore,
     store: async_nats::jetstream::kv::Store,
     jetstream: async_nats::jetstream::Context,
     tx: Option<Sender<Event>>,
@@ -443,7 +445,7 @@ impl flowgen_core::task::runner::Handler for EventHandler {
         let event = Arc::new(event);
         let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
 
-        flowgen_core::event::with_event_context(&Arc::clone(&event), async {
+        let result = flowgen_core::event::with_event_context(&Arc::clone(&event), async {
             let rendered = self
                 .config
                 .render_for_event(event.as_ref())
@@ -489,7 +491,17 @@ impl flowgen_core::task::runner::Handler for EventHandler {
 
             Ok(())
         })
-        .await
+        .await;
+
+        if let Err(error) = &result {
+            if crate::cache::stream_missing(error) {
+                warn!(bucket = %self.init_config.bucket, "KV bucket is missing, recreating it");
+                if let Err(source) = open_bucket(&self.jetstream, &self.init_config).await {
+                    warn!(bucket = %self.init_config.bucket, error = %source, "Failed to recreate KV bucket");
+                }
+            }
+        }
+        result
     }
 }
 
@@ -692,6 +704,24 @@ impl EventHandler {
     }
 }
 
+/// Opens `config.bucket`, creating it when it does not exist.
+async fn open_bucket(
+    jetstream: &async_nats::jetstream::Context,
+    config: &KvStore,
+) -> Result<async_nats::jetstream::kv::Store, Error> {
+    match jetstream.get_key_value(&config.bucket).await {
+        Ok(store) => Ok(store),
+        Err(_) => jetstream
+            .create_key_value(async_nats::jetstream::kv::Config {
+                bucket: config.bucket.clone(),
+                limit_markers: config.ttl.map(|_| crate::cache::DEFAULT_TOMBSTONE_TTL),
+                ..Default::default()
+            })
+            .await
+            .map_err(|source| Error::KvBucketCreate { source }),
+    }
+}
+
 /// NATS KV store processor.
 #[derive(Debug)]
 pub struct Processor {
@@ -750,17 +780,7 @@ impl flowgen_core::task::runner::Runner for Processor {
 
         let jetstream = (*jetstream_ctx).clone();
 
-        let store = match jetstream.get_key_value(&config.bucket).await {
-            Ok(store) => store,
-            Err(_) => jetstream
-                .create_key_value(async_nats::jetstream::kv::Config {
-                    bucket: config.bucket.clone(),
-                    limit_markers: config.ttl.map(|_| crate::cache::DEFAULT_TOMBSTONE_TTL),
-                    ..Default::default()
-                })
-                .await
-                .map_err(|source| Error::KvBucketCreate { source })?,
-        };
+        let store = open_bucket(&jetstream, &config).await?;
         if config.ttl.is_some() && !store.stream.cached_info().config.allow_message_ttl {
             return Err(Error::TtlNotAllowed {
                 bucket: config.bucket,
@@ -769,6 +789,7 @@ impl flowgen_core::task::runner::Runner for Processor {
 
         Ok(EventHandler {
             config: Arc::clone(&self.config),
+            init_config: config,
             store,
             jetstream,
             tx: self.tx.clone(),

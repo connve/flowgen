@@ -236,6 +236,22 @@ fn take_iterate_array(meta: &mut Option<Map<String, Value>>) -> Option<IterateAr
     }
 }
 
+/// Renders `template` for `event` as text, so a key like `{{a}}.{{b}}` keeps
+/// its digits as written. An empty key, from a missing or null field, fails.
+fn partition_key(template: &str, event: &Event) -> Result<String, Error> {
+    let event_value =
+        crate::event::template_value(event, true).map_err(|source| Error::Render {
+            source: crate::config::Error::Event {
+                source: Box::new(source),
+            },
+        })?;
+    match crate::config::render_template(template, &event_value) {
+        Ok(key) if key.is_empty() => Err(Error::MissingPartitionKey),
+        Ok(key) => Ok(key),
+        Err(source) => Err(Error::Render { source }),
+    }
+}
+
 /// When an event shows the source's batch is complete: an `iterate` array once
 /// every element arrived, any other batch once its final event arrives.
 enum CompletionCue {
@@ -419,7 +435,12 @@ impl Processor {
     /// it is fanned back out to every distinct source absorbed into the batch,
     /// so every source gets acked. When the buffer is itself a leaf, every
     /// source is signalled directly.
-    async fn flush_buffer(&self, batch: Batch, reason: FlushReason, partition_key: Option<String>) {
+    async fn flush_buffer(
+        &self,
+        batch: Batch,
+        reason: FlushReason,
+        partition_key: Option<String>,
+    ) -> Result<(), Error> {
         let Batch {
             events: buffer,
             origin,
@@ -441,13 +462,8 @@ impl Processor {
                 partition_key,
             };
 
-            let flush_result = match serde_json::to_value(flush_data) {
-                Ok(v) => v,
-                Err(e) => {
-                    error!(error = %e, "Failed to serialize flush data");
-                    return;
-                }
-            };
+            let flush_result = serde_json::to_value(flush_data)
+                .map_err(|source| Error::FlushSerialization { source })?;
 
             let mut event_builder = EventBuilder::new()
                 .data(EventData::Json(flush_result))
@@ -463,13 +479,9 @@ impl Processor {
             }
             event_builder.call_stack = origin.call_stack;
 
-            let mut event = match event_builder.build() {
-                Ok(e) => e,
-                Err(e) => {
-                    error!(error = %e, "Failed to build flush event");
-                    return;
-                }
-            };
+            let mut event = event_builder
+                .build()
+                .map_err(|source| Error::EventBuilder { source })?;
 
             match tx {
                 Some(_) => {
@@ -484,9 +496,10 @@ impl Processor {
                 }
             }
 
-            if let Err(e) = event.send_with_logging(tx.as_ref()).await {
-                error!(error = %e, "Failed to send flush event");
-            }
+            event
+                .send_with_logging(tx.as_ref())
+                .await
+                .map_err(|source| Error::SendMessage { source })
         }
         .instrument(tracing::info_span!(
             parent: tracing::Span::current(),
@@ -496,10 +509,15 @@ impl Processor {
         .await
     }
 
-    async fn flush_all(&self, batches: Vec<(BatchKey, Batch)>, reason: FlushReason) {
+    async fn flush_all(
+        &self,
+        batches: Vec<(BatchKey, Batch)>,
+        reason: FlushReason,
+    ) -> Result<(), Error> {
         for (key, batch) in batches {
-            self.flush_buffer(batch, reason, key.partition).await;
+            self.flush_buffer(batch, reason, key.partition).await?;
         }
+        Ok(())
     }
 
     /// Processes the main event loop with buffer accumulation and flush triggers.
@@ -510,7 +528,8 @@ impl Processor {
     /// 3. Shutdown signal to flush remaining events
     ///
     /// Each partition, and with `flush_on_completion` each `iterate` array,
-    /// has its own batch with independent size and timeout tracking.
+    /// has its own batch with independent size and timeout tracking. Returns
+    /// an error once a flush fails, since the next task no longer takes events.
     async fn process_events(&mut self) -> Result<(), Error> {
         let timeout = self.config.timeout.unwrap_or(Duration::from_secs(30));
         let mut batches = Batches::default();
@@ -526,13 +545,12 @@ impl Processor {
                     Some(event) => self.receive(&mut batches, event).await?,
                     None => {
                         let remaining = batches.open.drain().collect();
-                        self.flush_all(remaining, FlushReason::Shutdown).await;
-                        return Ok(());
+                        return self.flush_all(remaining, FlushReason::Shutdown).await;
                     }
                 },
                 _ = sleep(until_timeout), if !batches.is_empty() => {
                     let expired = batches.take_expired(timeout);
-                    self.flush_all(expired, FlushReason::Timeout).await;
+                    self.flush_all(expired, FlushReason::Timeout).await?;
                 }
             }
         }
@@ -540,41 +558,24 @@ impl Processor {
 
     /// Adds an event to its batch and flushes the batches it fills or completes.
     ///
-    /// An event whose upstream task failed is passed on instead, and still
-    /// counts as an arrived element of its `iterate` array.
+    /// An event whose upstream task failed, or that cannot join a batch, is
+    /// passed on as failed instead.
     async fn receive(&self, batches: &mut Batches, mut event: Event) -> Result<(), Error> {
         if let Some(error) = event.error.take() {
-            let array = take_iterate_array(&mut event.meta);
-            event.forward_failure(self.tx.as_ref(), error).await;
-            if let (true, Some(array)) = (self.config.flush_on_completion, array) {
-                if let Some(completed) = batches.receive_element(&array) {
-                    self.flush_all(completed, FlushReason::Completion).await;
-                }
-            }
-            return Ok(());
+            return self.pass_on_failed(batches, event, error).await;
         }
-
-        let partition = match self.config.partition_key {
-            Some(_) => {
-                let rendered = self
-                    .config
-                    .render_for_event(&event)
-                    .map_err(|source| Error::Render { source })?;
-                Some(rendered.partition_key.ok_or(Error::MissingPartitionKey)?)
+        let (partition, data) = match self.batch_entry(&mut event) {
+            Ok(entry) => entry,
+            Err(error) => {
+                error!(error = %error, correlation_id = %event.correlation_id(), "Failed to add event to a batch");
+                return self.pass_on_failed(batches, event, error.to_string()).await;
             }
-            None => None,
         };
         let cue = CompletionCue::of(
             self.config.flush_on_completion,
             take_iterate_array(&mut event.meta),
             event.completion_tx.is_some(),
         );
-        let data = match std::mem::replace(&mut event.data, EventData::Json(Value::Null)) {
-            EventData::Json(data) => data,
-            EventData::ArrowRecordBatch(_) => return Err(Error::ExpectedJsonGotArrowRecordBatch),
-            EventData::Avro(_) => return Err(Error::ExpectedJsonGotAvro),
-            EventData::Bytes(_) => return Err(Error::ExpectedJsonGotBytes),
-        };
 
         let key = BatchKey {
             partition,
@@ -595,9 +596,43 @@ impl Processor {
         match (completed, full) {
             (Some(completed), _) => self.flush_all(completed, FlushReason::Completion).await,
             (None, true) => self.flush_all(batches.take(&key), FlushReason::Size).await,
-            (None, false) => {}
+            (None, false) => Ok(()),
         }
-        Ok(())
+    }
+
+    /// Renders the event's partition key and takes its JSON data, leaving
+    /// any other data in place.
+    fn batch_entry(&self, event: &mut Event) -> Result<(Option<String>, Value), Error> {
+        let partition = match &self.config.partition_key {
+            Some(template) => Some(partition_key(template, event)?),
+            None => None,
+        };
+        let data = match &mut event.data {
+            EventData::Json(data) => std::mem::take(data),
+            EventData::ArrowRecordBatch(_) => return Err(Error::ExpectedJsonGotArrowRecordBatch),
+            EventData::Avro(_) => return Err(Error::ExpectedJsonGotAvro),
+            EventData::Bytes(_) => return Err(Error::ExpectedJsonGotBytes),
+        };
+        Ok((partition, data))
+    }
+
+    /// Passes on a failed event, which still counts as an arrived element of
+    /// its `iterate` array.
+    async fn pass_on_failed(
+        &self,
+        batches: &mut Batches,
+        mut event: Event,
+        error: String,
+    ) -> Result<(), Error> {
+        let array = take_iterate_array(&mut event.meta);
+        event.forward_failure(self.tx.as_ref(), error).await;
+        match (self.config.flush_on_completion, array) {
+            (true, Some(array)) => match batches.receive_element(&array) {
+                Some(completed) => self.flush_all(completed, FlushReason::Completion).await,
+                None => Ok(()),
+            },
+            _ => Ok(()),
+        }
     }
 }
 
@@ -640,12 +675,7 @@ impl crate::task::runner::Runner for Processor {
             }
         };
 
-        // Run the main event processing loop with buffer accumulation.
-        if let Err(e) = self.process_events().await {
-            error!(error = %e, "Failed to process events");
-        }
-
-        Ok(())
+        self.process_events().await
     }
 }
 
@@ -1790,6 +1820,191 @@ mod tests {
         assert_eq!(passed_on.error.as_deref(), Some("upstream failed"));
         assert_eq!(batch.error, None);
         assert_eq!(batch.data_as_json().unwrap()["batch_size"], json!(1));
+    }
+
+    fn event_with(data: EventData) -> Event {
+        EventBuilder::new()
+            .data(data)
+            .subject("a".into())
+            .task_id(0)
+            .task_type("test")
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_event_without_a_partition_key_fails_alone_and_the_buffer_keeps_running() {
+        use serde_json::json;
+        let (upstream_tx, mut downstream_rx) =
+            spawn_buffer(buffer_config(1, Some("{{event.data.k}}"), false)).await;
+
+        upstream_tx
+            .send(event_with(EventData::Json(json!({ "k": null }))))
+            .await
+            .unwrap();
+        upstream_tx
+            .send(event_with(EventData::Json(json!({ "k": "p" }))))
+            .await
+            .unwrap();
+        let failed = next_flush(&mut downstream_rx).await;
+        let batch = next_flush(&mut downstream_rx).await;
+
+        assert_eq!(failed.error, Some(Error::MissingPartitionKey.to_string()));
+        assert_eq!(failed.data_as_json().unwrap(), json!({ "k": null }));
+        assert_eq!(batch.error, None);
+        assert_eq!(batch.data_as_json().unwrap()["partition_key"], "p");
+    }
+
+    #[tokio::test]
+    async fn partition_keys_keep_their_digits_as_written() {
+        use serde_json::json;
+        let (upstream_tx, mut downstream_rx) = spawn_buffer(buffer_config(
+            1,
+            Some("{{event.data.a}}.{{event.data.b}}"),
+            false,
+        ))
+        .await;
+
+        for data in [json!({ "a": 1, "b": 20 }), json!({ "a": 1, "b": 2 })] {
+            upstream_tx
+                .send(event_with(EventData::Json(data)))
+                .await
+                .unwrap();
+        }
+        let first = next_flush(&mut downstream_rx).await;
+        let second = next_flush(&mut downstream_rx).await;
+
+        assert_eq!(first.data_as_json().unwrap()["partition_key"], "1.20");
+        assert_eq!(second.data_as_json().unwrap()["partition_key"], "1.2");
+    }
+
+    #[tokio::test]
+    async fn a_number_is_a_partition_key_and_a_missing_field_is_none() {
+        use serde_json::json;
+        let (upstream_tx, mut downstream_rx) =
+            spawn_buffer(buffer_config(1, Some("{{event.data.k}}"), false)).await;
+
+        upstream_tx
+            .send(event_with(EventData::Json(json!({ "k": 7 }))))
+            .await
+            .unwrap();
+        upstream_tx
+            .send(event_with(EventData::Json(json!({ "other": 1 }))))
+            .await
+            .unwrap();
+        let batch = next_flush(&mut downstream_rx).await;
+        let failed = next_flush(&mut downstream_rx).await;
+
+        assert_eq!(batch.data_as_json().unwrap()["partition_key"], "7");
+        assert_eq!(failed.error, Some(Error::MissingPartitionKey.to_string()));
+    }
+
+    #[tokio::test]
+    async fn an_event_that_is_not_json_fails_alone_and_keeps_its_data() {
+        use serde_json::json;
+        let (upstream_tx, mut downstream_rx) = spawn_buffer(buffer_config(1, None, false)).await;
+
+        let raw = event_with(EventData::Bytes(bytes::Bytes::from_static(b"raw")));
+        upstream_tx.send(raw).await.unwrap();
+        upstream_tx
+            .send(event_with(EventData::Json(json!({ "i": 1 }))))
+            .await
+            .unwrap();
+        let failed = next_flush(&mut downstream_rx).await;
+        let batch = next_flush(&mut downstream_rx).await;
+
+        assert_eq!(failed.error, Some(Error::ExpectedJsonGotBytes.to_string()));
+        assert!(matches!(&failed.data, EventData::Bytes(raw) if raw.as_ref() == b"raw"));
+        assert_eq!(batch.data_as_json().unwrap()["batch"], json!([{ "i": 1 }]));
+    }
+
+    #[tokio::test]
+    async fn an_element_that_cannot_join_a_batch_still_counts_toward_its_array() {
+        use serde_json::json;
+        let (upstream_tx, mut downstream_rx) =
+            spawn_buffer(buffer_config(100, Some("{{event.data.k}}"), true)).await;
+
+        upstream_tx
+            .send(element(json!({ "k": "p" }), "a1", 2))
+            .await
+            .unwrap();
+        upstream_tx
+            .send(element(json!({ "k": null }), "a1", 2))
+            .await
+            .unwrap();
+        let failed = next_flush(&mut downstream_rx).await;
+        let batch = next_flush(&mut downstream_rx).await;
+
+        assert_eq!(failed.error, Some(Error::MissingPartitionKey.to_string()));
+        assert!(!has_iterate_meta(&failed));
+        let data = batch.data_as_json().unwrap();
+        assert_eq!(data["batch_size"], 1);
+        assert_eq!(data["flush_reason"], "completion");
+    }
+
+    #[tokio::test]
+    async fn an_event_that_fails_at_a_leaf_buffer_reports_the_error_to_the_source() {
+        use crate::task::runner::Runner;
+        use serde_json::json;
+        let (upstream_tx, upstream_rx) = mpsc::channel(10);
+        let processor = ProcessorBuilder::new()
+            .config(Arc::new(buffer_config(1, Some("{{event.data.k}}"), false)))
+            .receiver(upstream_rx)
+            .task_id(1)
+            .task_type("buffer")
+            .task_context(create_mock_task_context())
+            .build()
+            .await
+            .unwrap();
+        let running = tokio::spawn(processor.run());
+        let (completion, completion_rx) = new_completion_channel(1);
+        let mut event = event_with(EventData::Json(json!({ "k": null })));
+        event.completion_tx = Some(completion);
+
+        upstream_tx.send(event).await.unwrap();
+        let reported = tokio::time::timeout(Duration::from_secs(1), completion_rx)
+            .await
+            .expect("the source hears back")
+            .unwrap();
+        drop(upstream_tx);
+        let stopped = running.await.unwrap();
+
+        assert_eq!(
+            reported.map_err(|error| error.to_string()),
+            Err(Error::MissingPartitionKey.to_string())
+        );
+        assert!(stopped.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_flush_the_next_task_no_longer_takes_stops_the_buffer_with_an_error() {
+        use crate::task::runner::Runner;
+        use serde_json::json;
+        let (downstream_tx, downstream_rx) = mpsc::channel(1);
+        drop(downstream_rx);
+        let (upstream_tx, upstream_rx) = mpsc::channel(10);
+        let processor = ProcessorBuilder::new()
+            .config(Arc::new(buffer_config(1, None, false)))
+            .sender(downstream_tx)
+            .receiver(upstream_rx)
+            .task_id(1)
+            .task_type("buffer")
+            .task_context(create_mock_task_context())
+            .build()
+            .await
+            .unwrap();
+        let running = tokio::spawn(processor.run());
+
+        upstream_tx
+            .send(event_with(EventData::Json(json!({ "i": 1 }))))
+            .await
+            .unwrap();
+        let stopped = tokio::time::timeout(Duration::from_secs(1), running)
+            .await
+            .expect("the buffer stops")
+            .unwrap();
+
+        assert!(matches!(stopped, Err(Error::SendMessage { .. })));
     }
 
     #[test]

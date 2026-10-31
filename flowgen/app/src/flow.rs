@@ -16,25 +16,22 @@
 //! - `input_rx`: Receiver from previous channel (None for first task)
 //! - `output_tx`: Sender to next channel (None for last task)
 //!
-//! ## Channel Ownership
+//! ## Runs
 //!
-//! All tasks are spawned together using the SAME `TaskRegistry` to ensure
-//! channels are properly connected. This is critical for webhook flows where
-//! blocking tasks (webhooks) must send events to background tasks:
-//!
-//! 1. `start_tasks()` spawns ALL tasks (webhooks and background)
-//! 2. Returns only blocking handles to wait for webhook registration
-//! 3. Background tasks are already running with connected channels
-//! 4. `monitor_tasks()` monitors the pre-spawned tasks
-//!
-//! This prevents channel mismatch bugs where webhooks send to one channel
-//! while background tasks receive from a different channel.
+//! `run()` spawns every task of a pipeline from one `TaskRegistry`, so a
+//! webhook sends into the same channels the tasks after it read from. The
+//! tasks of a run live in a `Tenure`: when one fails the run is drained and
+//! the flow starts again after a backoff; when the flow is stopped the run is
+//! drained; when another pod takes the lead the run is aborted.
 
 use crate::config::{FlowConfig, TaskType};
 use flowgen_core::event::Event;
 use flowgen_core::task::context::Services;
 use std::sync::Arc;
-use tokio::{sync::mpsc, task::JoinHandle};
+use tokio::{
+    sync::mpsc,
+    task::{JoinHandle, JoinSet},
+};
 use tracing::{debug, error, info, warn, Instrument};
 
 /// Room for one event between two tasks. Each task limits itself with
@@ -46,10 +43,17 @@ const CHANNEL_CAPACITY: usize = 1;
 #[non_exhaustive]
 pub enum Error {
     /// A task failed, with the error of the crate that owns it.
-    #[error("Task {task_type} failed: {source}")]
+    #[error("Task '{task}' ({task_type}) failed: {source}")]
     Task {
+        task: String,
         task_type: &'static str,
         source: flowgen_core::task::TaskError,
+    },
+    /// A task that reads until the flow stops returned while the flow runs.
+    #[error("Task '{task}' ({task_type}) stopped reading while the flow runs")]
+    StoppedReading {
+        task: String,
+        task_type: &'static str,
     },
     /// Missing required builder attribute.
     #[error("Missing required builder attribute: {0}")]
@@ -72,15 +76,6 @@ pub enum Error {
     /// Leadership channel closed unexpectedly.
     #[error("Leadership channel closed unexpectedly")]
     LeadershipChannelClosed,
-    /// Failed to store background task handles for later monitoring.
-    #[error("Error storing background task handles")]
-    BackgroundHandlesStoreFailed,
-    /// Failed to store the task context after starting tasks.
-    #[error("Error storing task context after start_tasks")]
-    TaskContextStoreFailed,
-    /// Failed to retrieve background task handles for monitoring.
-    #[error("Error retrieving background task handles")]
-    BackgroundHandlesRetrieveFailed,
     /// Flow configuration error (duplicate task names, invalid dependencies, etc.).
     #[error("Flow configuration error: {0}")]
     ConfigError(String),
@@ -163,8 +158,6 @@ struct TaskDescriptor {
     input_rx: Option<mpsc::Receiver<Event>>,
     /// Output channel sender (None for sink tasks).
     output_tx: Option<mpsc::Sender<Event>>,
-    /// Whether this is a blocking setup task (e.g., webhook registration).
-    is_blocking: bool,
     /// Number of leaf tasks reachable through this task's output channel.
     ///
     /// Source tasks use this to size the per-flow completion channel so the
@@ -181,39 +174,10 @@ struct TaskRegistry {
     tasks: Vec<TaskDescriptor>,
 }
 
-/// Type alias for a task join handle.
-type TaskHandle = JoinHandle<Result<(), Error>>;
-
-/// Handle collections separated by task type.
-pub struct TaskHandles {
-    /// Handles for blocking setup tasks (e.g., webhook route registration).
-    pub blocking_handles: Vec<TaskHandle>,
-    /// Handles for long-running background tasks.
-    pub background_handles: Vec<TaskHandle>,
-    /// Task context containing the cancellation token for this tenure.
-    pub task_context: Arc<flowgen_core::task::context::TaskContext>,
-}
-
 impl TaskRegistry {
     /// Creates a new builder for constructing a task registry.
     fn builder(flow_config: Arc<FlowConfig>) -> TaskRegistryBuilder {
         TaskRegistryBuilder { flow_config }
-    }
-
-    /// Separates tasks into blocking (setup) and background tasks.
-    fn partition(self) -> (Vec<TaskDescriptor>, Vec<TaskDescriptor>) {
-        let mut blocking = Vec::new();
-        let mut background = Vec::new();
-
-        for task in self.tasks {
-            if task.is_blocking {
-                blocking.push(task);
-            } else {
-                background.push(task);
-            }
-        }
-
-        (blocking, background)
     }
 }
 
@@ -277,7 +241,6 @@ impl TaskRegistryBuilder {
                 task_type: task_type.clone(),
                 input_rx,
                 output_tx,
-                is_blocking: task_type.is_blocking(),
                 // Linear chains have a single terminal task, so every task
                 // sees exactly one leaf in its downstream subgraph.
                 downstream_leaves: 1,
@@ -403,7 +366,6 @@ impl TaskRegistryBuilder {
                 task_type: task_type.clone(),
                 input_rx: child_rx[idx].take(),
                 output_tx: parent_tx[idx].take(),
-                is_blocking: task_type.is_blocking(),
                 downstream_leaves: downstream_leaves[idx],
             });
         }
@@ -448,11 +410,109 @@ pub struct Flow {
     peer_registry: Option<Arc<flowgen_core::peer::PeerRegistry>>,
     /// The task manager, responsible for leader election. Initialized by `init()`.
     task_manager: Option<Arc<flowgen_core::task::manager::TaskManager>>,
-    /// Background task handles spawned by start_tasks for monitor_tasks to monitor.
-    background_handles: Arc<std::sync::Mutex<Option<Vec<TaskHandle>>>>,
-    /// Task context from the most recent start_tasks call; used to read registration
-    /// info (registered_http_routes, registered_mcp_tools) before run() consumes self.
-    last_task_context: Arc<std::sync::Mutex<Option<Arc<flowgen_core::task::context::TaskContext>>>>,
+    /// Servers the flow's tasks register with, cleared before a restart.
+    servers: Option<crate::reconciler::FlowServers>,
+    /// Stops the flow. Each run of its tasks gets a child token.
+    stop: tokio_util::sync::CancellationToken,
+}
+
+/// The tasks of one run of a flow. Dropping it aborts them.
+struct Tenure {
+    tasks: JoinSet<Result<(), Error>>,
+    cancellation_token: tokio_util::sync::CancellationToken,
+    started: std::time::Instant,
+}
+
+/// How a run of a flow's tasks ended.
+#[derive(Debug, PartialEq, Eq)]
+enum Exit {
+    /// Every task returned successfully.
+    Completed,
+    /// A task returned an error or panicked.
+    Failed,
+    /// Another pod leads the flow now.
+    LostLeadership,
+    /// The flow is stopped.
+    Stopped,
+}
+
+/// How a task's return ends for its flow: an error fails it, and so does a
+/// task that reads until the flow stops returning while the flow still runs.
+pub(crate) fn task_result(
+    task: String,
+    task_type: &'static str,
+    stopped_reading: bool,
+    result: Result<(), flowgen_core::task::TaskError>,
+) -> Result<(), Error> {
+    match (result, stopped_reading) {
+        (Err(source), _) => Err(Error::Task {
+            task,
+            task_type,
+            source,
+        }),
+        (Ok(()), true) => Err(Error::StoppedReading { task, task_type }),
+        (Ok(()), false) => Ok(()),
+    }
+}
+
+/// What follows the delay before a restart.
+enum Restart {
+    /// Restart the tasks.
+    Now,
+    /// Restart once this pod leads the flow again.
+    WhenLeading,
+    /// The flow is stopped.
+    Never,
+}
+
+impl Tenure {
+    /// Waits until every task returned or one failed.
+    async fn wait(&mut self) -> Exit {
+        while let Some(result) = self.tasks.join_next().await {
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    error!(error = %e, "Task failed");
+                    return Exit::Failed;
+                }
+                Err(e) => {
+                    error!(error = %e, "Task panicked");
+                    return Exit::Failed;
+                }
+            }
+        }
+        Exit::Completed
+    }
+
+    /// Cancels the tasks, lets them finish what they hold, and aborts the
+    /// ones still running after `FLOW_STOP_TIMEOUT`.
+    async fn drain(&mut self) {
+        self.cancellation_token.cancel();
+        let finished = async { while self.tasks.join_next().await.is_some() {} };
+        if tokio::time::timeout(crate::reconciler::FLOW_STOP_TIMEOUT, finished)
+            .await
+            .is_err()
+        {
+            warn!(
+                tasks = self.tasks.len(),
+                "Tasks did not stop in time, aborting them"
+            );
+            self.tasks.shutdown().await;
+        }
+    }
+
+    /// Cancels the tasks, gives them `FLOW_ABORT_GRACE` to hand back what
+    /// they hold, and aborts the ones still running.
+    async fn abort(&mut self) {
+        self.cancellation_token.cancel();
+        let finished = async { while self.tasks.join_next().await.is_some() {} };
+        if tokio::time::timeout(crate::reconciler::FLOW_ABORT_GRACE, finished)
+            .await
+            .is_err()
+        {
+            self.tasks.shutdown().await;
+        }
+    }
 }
 
 impl Flow {
@@ -481,16 +541,9 @@ impl Flow {
         Arc::clone(&self.system_cache)
     }
 
-    /// Returns the cancellation token for the most recently started task tenure.
-    ///
-    /// Used by the reconciler to cancel a running flow before replacing it. Returns
-    /// `None` if `start_tasks()` has not yet been called (e.g. leader-elected flows
-    /// that have not yet acquired leadership).
-    pub fn cancellation_token(&self) -> Option<tokio_util::sync::CancellationToken> {
-        self.last_task_context
-            .lock()
-            .ok()
-            .and_then(|guard| guard.as_ref().map(|ctx| ctx.cancellation_token.clone()))
+    /// Returns the token that stops the flow and every run of its tasks.
+    pub fn cancellation_token(&self) -> tokio_util::sync::CancellationToken {
+        self.stop.clone()
     }
 
     /// Determines if the flow should run with leader election.
@@ -523,6 +576,7 @@ impl Flow {
 
         for task in &self.config.flow.tasks {
             task.check(&self.services).map_err(|source| Error::Task {
+                task: task.name().to_string(),
                 task_type: task.as_str(),
                 source,
             })?;
@@ -564,8 +618,7 @@ impl Flow {
             .ok_or_else(|| Error::TaskManagerNotInitialized)?
             .clone();
 
-        // Create a fresh cancellation token for this task tenure.
-        let cancellation_token = tokio_util::sync::CancellationToken::new();
+        let cancellation_token = self.stop.child_token();
 
         // Shared response registry for streaming progress between tasks in this flow.
         let response_registry = Arc::new(flowgen_core::registry::ResponseRegistry::new());
@@ -592,128 +645,59 @@ impl Flow {
         })?))
     }
 
-    /// Spawns all tasks and returns handles separated by type.
-    ///
-    /// This method spawns ALL tasks together (both blocking and background) using a
-    /// single `TaskRegistry`. This ensures all tasks use the SAME channels for event
-    /// propagation, which is critical for webhook flows.
-    ///
-    /// ## Why All Tasks Are Spawned Together
-    ///
-    /// For webhook flows, the webhook (blocking) task must send events to background
-    /// tasks through a shared channel. If we spawn them separately with different
-    /// registries, they get different channels and events are lost.
-    ///
-    /// ## Example Flow
-    ///
-    /// ```text
-    /// TaskRegistry creates:
-    ///   channel[0]: webhook -> script
-    ///   channel[1]: script -> nats
-    ///
-    /// Spawns:
-    ///   webhook (blocking, registers route, keeps running)
-    ///   script (background, processes events)
-    ///   nats (background, publishes to NATS)
-    ///
-    /// Returns:
-    ///   blocking_handles: [webhook_handle]
-    ///   background_handles: [script_handle, nats_handle]
-    /// ```
-    ///
-    /// The caller should await `blocking_handles` before starting the HTTP server,
-    /// but `background_handles` are already running and connected.
-    pub async fn spawn_all_tasks(&self) -> Result<TaskHandles, Error> {
-        // Create a fresh task context with a new cancellation token for this tenure.
+    /// Spawns a run of the flow's tasks: one pipeline, or `parallel_instances`
+    /// pipelines for a leader-elected flow. The tasks of a pipeline share its
+    /// channels, so a webhook sends into the tasks after it. Every pipeline is
+    /// wired before any task starts.
+    fn spawn_tasks(&self) -> Result<Tenure, Error> {
+        let pipelines = match (
+            self.is_leader_elected(),
+            self.config.flow.parallel_instances,
+        ) {
+            (true, count) if count > 1 => {
+                info!(count, "Spawning parallel instances");
+                count
+            }
+            _ => 1,
+        };
+        let registries = (0..pipelines)
+            .map(|_| TaskRegistry::builder(self.config.clone()).build())
+            .collect::<Result<Vec<_>, _>>()?;
         let task_context = self.create_task_context()?;
-
-        // Build task registry with all tasks properly wired.
-        let registry = TaskRegistry::builder(self.config.clone()).build()?;
-
-        // Separate blocking (setup) tasks from background tasks.
-        let (blocking_tasks, background_tasks) = registry.partition();
-
-        let blocking_handles = blocking_tasks
-            .into_iter()
-            .map(|task_desc| spawn_task(task_desc, &task_context))
-            .collect();
-        let background_handles = background_tasks
-            .into_iter()
-            .map(|task_desc| spawn_task(task_desc, &task_context))
-            .collect();
-
-        Ok(TaskHandles {
-            blocking_handles,
-            background_handles,
-            task_context,
+        let mut tasks = JoinSet::new();
+        for task_desc in registries.into_iter().flat_map(|registry| registry.tasks) {
+            spawn_task(task_desc, &task_context, &mut tasks);
+        }
+        Ok(Tenure {
+            tasks,
+            cancellation_token: task_context.cancellation_token.clone(),
+            started: std::time::Instant::now(),
         })
     }
 
-    /// Spawns multiple independent flow pipelines for higher throughput.
-    ///
-    /// Creates N separate task registries, each with its own event channels.
-    /// All instances share the same cancellation token for coordinated shutdown.
-    async fn spawn_parallel_instances(&self, count: usize) -> Result<TaskHandles, Error> {
-        let task_context = self.create_task_context()?;
-
-        let mut all_blocking_tasks = Vec::new();
-        let mut all_background_tasks = Vec::new();
-
-        // Build all task registries and collect task descriptors.
-        for _ in 0..count {
-            let registry = TaskRegistry::builder(self.config.clone()).build()?;
-            let (blocking_tasks, background_tasks) = registry.partition();
-            all_blocking_tasks.extend(blocking_tasks);
-            all_background_tasks.extend(background_tasks);
+    /// Waits until this pod leads the flow, or returns `false` once the flow is
+    /// stopped or unregistered.
+    async fn wait_for_leadership(
+        &self,
+        leadership_rx: &mut mpsc::UnboundedReceiver<
+            flowgen_core::task::manager::LeaderElectionResult,
+        >,
+    ) -> bool {
+        loop {
+            tokio::select! {
+                _ = self.stop.cancelled() => return false,
+                status = leadership_rx.recv() => match status {
+                    Some(flowgen_core::task::manager::LeaderElectionResult::NotLeader) => {
+                        debug!("Not leader, waiting for leadership");
+                    }
+                    Some(_) => return true,
+                    None => {
+                        error!("Leadership channel closed, stopping the flow");
+                        return false;
+                    }
+                },
+            }
         }
-
-        let blocking_handles = all_blocking_tasks
-            .into_iter()
-            .map(|task_desc| spawn_task(task_desc, &task_context))
-            .collect();
-        let background_handles = all_background_tasks
-            .into_iter()
-            .map(|task_desc| spawn_task(task_desc, &task_context))
-            .collect();
-
-        Ok(TaskHandles {
-            blocking_handles,
-            background_handles,
-            task_context,
-        })
-    }
-
-    /// Starts all tasks for non-leader-elected flows immediately.
-    ///
-    /// Leader-elected flows return early — their tasks are spawned later by
-    /// `monitor_tasks()` after acquiring leadership.
-    ///
-    /// Returns blocking handles (webhook registrations) that must complete
-    /// before the HTTP server starts. Background handles are stored for
-    /// `monitor_tasks()` to monitor.
-    #[tracing::instrument(skip(self), name = "flow.run", fields(flow = %self.identity()))]
-    pub async fn start_tasks(&self) -> Result<Vec<JoinHandle<Result<(), Error>>>, Error> {
-        if self.is_leader_elected() {
-            return Ok(Vec::new());
-        }
-
-        // Spawn all tasks and return only the blocking handles.
-        let handles = self.spawn_all_tasks().await?;
-
-        // Store background handles for monitor_tasks to monitor.
-        let mut lock = self
-            .background_handles
-            .lock()
-            .map_err(|_| Error::BackgroundHandlesStoreFailed)?;
-        *lock = Some(handles.background_handles);
-
-        // Store task context so registration info is accessible before run() consumes self.
-        self.last_task_context
-            .lock()
-            .map_err(|_| Error::TaskContextStoreFailed)
-            .map(|mut guard| *guard = Some(Arc::clone(&handles.task_context)))?;
-
-        Ok(handles.blocking_handles)
     }
 
     /// Starts the main, long-running execution of the flow.
@@ -733,224 +717,158 @@ impl Flow {
         )
     }
 
-    /// The main internal run loop for the flow.
+    /// Runs the flow's tasks until the flow is stopped or they all complete.
     ///
-    /// For leader-elected flows: waits for leadership, then spawns and monitors tasks.
-    /// For non-leader-elected flows: monitors tasks already spawned by `start_tasks()`.
+    /// A leader-elected flow runs its tasks only while this pod leads it. When
+    /// a task fails, the flow restarts with backoff.
     async fn monitor_tasks(self) -> Result<(), Error> {
+        use flowgen_core::task::manager::LeaderElectionOptions;
+
         let is_leader_elected = self.is_leader_elected();
         let task_manager = self
             .task_manager
             .as_ref()
             .ok_or_else(|| Error::TaskManagerNotInitialized)?
             .clone();
-        // `register` takes the typed identity: it Displays as the human path in
-        // logs and projects to the key-safe form for the lease and peer keys.
-        let flow_id = self.identity().to_string();
         let lease_id = self.config.identity_ref().clone();
-
-        let leader_election_options = if is_leader_elected {
-            Some(flowgen_core::task::manager::LeaderElectionOptions {})
-        } else {
-            None
-        };
-
         let mut leadership_rx = task_manager
-            .register(lease_id, leader_election_options)
+            .register(
+                lease_id,
+                is_leader_elected.then_some(LeaderElectionOptions {}),
+            )
             .await
             .map_err(|e| Error::LeaderElectionRegistrationFailed(e.to_string()))?;
 
-        let mut tasks_spawned = false;
-
-        // Wait for initial leadership state.
+        let retry = flowgen_core::retry::RetryConfig::merge(&self.retry, &None);
+        let mut restart_delays = retry.reconnect_strategy();
+        let mut restarts: u32 = 0;
+        let mut leading = !is_leader_elected;
         loop {
-            match leadership_rx.recv().await {
-                Some(flowgen_core::task::manager::LeaderElectionResult::Leader) => {
-                    if !tasks_spawned {
-                        info!("Acquired leadership, spawning tasks");
-                        tasks_spawned = true;
-
-                        // Drain duplicate Leader messages.
-                        while let Ok(flowgen_core::task::manager::LeaderElectionResult::Leader) =
-                            leadership_rx.try_recv()
-                        {
-                            debug!("Flow {} received duplicate Leader message during initial drain, ignoring", flow_id);
-                        }
-                        break;
-                    } else {
-                        debug!(
-                            "Flow {} received duplicate Leader message, ignoring",
-                            flow_id
-                        );
-                    }
-                }
-                Some(flowgen_core::task::manager::LeaderElectionResult::NotLeader) => {
-                    debug!("Flow {} is not leader, waiting for leadership", flow_id);
-                    tasks_spawned = false;
-                }
-                Some(flowgen_core::task::manager::LeaderElectionResult::NoElection) => {
-                    debug!(
-                        "No leader election for flow {}, spawning tasks immediately",
-                        flow_id
-                    );
-                    tasks_spawned = true;
-                    break;
-                }
-                None => {
-                    info!("Leadership channel closed, exiting");
+            if !leading {
+                if !self.wait_for_leadership(&mut leadership_rx).await {
                     return Ok(());
                 }
+                info!("Acquired leadership, spawning tasks");
+                leading = true;
             }
-        }
 
-        let mut current_task_handles = if !is_leader_elected {
-            // Retrieve already-spawned background tasks.
-            let mut lock = self
-                .background_handles
-                .lock()
-                .map_err(|_| Error::BackgroundHandlesRetrieveFailed)?;
-
-            // For non-leader-elected flows, we just need the raw handles
-            let handles = lock
-                .take()
-                .ok_or_else(|| Error::BackgroundHandlesRetrieveFailed)?;
-
-            // Create a dummy TaskHandles since non-leader flows don't use cancellation
-            TaskHandles {
-                blocking_handles: Vec::new(),
-                background_handles: handles,
-                task_context: self.create_task_context()?, // Won't be used but needed for the type
-            }
-        } else {
-            // Spawn tasks for this leadership tenure.
-            let parallel_instances = self.config.flow.parallel_instances;
-
-            if parallel_instances <= 1 {
-                self.spawn_all_tasks().await?
-            } else {
-                info!(
-                    "Spawning {} parallel instances for flow: {}",
-                    parallel_instances,
-                    self.identity()
-                );
-                self.spawn_parallel_instances(parallel_instances).await?
-            }
-        };
-
-        let mut background_tasks: Vec<TaskHandle> = current_task_handles
-            .blocking_handles
-            .into_iter()
-            .chain(current_task_handles.background_handles)
-            .collect();
-
-        if background_tasks.is_empty() {
-            info!("No tasks to monitor");
-            return Ok(());
-        }
-
-        if is_leader_elected {
-            // Monitor leadership and tasks.
-            loop {
-                let all_completed = loop {
-                    tokio::select! {
-                        biased;
-                        Some(status) = leadership_rx.recv() => {
-                            match status {
-                                flowgen_core::task::manager::LeaderElectionResult::NotLeader => {
-                                    debug!("Lost leadership, signaling cancellation and aborting tasks");
-
-                                    // Signal all tasks to stop via cancellation token
-                                    current_task_handles.task_context.cancellation_token.cancel();
-
-                                    // Also abort tasks immediately
-                                    for task in &background_tasks {
-                                        task.abort();
-                                    }
-                                    break false;
-                                }
-                                flowgen_core::task::manager::LeaderElectionResult::Leader => {
-                                    if tasks_spawned {
-                                        debug!("Flow {} received duplicate Leader message while tasks running, ignoring", flow_id);
-                                    } else {
-                                        warn!("Received unexpected Leader message, tasks already running");
-                                    }
-                                }
-                                flowgen_core::task::manager::LeaderElectionResult::NoElection => {}
-                            }
-                        }
-                        results = futures::future::join_all(&mut background_tasks), if !background_tasks.is_empty() => {
-                            for (idx, result) in results.iter().enumerate() {
-                                if let Err(e) = result {
-                                    error!("Task {} failed: {}", idx, e);
-                                }
-                            }
-                            info!("All tasks completed");
-                            break true;
-                        }
-                    }
-                };
-
-                if all_completed {
-                    break;
+            let mut running = self.spawn_tasks()?;
+            match self
+                .watch(&mut running, &mut leadership_rx, is_leader_elected)
+                .await
+            {
+                Exit::Completed => {
+                    info!("All tasks completed");
+                    return Ok(());
                 }
-
-                // Lost leadership - wait to re-acquire.
-                background_tasks.clear();
-                tasks_spawned = false;
-
-                loop {
-                    match leadership_rx.recv().await {
-                        Some(flowgen_core::task::manager::LeaderElectionResult::Leader) => {
-                            if !tasks_spawned {
-                                info!("Re-acquired leadership, spawning tasks");
-                                tasks_spawned = true;
-
-                                // Drain duplicate Leader messages.
-                                while let Ok(
-                                    flowgen_core::task::manager::LeaderElectionResult::Leader,
-                                ) = leadership_rx.try_recv()
-                                {
-                                    debug!("Flow {} received duplicate Leader message during re-acquisition drain, ignoring", flow_id);
-                                }
-                                break;
-                            } else {
-                                debug!("Flow {} received duplicate Leader message during re-acquisition, ignoring", flow_id);
-                            }
+                Exit::Stopped => {
+                    running.drain().await;
+                    return Ok(());
+                }
+                Exit::LostLeadership => {
+                    debug!("Lost leadership, stopping tasks");
+                    self.deregister_servers();
+                    running.abort().await;
+                    task_manager
+                        .stopped_leading(self.config.identity_ref())
+                        .await;
+                    leading = false;
+                }
+                Exit::Failed => {
+                    self.deregister_servers();
+                    running.drain().await;
+                    if running.started.elapsed() >= retry.max_delay() {
+                        restart_delays = retry.reconnect_strategy();
+                        restarts = 0;
+                    }
+                    restarts = restarts.saturating_add(1);
+                    let delay = match restart_delays.next() {
+                        Some(delay) => delay,
+                        None => retry.initial_backoff,
+                    };
+                    warn!(restarts, delay = ?delay, "Restarting the flow after a task failed");
+                    match self
+                        .restart_after(delay, &mut leadership_rx, is_leader_elected)
+                        .await
+                    {
+                        Restart::Now => {}
+                        Restart::WhenLeading => {
+                            task_manager
+                                .stopped_leading(self.config.identity_ref())
+                                .await;
+                            leading = false;
                         }
-                        Some(flowgen_core::task::manager::LeaderElectionResult::NotLeader) => {
-                            debug!("Flow {} still not leader, waiting", flow_id);
-                            tasks_spawned = false;
-                        }
-                        Some(flowgen_core::task::manager::LeaderElectionResult::NoElection) => {
-                            tasks_spawned = true;
-                            break;
-                        }
-                        None => {
-                            info!("Leadership channel closed, exiting");
-                            return Ok(());
-                        }
+                        Restart::Never => return Ok(()),
                     }
                 }
-
-                // Re-spawn tasks after re-acquiring leadership.
-                current_task_handles = self.spawn_all_tasks().await?;
-                background_tasks = std::mem::take(&mut current_task_handles.blocking_handles)
-                    .into_iter()
-                    .chain(std::mem::take(&mut current_task_handles.background_handles))
-                    .collect();
             }
-        } else {
-            // Wait for all tasks to complete.
-            let results = futures::future::join_all(background_tasks).await;
-
-            for (idx, result) in results.iter().enumerate() {
-                if let Err(e) = result {
-                    error!("Task {} failed: {}", idx, e);
-                }
-            }
-            info!("All tasks completed");
         }
-        Ok(())
+    }
+
+    /// Waits until a run ends: the flow is stopped, its tasks complete or one
+    /// fails, or another pod takes the lead of a leader-elected flow.
+    async fn watch(
+        &self,
+        running: &mut Tenure,
+        leadership_rx: &mut mpsc::UnboundedReceiver<
+            flowgen_core::task::manager::LeaderElectionResult,
+        >,
+        is_leader_elected: bool,
+    ) -> Exit {
+        use flowgen_core::task::manager::LeaderElectionResult;
+        loop {
+            tokio::select! {
+                biased;
+                _ = self.stop.cancelled() => return Exit::Stopped,
+                status = leadership_rx.recv(), if is_leader_elected => match status {
+                    Some(LeaderElectionResult::NotLeader) => return Exit::LostLeadership,
+                    Some(_) => {}
+                    None => {
+                        error!("Leadership channel closed, stopping the flow");
+                        return Exit::Stopped;
+                    }
+                },
+                exit = running.wait() => return exit,
+            }
+        }
+    }
+
+    /// Waits `delay` before a restart, unless the flow is stopped or another
+    /// pod takes the lead first.
+    async fn restart_after(
+        &self,
+        delay: std::time::Duration,
+        leadership_rx: &mut mpsc::UnboundedReceiver<
+            flowgen_core::task::manager::LeaderElectionResult,
+        >,
+        is_leader_elected: bool,
+    ) -> Restart {
+        use flowgen_core::task::manager::LeaderElectionResult;
+        let sleep = tokio::time::sleep(delay);
+        tokio::pin!(sleep);
+        loop {
+            tokio::select! {
+                biased;
+                _ = self.stop.cancelled() => return Restart::Never,
+                status = leadership_rx.recv(), if is_leader_elected => match status {
+                    Some(LeaderElectionResult::NotLeader) => return Restart::WhenLeading,
+                    Some(_) => {}
+                    None => {
+                        error!("Leadership channel closed, stopping the flow");
+                        return Restart::Never;
+                    }
+                },
+                _ = &mut sleep => return Restart::Now,
+            }
+        }
+    }
+
+    /// Removes the flow's routes, tools and in-process endpoints so a new
+    /// run can register them again.
+    fn deregister_servers(&self) {
+        if let Some(servers) = &self.servers {
+            servers.deregister_flow(self.identity());
+        }
     }
 }
 
@@ -971,7 +889,8 @@ async fn fan_out(mut rx: mpsc::Receiver<Event>, mut branches: Vec<mpsc::Sender<E
 fn spawn_task(
     task_desc: TaskDescriptor,
     task_context: &Arc<flowgen_core::task::context::TaskContext>,
-) -> TaskHandle {
+    tasks: &mut JoinSet<Result<(), Error>>,
+) {
     let task_type = task_desc.task_type;
     let mut context = (**task_context).clone();
     context.leaf_count = task_desc.downstream_leaves;
@@ -987,7 +906,7 @@ fn spawn_task(
         rx: task_desc.input_rx,
         tx: task_desc.output_tx,
     };
-    task_type.spawn(io, Arc::new(context))
+    task_type.spawn(io, Arc::new(context), tasks);
 }
 
 /// Builder for creating Flow instances.
@@ -1014,6 +933,8 @@ pub struct FlowBuilder {
     holder_identity: Option<String>,
     /// Shared peer registry for flow distribution via consistent hashing.
     peer_registry: Option<Arc<flowgen_core::peer::PeerRegistry>>,
+    /// Servers the flow's tasks register with.
+    servers: Option<crate::reconciler::FlowServers>,
 }
 
 impl FlowBuilder {
@@ -1095,6 +1016,12 @@ impl FlowBuilder {
         self
     }
 
+    /// Sets the servers the flow's tasks register with.
+    pub fn servers(mut self, servers: crate::reconciler::FlowServers) -> Self {
+        self.servers = Some(servers);
+        self
+    }
+
     /// Builds a Flow instance from the configured options.
     ///
     /// # Errors
@@ -1124,8 +1051,8 @@ impl FlowBuilder {
             holder_identity: self.holder_identity,
             peer_registry: self.peer_registry,
             task_manager: None,
-            background_handles: Arc::new(std::sync::Mutex::new(None)),
-            last_task_context: Arc::new(std::sync::Mutex::new(None)),
+            servers: self.servers,
+            stop: tokio_util::sync::CancellationToken::new(),
         })
     }
 }
@@ -1133,6 +1060,160 @@ impl FlowBuilder {
 mod tests {
     use super::*;
     use crate::config::{Flow, FlowConfig, FlowConfigRaw};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn tenure() -> Tenure {
+        Tenure {
+            tasks: JoinSet::new(),
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
+            started: std::time::Instant::now(),
+        }
+    }
+
+    /// Sets its flag when dropped, which is when an aborted task unwinds.
+    struct Dropped(Arc<AtomicBool>);
+
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Spawns a task that never returns, not even when cancelled.
+    fn spawn_stuck(tenure: &mut Tenure) -> Arc<AtomicBool> {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let guard = Dropped(Arc::clone(&dropped));
+        tenure.tasks.spawn(async move {
+            let _guard = guard;
+            std::future::pending::<()>().await;
+            Ok(())
+        });
+        dropped
+    }
+
+    #[tokio::test]
+    async fn a_run_completes_once_every_task_returns() {
+        let mut running = tenure();
+        running.tasks.spawn(async { Ok(()) });
+        running.tasks.spawn(async { Ok(()) });
+
+        assert_eq!(running.wait().await, Exit::Completed);
+    }
+
+    #[tokio::test]
+    async fn a_reader_that_returns_while_the_flow_runs_fails_it() {
+        let mut running = tenure();
+        spawn_stuck(&mut running);
+        running.tasks.spawn(async {
+            task_result(
+                "consume".to_string(),
+                "nats_jetstream_subscribe",
+                true,
+                Ok(()),
+            )
+        });
+
+        assert_eq!(running.wait().await, Exit::Failed);
+        assert!(task_result("tick".to_string(), "generate", false, Ok(())).is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_run_fails_when_one_task_fails() {
+        let mut running = tenure();
+        spawn_stuck(&mut running);
+        running
+            .tasks
+            .spawn(async { Err(Error::ConfigError("broken".to_string())) });
+
+        assert_eq!(running.wait().await, Exit::Failed);
+    }
+
+    #[tokio::test]
+    async fn a_run_fails_when_one_task_panics() {
+        let mut running = tenure();
+        running.tasks.spawn(async { panic!("task panicked") });
+
+        assert_eq!(running.wait().await, Exit::Failed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn draining_lets_cancelled_tasks_finish() {
+        let mut running = tenure();
+        let finished = Arc::new(AtomicBool::new(false));
+        let token = running.cancellation_token.clone();
+        let flag = Arc::clone(&finished);
+        running.tasks.spawn(async move {
+            token.cancelled().await;
+            flag.store(true, Ordering::SeqCst);
+            Ok(())
+        });
+
+        let started = tokio::time::Instant::now();
+        running.drain().await;
+
+        assert!(finished.load(Ordering::SeqCst));
+        assert!(started.elapsed() < crate::reconciler::FLOW_STOP_TIMEOUT);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn draining_aborts_tasks_that_ignore_cancellation() {
+        let mut running = tenure();
+        let dropped = spawn_stuck(&mut running);
+
+        let started = tokio::time::Instant::now();
+        running.drain().await;
+
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(running.tasks.is_empty());
+        assert!(started.elapsed() >= crate::reconciler::FLOW_STOP_TIMEOUT);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn aborting_ends_tasks_that_ignore_cancellation_after_the_grace() {
+        let mut running = tenure();
+        let dropped = spawn_stuck(&mut running);
+
+        let started = tokio::time::Instant::now();
+        running.abort().await;
+
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(running.cancellation_token.is_cancelled());
+        assert!(started.elapsed() < crate::reconciler::FLOW_STOP_TIMEOUT);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn aborting_lets_cancelled_tasks_hand_back_what_they_hold() {
+        let mut running = tenure();
+        let handed_back = Arc::new(AtomicBool::new(false));
+        let token = running.cancellation_token.clone();
+        let flag = Arc::clone(&handed_back);
+        running.tasks.spawn(async move {
+            token.cancelled().await;
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            flag.store(true, Ordering::SeqCst);
+            Ok(())
+        });
+
+        running.abort().await;
+
+        assert!(handed_back.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn dropping_a_run_aborts_its_tasks() {
+        let mut running = tenure();
+        let dropped = spawn_stuck(&mut running);
+
+        drop(running);
+        for _ in 0..100 {
+            if dropped.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        assert!(dropped.load(Ordering::SeqCst));
+    }
 
     fn event() -> Event {
         flowgen_core::event::EventBuilder::new()
@@ -1417,66 +1498,6 @@ mod tests {
         assert!(
             task.output_tx.is_none(),
             "Single task should not have output"
-        );
-    }
-
-    #[test]
-    fn test_task_registry_partition_blocking_vs_background() {
-        use crate::config::{Flow, FlowConfig, FlowConfigRaw, TaskType};
-
-        let flow_config = Arc::new(
-            FlowConfig::from_path(
-                FlowConfigRaw {
-                    flow: Flow {
-                        name: Some("test_flow".to_string()),
-                        labels: None,
-                        tasks: vec![
-                            TaskType::http_endpoint(flowgen_http::endpoint::Endpoint(
-                                flowgen_http::config::Processor {
-                                    name: "h".to_string(),
-                                    ..Default::default()
-                                },
-                            )),
-                            TaskType::script(flowgen_core::task::script::Script {
-                                name: "s".to_string(),
-                                ..Default::default()
-                            }),
-                            TaskType::script(flowgen_core::task::script::Script {
-                                name: "s".to_string(),
-                                ..Default::default()
-                            }),
-                        ],
-                        require_leader_election: None,
-                        parallel_instances: 1,
-                    },
-                },
-                "test_flow".to_string(),
-                None,
-            )
-            .expect("test fixture must have valid identity"),
-        );
-
-        let registry = TaskRegistry::builder(flow_config).build().unwrap();
-        let (blocking, background) = registry.partition();
-
-        assert_eq!(blocking.len(), 1, "Should have 1 blocking task (webhook)");
-        assert_eq!(
-            background.len(),
-            2,
-            "Should have 2 background tasks (scripts)"
-        );
-
-        assert!(
-            blocking[0].is_blocking,
-            "Blocking task should have is_blocking=true"
-        );
-        assert!(
-            !background[0].is_blocking,
-            "Background task should have is_blocking=false"
-        );
-        assert!(
-            !background[1].is_blocking,
-            "Background task should have is_blocking=false"
         );
     }
 

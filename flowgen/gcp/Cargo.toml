@@ -28,7 +28,6 @@ tokio-retry = { workspace = true }
 humantime-serde = { workspace = true }
 base64 = { workspace = true }
 arrow = { workspace = true }
-arrow-json = { workspace = true }
 chrono = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }

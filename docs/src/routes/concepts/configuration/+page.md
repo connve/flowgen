@@ -262,7 +262,7 @@ Kubernetes liveness/readiness listener.
 | Endpoint | Response |
 |---|---|
 | `GET /livez` | `200 OK`. |
-| `GET /readyz` | `200 OK` once at least one flow is registered, `503` before. |
+| `GET /readyz` | `200 OK` once startup has finished, `503` before and after a shutdown signal. A worker with no flows is ready. |
 | `GET /healthz` | Alias of `/livez`. |
 
 ## `retry`
@@ -274,7 +274,7 @@ Sets the default retry policy for every task. Individual tasks can override via 
 | `max_attempts` | int / null | `10` | Maximum attempts before giving up. `null` for infinite retries. |
 | `initial_backoff` | duration | `1s` | Delay before first retry. Each subsequent retry doubles, with jitter. |
 
-See [Retry](/docs/flowgen/concepts/retry) for the two retry patterns (circuit breaker for processors, infinite reconnect for subscribers).
+See [Retry](/docs/flowgen/concepts/retry) for how events, task startup, subscribers and flow restarts retry.
 
 ## `telemetry`
 

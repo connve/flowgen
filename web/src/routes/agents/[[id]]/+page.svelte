@@ -292,6 +292,7 @@
 
 	function resetComposer() {
 		input = '';
+		recalled = null;
 		if (textareaEl) textareaEl.style.height = 'auto';
 		multiline = false;
 	}
@@ -668,16 +669,54 @@
 			.catch((err) => (error = errorMessage(err, m.agents_chat_failed())));
 	}
 
+	// Which of the conversation's prompts the composer shows, counted from the
+	// first; null while it holds the user's own draft.
+	let recalled = $state<number | null>(null);
+	let draft = '';
+
+	// Up on the composer's first line and Down on its last walk through the
+	// prompts sent in this conversation, like a shell history. With a modifier
+	// or while an input method composes, the keys keep their usual meaning.
+	function recallPrompt(event: KeyboardEvent): boolean {
+		if (event.shiftKey || event.altKey || event.metaKey || event.ctrlKey || event.isComposing) {
+			return false;
+		}
+		const el = event.currentTarget as HTMLTextAreaElement;
+		const prompts = messages.filter((msg) => msg.role === 'user').map((msg) => msg.content);
+		const from = recalled ?? prompts.length;
+		let next: number | null;
+		if (event.key === 'ArrowUp' && from > 0 && !el.value.slice(0, el.selectionStart).includes('\n')) {
+			next = from - 1;
+		} else if (
+			event.key === 'ArrowDown' &&
+			recalled !== null &&
+			!el.value.slice(el.selectionEnd).includes('\n')
+		) {
+			next = recalled + 1 < prompts.length ? recalled + 1 : null;
+		} else {
+			return false;
+		}
+		if (recalled === null) draft = input;
+		recalled = next;
+		input = next === null ? draft : prompts[next];
+		tick().then(() => {
+			autoGrow(el);
+			el.setSelectionRange(input.length, input.length);
+		});
+		return true;
+	}
+
 	function onKeydown(event: KeyboardEvent) {
 		if (event.key === 'Enter' && !event.shiftKey) {
 			event.preventDefault();
 			send();
+		} else if (recallPrompt(event)) {
+			event.preventDefault();
 		} else if (event.key === 'Escape' && !sending && input) {
 			// Esc clears a drafted message; while generating, the window-level
 			// handler uses Esc to stop instead.
 			event.preventDefault();
-			input = '';
-			if (textareaEl) textareaEl.style.height = 'auto';
+			resetComposer();
 		}
 	}
 
@@ -704,6 +743,7 @@
 	}
 
 	function onInput(e: Event) {
+		recalled = null;
 		autoGrow(e.currentTarget as HTMLTextAreaElement);
 	}
 </script>
@@ -1182,7 +1222,10 @@
 		</div>
 	{:else}
 		<!-- Conversation: scrolling messages, composer pinned to the bottom. -->
-		<div bind:this={scroller} class="min-h-0 flex-1 overflow-y-auto px-6 py-6">
+		<div
+			bind:this={scroller}
+			class="min-h-0 flex-1 overflow-y-auto px-6 pb-10 pt-6 [mask-image:linear-gradient(to_bottom,transparent,black_1.5rem,black_calc(100%-2.5rem),transparent)]"
+		>
 			<div class="mx-auto flex max-w-4xl flex-col gap-5">
 				{#each messages as msg, i (i)}
 					{@const streaming = msg.role === 'assistant' && msg.pending === true}
@@ -1211,7 +1254,12 @@
 							>
 								<!-- eslint-disable-next-line svelte/no-at-html-tags -->
 								{@html renderMarkdown(msg.content)}
-								{#if !streaming && msg.content.length === 0 && steps.length === 0 && !msg.error}
+								{#if msg.stopped}
+									<p class="not-prose mt-2 flex items-center gap-1.5 text-xs text-base-content/50">
+										<Icon icon="tabler:player-stop" class="h-3.5 w-3.5 shrink-0" />
+										<span>{m.agents_reply_stopped()}</span>
+									</p>
+								{:else if !streaming && msg.content.length === 0 && steps.length === 0 && !msg.error}
 									<p class="text-base-content/50">{m.agents_reply_empty()}</p>
 								{/if}
 								{#if msg.error}
@@ -1231,7 +1279,7 @@
 											{@const run = savedRun(step) ?? (tool ? toolRun(step.run) : null)}
 											<details class="chat-step">
 												<summary
-													class="chat-status -mx-1 flex cursor-pointer list-none items-center gap-1.5 rounded px-1 py-0.5 font-mono outline-none focus-visible:outline-2 focus-visible:outline-primary {live
+													class="chat-status -mx-1 flex cursor-pointer list-none items-center gap-2 rounded px-1 py-0.5 font-mono outline-none focus-visible:outline-2 focus-visible:outline-primary {live
 														? ''
 														: 'text-base-content/50 hover:text-base-content/80'}"
 												>
@@ -1244,12 +1292,12 @@
 														<span class="tooltip tooltip-top flex min-w-0" data-tip={m.agents_tool_open_flow()}>
 															<a
 																href="{base}/flows/{encodePath(tool.flow)}"
-																class="truncate hover:underline {live ? 'chat-status-live' : ''}"
+																class="[overflow-wrap:anywhere] hover:underline {live ? 'chat-status-live' : ''}"
 																>{step.name}{live ? '…' : ''}</a
 															>
 														</span>
 													{:else}
-														<span class="truncate {live ? 'chat-status-live' : ''}"
+														<span class="min-w-0 [overflow-wrap:anywhere] {live ? 'chat-status-live' : ''}"
 															>{step.name || m.agents_tool_step_fallback()}{live ? '…' : ''}</span
 														>
 													{/if}
@@ -1280,14 +1328,14 @@
 													{:else if run}
 														{@const level = run.failed ? 'error' : run.warned ? 'warn' : 'info'}
 														<span
-															class="ml-auto flex min-w-0 shrink items-center gap-1.5 font-sans text-[11px] tabular-nums {run.failed
+															class="ml-auto flex shrink-0 items-center gap-1.5 font-sans text-[11px] tabular-nums {run.failed
 																? 'text-error'
 																: run.warned
 																	? 'text-attention'
 																	: 'text-base-content/50'}"
 														>
 															{#if run.failed}
-																<span class="truncate">{m.agents_tool_failed_at({ task: run.failed })} ·</span>
+																<span class="max-sm:hidden">{m.agents_tool_failed_at({ task: run.failed })} ·</span>
 															{/if}
 															<span class="shrink-0">{formatDuration(run.ended_ms - run.started_ms)}</span>
 															<span
@@ -1306,7 +1354,7 @@
 													{/if}
 												</summary>
 												{#if reached.length > 3 && !run}
-													<div class="mt-1 ml-4 flex flex-wrap gap-x-3 gap-y-1 font-sans text-[11px] text-base-content/60">
+													<div class="mt-1 ml-5 flex flex-wrap gap-x-3 gap-y-1 font-sans text-[11px] text-base-content/60">
 														{#each reached as name (name)}
 															{@const connector = connectorByName(name)}
 															<span class="flex items-center gap-1">
@@ -1319,7 +1367,7 @@
 												{#if step.arguments}
 													{@const fields = stepFields(step.arguments)}
 													{#if fields}
-														<div class="not-prose mt-1 ml-4 font-sans text-[11px] leading-5">
+														<div class="not-prose mt-1 ml-5 font-sans text-[11px] leading-5">
 															<div class="text-[10px] font-medium uppercase tracking-wide text-base-content/40">
 																{m.agents_tool_input()}
 															</div>
@@ -1332,7 +1380,7 @@
 														</div>
 													{:else}
 														<pre
-															class="mt-0.5 ml-4 overflow-x-auto whitespace-pre-wrap break-words rounded bg-base-200/50 px-2 py-1 text-[11px] leading-snug text-base-content/60">{formatStepArgs(
+															class="mt-0.5 ml-5 overflow-x-auto whitespace-pre-wrap break-words rounded bg-base-200/50 px-2 py-1 text-[11px] leading-snug text-base-content/60">{formatStepArgs(
 																step.arguments
 															)}</pre>
 													{/if}
@@ -1340,11 +1388,11 @@
 												{#if run && step.run}
 													{@const runId = step.run}
 													{@const { shown, hidden } = visibleTasks(run, allTasks.has(runId))}
-													<div class="not-prose mt-1.5 ml-4 font-sans text-[11px] leading-5">
+													<div class="not-prose mt-1.5 ml-5 font-sans text-[11px] leading-5">
 														<div class="text-[10px] font-medium uppercase tracking-wide text-base-content/40">
 															{m.agents_tool_steps()}
 														</div>
-														<dl class="m-0 grid grid-cols-[max-content_1fr] items-center gap-x-3">
+														<dl class="m-0 grid grid-cols-[max-content_max-content_1fr] items-center gap-x-3">
 															{#each shown as task (task.task)}
 																{@const connector = connectorFor(task.task_type ?? '')}
 																<dt class="m-0 flex items-center gap-1.5 font-normal {levelText(task.level)}">
@@ -1357,8 +1405,10 @@
 																			>{/if}</span
 																	>
 																</dt>
-																<dd class="m-0 flex items-center gap-1.5 tabular-nums text-base-content/50">
+																<dd class="m-0 text-right tabular-nums text-base-content/50">
 																	{formatDuration(task.duration_ms)}
+																</dd>
+																<dd class="m-0 flex items-center">
 																	<Icon icon={levelIcon(task.level)} class="h-3.5 w-3.5 {levelMark(task.level)}" />
 																</dd>
 															{/each}
@@ -1416,7 +1466,7 @@
 			</div>
 		{/if}
 
-		<div class="shrink-0 px-6 pb-6 pt-2">
+		<div class="shrink-0 px-6 pb-6">
 			<div class="mx-auto max-w-4xl">
 				{@render composer()}
 			</div>
@@ -1455,13 +1505,15 @@
 	{/snippet}
 
 	{#if moving}
-		<div class="fixed inset-0 z-40 bg-black/50" aria-hidden="true" onclick={() => (moving = null)}></div>
 		<div
-			class="pointer-events-none absolute inset-0 z-50 flex items-center justify-center p-4"
+			class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
 			role="dialog"
 			aria-modal="true"
 			aria-label={m.agents_conversation_move()}
 			tabindex="-1"
+			onclick={(e) => {
+				if (e.target === e.currentTarget) moving = null;
+			}}
 			onkeydown={(e) => {
 				if (e.key !== 'Escape') return;
 				e.stopPropagation();
@@ -1469,7 +1521,7 @@
 			}}
 		>
 			<form
-				class="pointer-events-auto w-full max-w-sm overflow-hidden rounded-lg border border-base-200 bg-base-100 shadow-xl"
+				class="w-full max-w-sm overflow-hidden rounded-lg border border-base-200 bg-base-100 shadow-xl"
 				onsubmit={(e) => {
 					e.preventDefault();
 					saveMove();
@@ -1506,23 +1558,22 @@
 
 	{#if pendingDelete}
 		{@const target = pendingDelete}
-		<!-- The backdrop covers the whole page; the dialog sits in the middle of the chat. -->
-		<div class="fixed inset-0 z-40 bg-black/50" aria-hidden="true" onclick={() => (pendingDelete = null)}></div>
 		<div
-			class="pointer-events-none absolute inset-0 z-50 flex items-center justify-center p-4"
+			class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
 			role="dialog"
 			aria-modal="true"
 			aria-label={m.agents_conversation_delete()}
 			tabindex="-1"
+			onclick={(e) => {
+				if (e.target === e.currentTarget) pendingDelete = null;
+			}}
 			onkeydown={(e) => {
 				if (e.key !== 'Escape') return;
 				e.stopPropagation();
 				pendingDelete = null;
 			}}
 		>
-			<div
-				class="pointer-events-auto w-full max-w-sm overflow-hidden rounded-lg border border-base-200 bg-base-100 shadow-xl"
-			>
+			<div class="w-full max-w-sm overflow-hidden rounded-lg border border-base-200 bg-base-100 shadow-xl">
 				<div class="border-b border-base-200 px-4 py-3 text-sm font-medium">
 					{m.agents_conversation_delete_title()}
 				</div>

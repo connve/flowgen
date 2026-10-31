@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::{self, UnboundedSender};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn, Instrument};
 
@@ -35,6 +35,12 @@ fn lease_key(task_id: &FlowIdentity) -> String {
     format!("{}{}", crate::executor::LEASE_KEY_PREFIX, task_id.as_key())
 }
 
+/// The last quarter of the lease: how long a flow that stops leading has to
+/// stop its tasks before another pod may take the lease.
+fn stop_window(config: &crate::executor::LeaseConfig) -> Duration {
+    config.lease_duration / 4
+}
+
 #[derive(Clone)]
 struct LeaseTask {
     task_id: FlowIdentity,
@@ -44,6 +50,8 @@ struct LeaseTask {
     response_tx: mpsc::UnboundedSender<LeaderElectionResult>,
     active_leases: Arc<Mutex<HashMap<String, ActiveLease>>>,
     peer_registry: Option<Arc<crate::peer::PeerRegistry>>,
+    /// Woken when the flow has stopped its tasks after it stopped leading.
+    stopped: Arc<Notify>,
 }
 
 struct Leading {
@@ -62,12 +70,14 @@ impl LeaseTask {
         let key = self.task_id.as_key();
         let active_leases = Arc::clone(&self.active_leases);
         let mut leases = active_leases.lock().await;
+        let stopped = Arc::clone(&self.stopped);
         let handle = spawn_acquisition_retry_task(self, delay);
         leases.insert(
             key,
             ActiveLease {
                 handle,
                 leading: false,
+                stopped,
             },
         );
     }
@@ -76,14 +86,50 @@ impl LeaseTask {
         let key = self.task_id.as_key();
         let active_leases = Arc::clone(&self.active_leases);
         let mut leases = active_leases.lock().await;
+        let stopped = Arc::clone(&self.stopped);
         let handle = spawn_renewal_task(self, generation);
         leases.insert(
             key,
             ActiveLease {
                 handle,
                 leading: true,
+                stopped,
             },
         );
+    }
+
+    /// Tells the flow it no longer leads and re-arms acquisition, so the pod
+    /// can lead again once the current holder yields.
+    async fn step_down(&self) {
+        if self
+            .response_tx
+            .send(LeaderElectionResult::NotLeader)
+            .is_err()
+        {
+            debug!("Flow already terminated");
+            return;
+        }
+        self.clone().hand_off_to_acquisition(Duration::ZERO).await;
+    }
+
+    /// Waits for the next renewal tick and renews the lease, returning when
+    /// the attempt started.
+    async fn renew_on_tick(
+        &self,
+        interval: &mut tokio::time::Interval,
+        generation: u64,
+    ) -> (
+        tokio::time::Instant,
+        Result<crate::executor::RenewalResult, crate::cache::Error>,
+    ) {
+        interval.tick().await;
+        let revision = *self.current_revision.lock().await;
+        let attempt = tokio::time::Instant::now();
+        let renewal = self
+            .executor
+            .renew_lease(&self.lease_name, revision, generation)
+            .await;
+        (attempt, renewal)
     }
 
     fn leading(&self) -> Option<Leading> {
@@ -110,6 +156,9 @@ impl LeaseTask {
                 return false;
             }
         }
+        let stopped = self.stopped.notified();
+        tokio::pin!(stopped);
+        stopped.as_mut().enable();
         if self
             .response_tx
             .send(LeaderElectionResult::NotLeader)
@@ -117,6 +166,10 @@ impl LeaseTask {
         {
             debug!(task_id = %self.task_id, "Flow already terminated, keeping its lease");
             return false;
+        }
+        let window = stop_window(&self.executor.config);
+        if tokio::time::timeout(window, stopped).await.is_err() {
+            warn!(task_id = %self.task_id, window_secs = window.as_secs(), "The flow did not report its tasks stopped in time, handing the lease over");
         }
         match self
             .executor
@@ -168,7 +221,9 @@ impl LeaseTask {
 ///
 /// This function spawns a background task that attempts to renew the lease at the configured interval.
 /// If renewal fails critically (ownership lost), the task notifies the flow
-/// by sending a NotLeader message and terminates.
+/// by sending a NotLeader message and terminates. While the flow runs, it
+/// steps down the same way when no renewal succeeds before the stop window,
+/// so the flow's tasks have stopped before another pod may take the lease.
 ///
 /// `active_leases` is the same map `TaskManager` consults from `unregister` and
 /// `shutdown`. When this renewer hands off to an acquisition retry task it
@@ -180,21 +235,31 @@ fn spawn_renewal_task(lease: LeaseTask, generation: u64) -> JoinHandle<()> {
     tokio::spawn(
         async move {
             let _leading = lease.leading();
-            let mut interval = tokio::time::interval(lease.executor.config.renewal_interval);
+            let config = &lease.executor.config;
+            let leads_for = config.lease_duration - stop_window(config);
+            let mut interval = tokio::time::interval(config.renewal_interval);
+            let mut deadline = tokio::time::Instant::now() + leads_for;
 
             loop {
-                interval.tick().await;
+                let (attempt, renewal) = tokio::select! {
+                    biased;
+                    _ = tokio::time::sleep_until(deadline), if !lease.response_tx.is_closed() => {
+                        warn!(
+                            task_id = %lease.task_id,
+                            leads_for_secs = leads_for.as_secs(),
+                            "No lease renewal succeeded in time, stepping down before the lease expires"
+                        );
+                        lease.step_down().await;
+                        break;
+                    }
+                    renewal = lease.renew_on_tick(&mut interval, generation) => renewal,
+                };
 
-                let revision = *lease.current_revision.lock().await;
-
-                match lease
-                    .executor
-                    .renew_lease(&lease.lease_name, revision, generation)
-                    .await
-                {
+                match renewal {
                     Ok(crate::executor::RenewalResult::Renewed {
                         revision: new_revision,
                     }) => {
+                        deadline = attempt + leads_for;
                         *lease.current_revision.lock().await = new_revision;
                         debug!(task_id = %lease.task_id, revision = %new_revision, "Renewed lease");
                         if lease.hand_over(new_revision).await {
@@ -207,21 +272,7 @@ fn spawn_renewal_task(lease: LeaseTask, generation: u64) -> JoinHandle<()> {
                             current_holder = %holder,
                             "Lost lease ownership, notifying flow and re-arming acquisition"
                         );
-
-                        if lease
-                            .response_tx
-                            .send(LeaderElectionResult::NotLeader)
-                            .is_err()
-                        {
-                            debug!("Flow already terminated");
-                            break;
-                        }
-
-                        // Hand off to an infinite-retry acquisition task so
-                        // this pod gets another shot at leadership when the
-                        // current holder yields. Without this the flow would
-                        // sit waiting on `leadership_rx.recv()` forever.
-                        lease.clone().hand_off_to_acquisition(Duration::ZERO).await;
+                        lease.step_down().await;
                         break;
                     }
                     Ok(crate::executor::RenewalResult::LeaseDeleted) => {
@@ -229,21 +280,10 @@ fn spawn_renewal_task(lease: LeaseTask, generation: u64) -> JoinHandle<()> {
                             task_id = %lease.task_id,
                             "Lease was deleted, notifying flow and re-arming acquisition"
                         );
-
-                        if lease
-                            .response_tx
-                            .send(LeaderElectionResult::NotLeader)
-                            .is_err()
-                        {
-                            debug!("Flow already terminated");
-                            break;
-                        }
-
-                        lease.clone().hand_off_to_acquisition(Duration::ZERO).await;
+                        lease.step_down().await;
                         break;
                     }
                     Err(e) => {
-                        // Transient errors - retry on next interval.
                         warn!(error = %e, "Failed to renew lease, will retry");
                     }
                 }
@@ -380,6 +420,8 @@ struct ActiveLease {
     handle: JoinHandle<()>,
     /// Whether `handle` renews a lease this pod holds.
     leading: bool,
+    /// Woken when the flow has stopped its tasks after it stopped leading.
+    stopped: Arc<Notify>,
 }
 
 /// Centralized task lifecycle manager.
@@ -437,6 +479,7 @@ impl TaskManager {
                             response_tx: registration.response_tx,
                             active_leases: active_leases.clone(),
                             peer_registry: peer_registry.clone(),
+                            stopped: Arc::new(Notify::new()),
                         }
                         .hand_off_to_acquisition(Duration::ZERO)
                         .await;
@@ -491,6 +534,14 @@ impl TaskManager {
         match self.active_leases.lock().await.get(&task_id.as_key()) {
             Some(active) => active.leading,
             None => false,
+        }
+    }
+
+    /// Reports that the flow of `task_id` stopped its tasks after it stopped
+    /// leading, so a lease it hands over goes to the next pod at once.
+    pub async fn stopped_leading(&self, task_id: &FlowIdentity) {
+        if let Some(active) = self.active_leases.lock().await.get(&task_id.as_key()) {
+            active.stopped.notify_waiters();
         }
     }
 
@@ -695,6 +746,7 @@ mod tests {
                 response_tx,
                 active_leases,
                 peer_registry: None,
+                stopped: Arc::new(Notify::new()),
             },
             pod2_generation,
         );
@@ -724,6 +776,131 @@ mod tests {
         .await
         .expect("manager must re-arm acquisition after lost ownership");
         assert!(became_leader, "leadership channel closed prematurely");
+    }
+
+    /// A cache that fails every call while `down` is set.
+    #[derive(Debug, Default)]
+    struct Unreachable {
+        cache: MemoryCache,
+        down: std::sync::atomic::AtomicBool,
+    }
+
+    impl Unreachable {
+        fn reachable(&self) -> Result<(), crate::cache::Error> {
+            match self.down.load(std::sync::atomic::Ordering::SeqCst) {
+                true => Err(crate::cache::CacheError::UpdateFailed(
+                    "Cache unreachable".into(),
+                )),
+                false => Ok(()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::cache::Cache for Unreachable {
+        async fn put(
+            &self,
+            key: &str,
+            value: bytes::Bytes,
+            ttl_secs: Option<u64>,
+        ) -> Result<(), crate::cache::Error> {
+            self.reachable()?;
+            crate::cache::Cache::put(&self.cache, key, value, ttl_secs).await
+        }
+
+        async fn get(&self, key: &str) -> Result<Option<bytes::Bytes>, crate::cache::Error> {
+            self.reachable()?;
+            crate::cache::Cache::get(&self.cache, key).await
+        }
+
+        async fn delete(&self, key: &str) -> Result<(), crate::cache::Error> {
+            self.reachable()?;
+            crate::cache::Cache::delete(&self.cache, key).await
+        }
+
+        async fn create(
+            &self,
+            key: &str,
+            value: bytes::Bytes,
+            ttl_secs: Option<u64>,
+        ) -> Result<u64, crate::cache::Error> {
+            self.reachable()?;
+            crate::cache::Cache::create(&self.cache, key, value, ttl_secs).await
+        }
+
+        async fn update(
+            &self,
+            key: &str,
+            value: bytes::Bytes,
+            expected_revision: u64,
+            ttl_secs: Option<u64>,
+        ) -> Result<u64, crate::cache::Error> {
+            self.reachable()?;
+            crate::cache::Cache::update(&self.cache, key, value, expected_revision, ttl_secs).await
+        }
+
+        async fn get_with_revision(
+            &self,
+            key: &str,
+        ) -> Result<Option<(bytes::Bytes, u64)>, crate::cache::Error> {
+            self.reachable()?;
+            crate::cache::Cache::get_with_revision(&self.cache, key).await
+        }
+
+        async fn delete_with_revision(
+            &self,
+            key: &str,
+            expected_revision: u64,
+        ) -> Result<(), crate::cache::Error> {
+            self.reachable()?;
+            crate::cache::Cache::delete_with_revision(&self.cache, key, expected_revision).await
+        }
+
+        async fn get_revision(&self, key: &str) -> Result<Option<u64>, crate::cache::Error> {
+            self.reachable()?;
+            crate::cache::Cache::get_revision(&self.cache, key).await
+        }
+
+        async fn list_keys(&self, prefix: &str) -> Result<Vec<String>, crate::cache::Error> {
+            self.reachable()?;
+            crate::cache::Cache::list_keys(&self.cache, prefix).await
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_leader_that_cannot_renew_steps_down_before_its_lease_expires() {
+        let cache = Arc::new(Unreachable::default());
+        let manager = TaskManagerBuilder::new()
+            .executor(make_executor("pod-1", cache.clone()))
+            .build()
+            .unwrap()
+            .start()
+            .await;
+        let mut rx = manager
+            .register(FlowIdentity::new("orders"), Some(LeaderElectionOptions {}))
+            .await
+            .unwrap();
+        assert_eq!(rx.recv().await, Some(LeaderElectionResult::Leader));
+
+        cache.down.store(true, std::sync::atomic::Ordering::SeqCst);
+        let unreachable_since = tokio::time::Instant::now();
+        let stepped_down = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
+        let led_for = unreachable_since.elapsed();
+        cache.down.store(false, std::sync::atomic::Ordering::SeqCst);
+        let reelected = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
+
+        assert_eq!(
+            stepped_down.expect("the leader must step down"),
+            Some(LeaderElectionResult::NotLeader)
+        );
+        assert!(
+            led_for >= Duration::from_millis(1300) && led_for <= Duration::from_millis(1500),
+            "stepped down after {led_for:?}, outside the 2s lease minus its stop window"
+        );
+        assert_eq!(
+            reelected.expect("the pod must lead again once the cache is back"),
+            Some(LeaderElectionResult::Leader)
+        );
     }
 
     #[tokio::test]
@@ -1168,12 +1345,18 @@ mod tests {
         registry2.mark_ready().await.unwrap();
 
         let handed_over = tokio::time::timeout(Duration::from_secs(60), rx1.recv()).await;
+        let while_stopping = tokio::time::timeout(Duration::from_secs(12), rx2.recv()).await;
+        manager1.stopped_leading(&flow_id).await;
         let taken_over = tokio::time::timeout(Duration::from_secs(15), rx2.recv()).await;
         let reclaimed = tokio::time::timeout(Duration::from_secs(60), rx1.recv()).await;
 
         assert_eq!(
             handed_over.expect("pod-1 must hand the lease over"),
             Some(LeaderElectionResult::NotLeader)
+        );
+        assert!(
+            while_stopping.is_err(),
+            "pod-2 led while pod-1 was stopping its tasks: {while_stopping:?}"
         );
         assert_eq!(
             taken_over.expect("pod-2 must take the lease"),
@@ -1184,6 +1367,127 @@ mod tests {
             "pod-1 took the lease back: {reclaimed:?}"
         );
         assert!(manager2.is_leader(&flow_id).await);
+    }
+
+    struct Pod {
+        registry: Arc<crate::peer::PeerRegistry>,
+        manager: TaskManager,
+        leading: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    async fn start_pod(
+        cache: &Arc<dyn crate::cache::Cache>,
+        name: &str,
+        flow: &FlowIdentity,
+        lease: &LeaseConfig,
+    ) -> Pod {
+        let registry = Arc::new(crate::peer::PeerRegistry::new(
+            cache.clone(),
+            name.to_string(),
+        ));
+        registry.register().await.unwrap();
+        let executor = Executor::new(
+            cache.clone(),
+            LeaseConfig {
+                holder_identity: name.to_string(),
+                ..lease.clone()
+            },
+        )
+        .unwrap();
+        let manager = TaskManagerBuilder::new()
+            .executor(Arc::new(executor))
+            .peer_registry(Arc::clone(&registry))
+            .build()
+            .unwrap()
+            .start()
+            .await;
+        let mut rx = manager
+            .register(flow.clone(), Some(LeaderElectionOptions {}))
+            .await
+            .unwrap();
+        registry.mark_ready().await.unwrap();
+        let leading = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let state = Arc::clone(&leading);
+        tokio::spawn(async move {
+            while let Some(result) = rx.recv().await {
+                state.store(
+                    result == LeaderElectionResult::Leader,
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+            }
+        });
+        Pod {
+            registry,
+            manager,
+            leading,
+        }
+    }
+
+    async fn stop_pod(pod: &Pod, flow: &FlowIdentity, releases_leases: bool) {
+        match releases_leases {
+            true => pod.manager.shutdown().await.unwrap(),
+            false => pod.manager.unregister(flow).await,
+        }
+        pod.leading
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        pod.registry.deregister().await.unwrap();
+    }
+
+    async fn rolling_restart(lease: LeaseConfig, releases_leases: bool) -> (usize, Duration) {
+        let cache: Arc<dyn crate::cache::Cache> = Arc::new(MemoryCache::new());
+        let flow = FlowIdentity::new("salesforce/account_writer");
+        let mut old = Vec::new();
+        for name in ["old-1", "old-2", "old-3"] {
+            old.push(start_pod(&cache, name, &flow, &lease).await);
+        }
+        tokio::time::sleep(lease.renewal_interval * 3).await;
+        assert_eq!(leaders(&old), 1, "one old pod must lead before the restart");
+
+        let mut new = Vec::new();
+        for (index, name) in ["new-1", "new-2", "new-3"].into_iter().enumerate() {
+            new.push(start_pod(&cache, name, &flow, &lease).await);
+            tokio::time::sleep(lease.renewal_interval * 2).await;
+            stop_pod(&old[index], &flow, releases_leases).await;
+            tokio::time::sleep(lease.renewal_interval).await;
+        }
+
+        let started = tokio::time::Instant::now();
+        while leaders(&new) == 0 && started.elapsed() < lease.lease_duration * 5 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        (leaders(&new), started.elapsed())
+    }
+
+    fn leaders(pods: &[Pod]) -> usize {
+        pods.iter()
+            .filter(|pod| pod.leading.load(std::sync::atomic::Ordering::SeqCst))
+            .count()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_rolling_restart_leaves_one_new_pod_leading() {
+        let (leaders, waited) = rolling_restart(LeaseConfig::default(), true).await;
+
+        assert_eq!(
+            leaders, 1,
+            "{leaders} new pods lead the flow after {waited:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rolling_restart_without_released_leases_leaves_one_new_pod_leading() {
+        let lease = LeaseConfig {
+            lease_duration: Duration::from_secs(3),
+            renewal_interval: Duration::from_secs(1),
+            ..Default::default()
+        };
+
+        let (leaders, waited) = rolling_restart(lease, false).await;
+
+        assert_eq!(
+            leaders, 1,
+            "{leaders} new pods lead the flow after {waited:?}"
+        );
     }
 
     #[tokio::test(start_paused = true)]

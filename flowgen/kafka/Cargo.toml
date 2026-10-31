@@ -30,8 +30,10 @@ bytes = { workspace = true }
 arrow = { workspace = true }
 humantime-serde = { workspace = true }
 uuid = { workspace = true }
+tokio-util = { workspace = true }
 
 [dev-dependencies]
+flowgen_core = { path = "../core", features = ["test-util"] }
 testcontainers = { workspace = true }
 tempfile = { workspace = true }
 

@@ -209,11 +209,6 @@ flow:
         durable_name: salesforce_bulkapi_account_writer
         ack_timeout: "120s"
         max_deliver: 5
-        backoff:
-          - "5s"
-          - "30s"
-          - "1m"
-          - "5m"
 
     - convert:
         name: cast_schema

@@ -1,26 +1,50 @@
 //! The `salesforce_pubsubapi_subscribe` task: subscribes to a Pub/Sub API
 //! topic and emits each event, reconnecting whenever the stream breaks.
+//!
+//! Batches are delivered one at a time, in order, while the stream keeps
+//! being read. The next batch is requested when the current one starts, so
+//! one batch waits at most. An event the flow fails to complete is delivered
+//! again after the retry backoff, until it succeeds or `max_deliver` runs out.
 
 use crate::processor::{Error, PubSub};
 use flowgen_core::{
+    cache::Cache,
     config::ConfigExt,
-    event::{new_completion_channel, AvroData, Event, EventBuilder, EventData, EventExt},
+    delivery::{Delivered, Delivery},
+    event::{AvroData, Event, EventBuilder, EventData, EventExt},
+    retry::RetryConfig,
     task::TaskConfig,
 };
+use futures_util::future::{Fuse, FutureExt};
 use salesforce_core::pubsubapi::{
-    eventbus::v1::{ConsumerEvent, ManagedFetchRequest, SchemaInfo},
-    FetchRequest, PubSubError, SchemaRequest, TopicRequest,
+    eventbus::v1::{
+        CommitReplayRequest, ConsumerEvent, FetchResponse, ManagedFetchRequest,
+        ManagedFetchResponse, SchemaInfo,
+    },
+    Client, FetchRequest, PubSubError, SchemaRequest, TopicRequest,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
+use std::num::NonZeroU32;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::sync::mpsc::Sender;
-use tokio_stream::StreamExt;
+use std::time::Duration;
+use tokio::sync::mpsc::{self, Sender};
+use tokio::sync::Mutex;
+use tokio::task::JoinSet;
+use tokio::time::Instant;
+use tokio_stream::{Stream, StreamExt};
+use tokio_util::sync::CancellationToken;
 use tracing::{error, warn, Instrument};
 
-const DEFAULT_NUM_REQUESTED: i32 = 200;
+/// Most events the server sends for one request.
+const MAX_NUM_REQUESTED: i32 = 100;
+/// The server closes a stream that is owed no events for a minute.
+const FETCH_DEADLINE: Duration = Duration::from_secs(30);
 const DEFAULT_TOPIC_PREFIX_DATA: &str = "/data/";
 const DEFAULT_TOPIC_PREFIX_EVENT: &str = "/event/";
+const REPLAY_PRESET_CUSTOM: i32 = 2;
 
 /// Configuration for subscribing to a Salesforce Pub/Sub API topic.
 ///
@@ -52,7 +76,11 @@ pub struct Subscribe {
     /// Timeout for waiting on flow completion before considering the event failed.
     /// If not specified, waits indefinitely for flow completion.
     #[serde(default, with = "humantime_serde")]
-    pub ack_timeout: Option<std::time::Duration>,
+    pub ack_timeout: Option<Duration>,
+    /// How many times an event is sent through the flow before it is skipped.
+    /// Delivered until the flow completes it when omitted.
+    #[serde(default)]
+    pub max_deliver: Option<NonZeroU32>,
     /// Optional list of upstream task names this task depends on.
     /// When set, this task only receives events from the named tasks.
     /// When not set, the task receives from the previous task in the list (linear chain).
@@ -65,6 +93,18 @@ pub struct Subscribe {
 
 impl ConfigExt for Subscribe {}
 
+impl Subscribe {
+    /// Checks the config before the task runs.
+    pub fn validate(&self) -> Result<(), Error> {
+        match self.topic.num_requested {
+            Some(num_requested) if !(1..=MAX_NUM_REQUESTED).contains(&num_requested) => {
+                Err(Error::InvalidNumRequested { num_requested })
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
 /// A Pub/Sub topic and how it is read.
 ///
 /// Topic names: `/event/CustomEvent__e` for platform events,
@@ -76,7 +116,7 @@ pub struct Topic {
     pub name: String,
     /// Optional durable consumer configuration for reliable message processing.
     pub durable_consumer_options: Option<DurableConsumerOptions>,
-    /// Number of messages to request per batch (server default if not specified).
+    /// Events requested per batch, 1 to 100 (defaults to 100, the server maximum).
     pub num_requested: Option<i32>,
 }
 
@@ -138,6 +178,297 @@ fn is_replay_id_error(error: &PubSubError) -> bool {
     false
 }
 
+fn stream_error(status: tonic::Status) -> Error {
+    Error::PubSub {
+        source: PubSubError::Tonic(Box::new(status)),
+    }
+}
+
+/// Runs `open`, logging in again and retrying once when the session expired.
+async fn reauthenticating<T, F, Fut>(client: &Mutex<Client>, open: F) -> Result<T, Error>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<T, Error>>,
+{
+    match open().await {
+        Err(Error::PubSub { source }) if crate::processor::is_pubsub_auth_error(&source) => {
+            client
+                .lock()
+                .await
+                .reconnect()
+                .await
+                .map_err(|source| Error::PubSub { source })?;
+            open().await
+        }
+        result => result,
+    }
+}
+
+/// Opens a subscription with `first` as its first request; the returned
+/// sender asks for more events.
+async fn subscribe(
+    client: &Mutex<Client>,
+    first: FetchRequest,
+) -> Result<(Sender<FetchRequest>, tonic::Streaming<FetchResponse>), Error> {
+    let (requests, rx) = mpsc::channel(1);
+    requests
+        .send(first)
+        .await
+        .map_err(|_| Error::RequestClosed)?;
+    let stream = client
+        .lock()
+        .await
+        .subscribe(rx)
+        .await
+        .map_err(|source| Error::PubSub { source })?
+        .into_inner();
+    Ok((requests, stream))
+}
+
+/// Opens a managed subscription with `first` as its first request; the
+/// returned sender asks for more events and commits replay IDs.
+async fn managed_subscribe(
+    client: &Mutex<Client>,
+    first: ManagedFetchRequest,
+) -> Result<
+    (
+        Sender<ManagedFetchRequest>,
+        tonic::Streaming<ManagedFetchResponse>,
+    ),
+    Error,
+> {
+    let (requests, rx) = mpsc::channel(1);
+    requests
+        .send(first)
+        .await
+        .map_err(|_| Error::RequestClosed)?;
+    let stream = client
+        .lock()
+        .await
+        .managed_subscribe(rx)
+        .await
+        .map_err(|source| Error::PubSub { source })?
+        .into_inner();
+    Ok((requests, stream))
+}
+
+/// A response of either kind of subscription.
+struct Fetched {
+    events: Vec<ConsumerEvent>,
+    /// The topic position a keepalive reports; empty on other responses.
+    latest_replay_id: Vec<u8>,
+    pending_num_requested: i32,
+}
+
+impl From<FetchResponse> for Fetched {
+    fn from(response: FetchResponse) -> Self {
+        Self {
+            events: response.events,
+            latest_replay_id: response.latest_replay_id,
+            pending_num_requested: response.pending_num_requested,
+        }
+    }
+}
+
+/// A managed subscription's response, logging a commit Salesforce rejected.
+fn committed(response: ManagedFetchResponse) -> Fetched {
+    let latest_replay_id = match response.commit_response {
+        Some(commit) => {
+            if let Some(e) = &commit.error {
+                warn!(commit_request_id = %commit.commit_request_id, code = e.code, error = %e.msg, "Salesforce did not commit the replay ID");
+            }
+            Vec::new()
+        }
+        None => response.latest_replay_id,
+    };
+    Fetched {
+        events: response.events,
+        latest_replay_id,
+        pending_num_requested: response.pending_num_requested,
+    }
+}
+
+/// Where a subscription asks for events and keeps its position in the topic.
+enum Position<'a> {
+    /// A subscription, its replay ID cached under `key` for a durable consumer.
+    Subscribe {
+        requests: Sender<FetchRequest>,
+        cache: &'a dyn Cache,
+        key: Option<&'a str>,
+    },
+    /// A managed subscription, its replay ID committed to Salesforce.
+    Managed {
+        requests: Sender<ManagedFetchRequest>,
+        commits: u64,
+    },
+}
+
+impl Position<'_> {
+    /// Asks the server for `num_requested` more events.
+    async fn fetch(&self, num_requested: i32) -> Result<(), Error> {
+        match self {
+            Position::Subscribe { requests, .. } => requests
+                .send(FetchRequest {
+                    num_requested,
+                    ..Default::default()
+                })
+                .await
+                .map_err(|_| Error::RequestClosed),
+            Position::Managed { requests, .. } => requests
+                .send(ManagedFetchRequest {
+                    num_requested,
+                    ..Default::default()
+                })
+                .await
+                .map_err(|_| Error::RequestClosed),
+        }
+    }
+
+    /// Keeps `replay_id` as the position the next subscription resumes after.
+    async fn save(&mut self, replay_id: Vec<u8>) -> Result<(), Error> {
+        match self {
+            Position::Subscribe { key: None, .. } => Ok(()),
+            Position::Subscribe {
+                cache,
+                key: Some(key),
+                ..
+            } => {
+                if let Err(e) = cache.put(key, replay_id.into(), None).await {
+                    error!(key = %key, error = %e, "Failed to cache the replay ID");
+                }
+                Ok(())
+            }
+            Position::Managed { requests, commits } => {
+                *commits += 1;
+                requests
+                    .send(ManagedFetchRequest {
+                        commit_replay_id_request: Some(CommitReplayRequest {
+                            commit_request_id: commits.to_string(),
+                            replay_id,
+                        }),
+                        ..Default::default()
+                    })
+                    .await
+                    .map_err(|_| Error::RequestClosed)
+            }
+        }
+    }
+}
+
+/// The batches a subscription received but has not finished, and the request
+/// it owes the server.
+#[derive(Default)]
+struct Backlog {
+    /// Batches waiting for the one being delivered.
+    waiting: VecDeque<Vec<ConsumerEvent>>,
+    delivering: bool,
+    /// When the server, owed no events, must be asked for more.
+    fetch_due: Option<Instant>,
+}
+
+impl Backlog {
+    /// Queues the events of `fetched`. Returns a keepalive's latest replay ID
+    /// to save when every batch is finished.
+    fn receive(&mut self, fetched: Fetched, now: Instant) -> Option<Vec<u8>> {
+        match (fetched.events.is_empty(), self.is_idle()) {
+            (true, true) if !fetched.latest_replay_id.is_empty() => Some(fetched.latest_replay_id),
+            (true, _) => None,
+            (false, _) => {
+                if fetched.pending_num_requested == 0 {
+                    self.fetch_due = Some(now + FETCH_DEADLINE);
+                }
+                self.waiting.push_back(fetched.events);
+                None
+            }
+        }
+    }
+
+    fn is_idle(&self) -> bool {
+        !self.delivering && self.waiting.is_empty()
+    }
+
+    /// The next batch to deliver, once the previous one finished.
+    fn next_batch(&mut self) -> Option<Vec<ConsumerEvent>> {
+        if self.delivering {
+            return None;
+        }
+        let batch = self.waiting.pop_front()?;
+        self.delivering = true;
+        Some(batch)
+    }
+
+    /// Ends the batch being delivered.
+    fn finish(&mut self) {
+        self.delivering = false;
+    }
+
+    /// How many events to ask for now: a batch once none waits, or one event
+    /// at the deadline, which keeps the stream open without buffering more.
+    fn fetch(&mut self, num_requested: i32, now: Instant) -> Option<i32> {
+        match self.fetch_due {
+            Some(_) if self.waiting.is_empty() => {
+                self.fetch_due = None;
+                Some(num_requested)
+            }
+            Some(due) if due <= now => {
+                self.fetch_due = None;
+                Some(1)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Waits until `due`, or forever when nothing is due.
+async fn until(due: Option<Instant>) {
+    match due {
+        Some(due) => tokio::time::sleep_until(due).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Sends events through the flow until it completes them.
+struct Deliverer {
+    tx: Option<Sender<Event>>,
+    leaf_count: usize,
+    ack_timeout: Option<Duration>,
+    max_deliver: Option<NonZeroU32>,
+    retry_config: RetryConfig,
+    cancellation: CancellationToken,
+}
+
+impl Deliverer {
+    async fn deliver(&self, event: Event) -> Result<Delivered, Error> {
+        let delivery = Delivery {
+            downstream: self.tx.is_some(),
+            leaf_count: self.leaf_count,
+            ack_timeout: self.ack_timeout,
+            max_deliver: self.max_deliver,
+            retry: &self.retry_config,
+            cancellation: &self.cancellation,
+        };
+        delivery
+            .deliver(&event, |attempt| {
+                attempt.send_with_logging(self.tx.as_ref())
+            })
+            .await
+            .map_err(|source| Error::SendMessage { source })
+    }
+}
+
+/// The subject of a topic's events: its name without the `/data/` or
+/// `/event/` prefix, in lowercase.
+fn subject(topic_name: &str) -> String {
+    let name = match topic_name.strip_prefix(DEFAULT_TOPIC_PREFIX_DATA) {
+        Some(name) => name,
+        None => match topic_name.strip_prefix(DEFAULT_TOPIC_PREFIX_EVENT) {
+            Some(name) => name,
+            None => topic_name,
+        },
+    };
+    name.to_lowercase()
+}
+
 /// Processes events from a single Salesforce Pub/Sub topic.
 ///
 /// Subscribes to a topic, deserializes Avro payloads, and forwards events
@@ -149,180 +480,80 @@ pub struct EventHandler {
     pubsub: PubSub,
     /// Subscriber configuration
     config: Arc<Subscribe>,
-    /// Channel sender for processed events
-    tx: Option<Sender<Event>>,
+    /// Sends events through the flow.
+    deliverer: Arc<Deliverer>,
     /// Task identifier for event tracking
     task_id: usize,
     /// Task type for event categorization and logging.
     task_type: &'static str,
     /// Task execution context providing metadata and runtime configuration.
     task_context: Arc<flowgen_core::task::context::TaskContext>,
+    /// Whether the stream delivered a response, which starts the reconnect
+    /// backoff over.
+    streamed: AtomicBool,
 }
 
 impl EventHandler {
-    /// Processes a batch of events from Salesforce Pub/Sub.
-    /// Events are processed concurrently, but replay_id is only cached after ALL events succeed.
+    /// Delivers a batch, its events concurrently. Returns the replay ID of
+    /// the last event once every event is done, or `None` for an empty batch
+    /// or a stop.
     async fn process_events(
         &self,
         events: Vec<ConsumerEvent>,
         schema_info: &SchemaInfo,
         topic_name: &str,
-    ) -> Result<(), Error> {
-        if events.is_empty() {
-            return Ok(());
+    ) -> Result<Option<Vec<u8>>, Error> {
+        let Some(last_replay_id) = events.last().map(|ce| ce.replay_id.clone()) else {
+            return Ok(None);
+        };
+        let subject = subject(topic_name);
+        let built = events
+            .into_iter()
+            .filter_map(|ce| ce.event)
+            .map(|event| {
+                EventBuilder::new()
+                    .data(EventData::Avro(AvroData {
+                        schema: schema_info.schema_json.clone(),
+                        raw_bytes: event.payload.to_vec(),
+                    }))
+                    .subject(subject.clone())
+                    .id(event.id)
+                    .task_id(self.task_id)
+                    .task_type(self.task_type)
+                    .build()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut deliveries = JoinSet::new();
+        for event in built {
+            let deliverer = Arc::clone(&self.deliverer);
+            deliveries.spawn(async move { deliverer.deliver(event).await }.instrument(
+                tracing::info_span!(
+                    parent: tracing::Span::current(),
+                    "task.handle",
+                    duration_ms = tracing::field::Empty,
+                ),
+            ));
         }
 
-        if self.task_context.cancellation_token.is_cancelled() {
-            return Ok(());
-        }
-
-        let cache = Arc::clone(&self.task_context.cache);
-        let flow_name = self.task_context.flow.identity().to_string();
-        // `flow_key` keys the cache; `flow_name` stays human-readable for logs.
-        let flow_key = self.task_context.flow.id();
-        let mut handles = Vec::new();
-        let last_replay_id = events.last().map(|ce| ce.replay_id.clone());
-
-        for ce in events {
-            if self.task_context.cancellation_token.is_cancelled() {
-                break;
-            }
-
-            if let Some(event) = ce.event {
-                let tx = self.tx.clone();
-                let task_id = self.task_id;
-                let task_type = self.task_type;
-                let schema = schema_info.schema_json.clone();
-                let event_id = event.id.clone();
-
-                // Normalize topic name by removing data/ or event/ prefix.
-                let subject = topic_name
-                    .strip_prefix(DEFAULT_TOPIC_PREFIX_DATA)
-                    .or_else(|| topic_name.strip_prefix(DEFAULT_TOPIC_PREFIX_EVENT))
-                    .unwrap_or(topic_name)
-                    .to_lowercase();
-
-                let config = Arc::clone(&self.config);
-                let cancellation_token = self.task_context.cancellation_token.clone();
-                let leaf_count = self.task_context.leaf_count;
-
-                // Spawn a task for each event to process them concurrently.
-                let handle = tokio::spawn(
-                    async move {
-                        if cancellation_token.is_cancelled() {
-                            return Ok(());
-                        }
-
-                        // Size the completion channel to the number of leaves
-                        // in this flow. The Pub/Sub event is acked only after
-                        // every leaf has signalled completion.
-                        let (completion_state, completion_rx) = new_completion_channel(leaf_count);
-
-                        let data = AvroData {
-                            schema,
-                            raw_bytes: event.payload[..].to_vec(),
-                        };
-
-                        let mut e = EventBuilder::new()
-                            .data(EventData::Avro(data))
-                            .subject(subject)
-                            .id(event.id)
-                            .task_id(task_id)
-                            .task_type(task_type)
-                            .build()?;
-
-                        e.completion_tx = Some(completion_state);
-
-                        // Check cancellation before sending to prevent "receiver dropped" errors.
-                        if cancellation_token.is_cancelled() {
-                            return Ok(());
-                        }
-
-                        e.send_with_logging(tx.as_ref())
-                            .await
-                            .map_err(|source| Error::SendMessage { source })?;
-
-                        // Failed flows skip replay_id advancement, allowing next fetch to retry from same position.
-                        let success = match config.ack_timeout {
-                            Some(timeout) => matches!(
-                                tokio::time::timeout(timeout, completion_rx).await,
-                                Ok(Ok(Ok(_)))
-                            ),
-                            None => matches!(completion_rx.await, Ok(Ok(_))),
-                        };
-
-                        if !success {
-                            warn!(
-                                event_id = ?event_id,
-                                "Flow completion failed or timed out"
-                            );
-                        }
-
-                        Ok::<(), Error>(())
-                    }
-                    .instrument(tracing::info_span!(
-                        parent: tracing::Span::current(),
-                        "task.handle",
-                        duration_ms = tracing::field::Empty,
-                    )),
-                );
-
-                handles.push(handle);
+        let mut finished = true;
+        while let Some(joined) = deliveries.join_next().await {
+            match joined.map_err(|source| Error::DeliveryTask { source })?? {
+                Delivered::Completed | Delivered::Skipped => {}
+                Delivered::Stopped => finished = false,
             }
         }
-
-        // Wait for all events in the batch to complete.
-        let mut all_succeeded = true;
-        for handle in handles {
-            match handle.await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    error!("Event processing failed: {}", e);
-                    all_succeeded = false;
-                }
-                Err(e) => {
-                    error!("Event processing task panicked: {}", e);
-                    all_succeeded = false;
-                }
-            }
+        match finished {
+            true => Ok(Some(last_replay_id)),
+            false => Ok(None),
         }
-
-        if all_succeeded && !self.task_context.cancellation_token.is_cancelled() {
-            if let Some(replay_id) = last_replay_id {
-                if self
-                    .config
-                    .topic
-                    .durable_consumer_options
-                    .as_ref()
-                    .is_some_and(|opts| opts.enabled && !opts.managed_subscription)
-                {
-                    let sanitized_topic = sanitize_topic_name(topic_name);
-                    let cache_key = format!("flow.{flow_key}.replay_id.{sanitized_topic}");
-                    if let Err(e) = cache.put(&cache_key, replay_id.into(), None).await {
-                        error!(
-                            "Failed to cache replay_id for flow {flow_name} topic {topic_name}: {e}"
-                        );
-                    }
-                }
-            }
-        } else {
-            warn!("Not all events succeeded in batch, replay_id not advanced");
-        }
-
-        Ok(())
     }
 
-    /// Runs the topic listener to process events from Salesforce Pub/Sub.
-    ///
-    /// Fetches topic and schema info, establishes subscription with optional
-    /// replay ID, then processes incoming events in a loop.
-    async fn handle(self) -> Result<(), Error> {
-        let cache = &self.task_context.cache;
-        let flow_name = self.task_context.flow.identity();
-        // `flow_key` keys the cache; `flow_name` stays human-readable for logs.
-        let flow_key = self.task_context.flow.id();
-        let pubsub = &self.pubsub.client;
-        let topic_info = pubsub
+    /// Fetches topic and schema info, then reads the topic until the stream
+    /// breaks or the task stops.
+    async fn handle(&self) -> Result<(), Error> {
+        let client = Arc::clone(&self.pubsub.client);
+        let topic_info = client
             .lock()
             .await
             .get_topic(TopicRequest {
@@ -332,7 +563,7 @@ impl EventHandler {
             .map_err(|source| Error::PubSub { source })?
             .into_inner();
 
-        let schema_info = pubsub
+        let schema_info = client
             .lock()
             .await
             .get_schema(SchemaRequest {
@@ -344,149 +575,176 @@ impl EventHandler {
 
         let num_requested = match self.config.topic.num_requested {
             Some(num_requested) => num_requested,
-            None => DEFAULT_NUM_REQUESTED,
+            None => MAX_NUM_REQUESTED,
         };
-
         let topic_name = topic_info.topic_name.as_str();
-
-        let managed_subscription = self
+        let durable = self
             .config
             .topic
             .durable_consumer_options
             .as_ref()
-            .filter(|opts| opts.enabled && opts.managed_subscription);
+            .filter(|opts| opts.enabled);
 
-        if let Some(durable_consumer_opts) = managed_subscription {
-            let managed_request = ManagedFetchRequest {
-                developer_name: durable_consumer_opts.name.clone(),
-                num_requested,
-                ..Default::default()
-            };
-
-            let mut stream = pubsub
-                .lock()
-                .await
-                .managed_subscribe(managed_request)
-                .await
-                .map_err(|source| Error::PubSub { source })?
-                .into_inner();
-
-            while let Some(event) = stream.next().await {
-                if self.task_context.cancellation_token.is_cancelled() {
-                    return Ok(());
-                }
-
-                let events = match event {
-                    Ok(fr) => fr.events,
-                    Err(e) => {
-                        return Err(Error::PubSub {
-                            source: PubSubError::Tonic(Box::new(e)),
-                        });
-                    }
-                };
-
-                self.process_events(events, &schema_info, topic_name)
-                    .await?;
-
-                if self.task_context.cancellation_token.is_cancelled() {
-                    return Ok(());
-                }
+        match durable {
+            Some(opts) if opts.managed_subscription => {
+                self.read_managed(&client, &opts.name, num_requested, &schema_info, topic_name)
+                    .await
             }
-
-            return Err(Error::StreamEnded);
+            durable => {
+                self.read(&client, durable, num_requested, &schema_info, topic_name)
+                    .await
+            }
         }
+    }
 
-        let mut fetch_request = FetchRequest {
+    /// Reads the topic, storing the replay ID of each finished batch for a
+    /// durable consumer.
+    async fn read(
+        &self,
+        client: &Mutex<Client>,
+        durable: Option<&DurableConsumerOptions>,
+        num_requested: i32,
+        schema_info: &SchemaInfo,
+        topic_name: &str,
+    ) -> Result<(), Error> {
+        let cache = &self.task_context.cache;
+        let flow_name = self.task_context.flow.identity();
+        let cache_key = format!(
+            "flow.{}.replay_id.{}",
+            self.task_context.flow.id(),
+            sanitize_topic_name(topic_name)
+        );
+
+        let mut first = FetchRequest {
             topic_name: topic_name.to_string(),
             num_requested,
             ..Default::default()
         };
-
-        // Set replay ID or preset for non-managed durable consumers.
-        if let Some(durable_consumer_opts) = self
-            .config
-            .topic
-            .durable_consumer_options
-            .as_ref()
-            .filter(|opts| opts.enabled && !opts.managed_subscription)
-        {
-            let sanitized_topic = sanitize_topic_name(topic_name);
-            let cache_key = format!("flow.{flow_key}.replay_id.{sanitized_topic}");
-            let cached_replay_id = cache.get(&cache_key).await.ok();
-
-            match cached_replay_id.flatten() {
-                Some(reply_id) => {
-                    fetch_request.replay_id = reply_id.into();
-                    fetch_request.replay_preset = 2;
+        if let Some(durable) = durable {
+            let stored = cache
+                .get(&cache_key)
+                .await
+                .map_err(|source| Error::ReplayIdCache {
+                    key: cache_key.clone(),
+                    source,
+                })?;
+            match stored {
+                Some(replay_id) => {
+                    first.replay_id = replay_id.into();
+                    first.replay_preset = REPLAY_PRESET_CUSTOM;
                 }
                 None => {
-                    fetch_request.replay_preset = durable_consumer_opts.replay_preset.to_i32();
+                    first.replay_preset = durable.replay_preset.to_i32();
                     warn!(
                         "No cached replay_id found for flow {flow_name} topic {topic_name}, starting from {:?}",
-                        &durable_consumer_opts.replay_preset
+                        &durable.replay_preset
                     );
                 }
             }
         }
 
-        let subscribed = pubsub.lock().await.subscribe(fetch_request.clone()).await;
-        let mut stream = match subscribed {
-            Ok(response) => response.into_inner(),
-            Err(e) if crate::processor::is_pubsub_auth_error(&e) => {
-                // Reconnect to get a fresh OAuth token, then subscribe once more.
-                pubsub
-                    .lock()
+        let result = match reauthenticating(client, || subscribe(client, first.clone())).await {
+            Ok((requests, stream)) => {
+                let position = Position::Subscribe {
+                    requests,
+                    cache: cache.as_ref(),
+                    key: durable.map(|_| cache_key.as_str()),
+                };
+                let stream = stream.map(|response| response.map(Fetched::from));
+                self.consume(stream, position, num_requested, schema_info, topic_name)
                     .await
-                    .reconnect()
-                    .await
-                    .map_err(|source| Error::PubSub { source })?;
-                pubsub
-                    .lock()
-                    .await
-                    .subscribe(fetch_request.clone())
-                    .await
-                    .map_err(|source| Error::PubSub { source })?
-                    .into_inner()
             }
-            Err(e) if !fetch_request.replay_id.is_empty() && is_replay_id_error(&e) => {
-                // Clear the invalid replay_id so the next attempt starts fresh.
+            Err(e) => Err(e),
+        };
+        match result {
+            Err(Error::PubSub { source })
+                if !first.replay_id.is_empty()
+                    && !self.streamed.load(Ordering::Relaxed)
+                    && is_replay_id_error(&source) =>
+            {
                 warn!("Invalid replay_id detected, clearing from cache and retrying");
-                let sanitized_topic = sanitize_topic_name(topic_name);
-                let cache_key = format!("flow.{flow_key}.replay_id.{sanitized_topic}");
                 if let Err(e) = cache.delete(&cache_key).await {
                     error!(
-                        "Failed to delete invalid replay_id from cache for flow {} topic {}: {}",
-                        flow_name, topic_name, e
+                        "Failed to delete invalid replay_id from cache for flow {flow_name} topic {topic_name}: {e}"
                     );
                 }
-                return Err(Error::PubSub { source: e });
+                Err(Error::PubSub { source })
             }
-            Err(source) => return Err(Error::PubSub { source }),
+            result => result,
+        }
+    }
+
+    /// Reads a managed subscription, committing the replay ID of each
+    /// finished batch to Salesforce.
+    async fn read_managed(
+        &self,
+        client: &Mutex<Client>,
+        developer_name: &str,
+        num_requested: i32,
+        schema_info: &SchemaInfo,
+        topic_name: &str,
+    ) -> Result<(), Error> {
+        let first = ManagedFetchRequest {
+            developer_name: developer_name.to_string(),
+            num_requested,
+            ..Default::default()
         };
+        let (requests, stream) =
+            reauthenticating(client, || managed_subscribe(client, first.clone())).await?;
+        let position = Position::Managed {
+            requests,
+            commits: 0,
+        };
+        let stream = stream.map(|response| response.map(committed));
+        self.consume(stream, position, num_requested, schema_info, topic_name)
+            .await
+    }
 
-        while let Some(event) = stream.next().await {
-            if self.task_context.cancellation_token.is_cancelled() {
-                return Ok(());
+    /// Delivers the batches of `stream` one at a time while reading on, so
+    /// the server is asked for more before it closes a stream owed nothing.
+    async fn consume<S>(
+        &self,
+        mut stream: S,
+        mut position: Position<'_>,
+        num_requested: i32,
+        schema_info: &SchemaInfo,
+        topic_name: &str,
+    ) -> Result<(), Error>
+    where
+        S: Stream<Item = Result<Fetched, tonic::Status>> + Unpin,
+    {
+        let cancellation = &self.task_context.cancellation_token;
+        let mut backlog = Backlog::default();
+        let mut delivering = std::pin::pin!(Fuse::terminated());
+        loop {
+            if let Some(events) = backlog.next_batch() {
+                delivering.set(self.process_events(events, schema_info, topic_name).fuse());
             }
-
-            let events = match event {
-                Ok(fr) => fr.events,
-                Err(e) => {
-                    return Err(Error::PubSub {
-                        source: PubSubError::Tonic(Box::new(e)),
-                    });
+            if let Some(num_requested) = backlog.fetch(num_requested, Instant::now()) {
+                position.fetch(num_requested).await?;
+            }
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return Ok(()),
+                finished = &mut delivering => {
+                    backlog.finish();
+                    if let Some(replay_id) = finished? {
+                        position.save(replay_id).await?;
+                    }
                 }
-            };
-
-            self.process_events(events, &schema_info, topic_name)
-                .await?;
-
-            if self.task_context.cancellation_token.is_cancelled() {
-                return Ok(());
+                response = stream.next() => {
+                    let fetched = match response {
+                        Some(response) => response.map_err(stream_error)?,
+                        None => return Err(Error::StreamEnded),
+                    };
+                    self.streamed.store(true, Ordering::Relaxed);
+                    if let Some(replay_id) = backlog.receive(fetched, Instant::now()) {
+                        position.save(replay_id).await?;
+                    }
+                }
+                _ = until(backlog.fetch_due) => {}
             }
         }
-
-        Err(Error::StreamEnded)
     }
 }
 
@@ -521,16 +779,25 @@ impl flowgen_core::task::runner::Runner for Processor {
 
         Ok(EventHandler {
             pubsub,
-            config: Arc::clone(&self.config),
+            deliverer: Arc::new(Deliverer {
+                tx: self.tx.clone(),
+                leaf_count: self.task_context.leaf_count,
+                ack_timeout: config.ack_timeout,
+                max_deliver: config.max_deliver,
+                retry_config: RetryConfig::merge(&self.task_context.retry, &config.retry),
+                cancellation: self.task_context.cancellation_token.clone(),
+            }),
+            config: Arc::new(config),
             task_id: self.task_id,
-            tx: self.tx.clone(),
             task_type: self.task_type,
             task_context: Arc::clone(&self.task_context),
+            streamed: AtomicBool::new(false),
         })
     }
 
     #[tracing::instrument(skip(self), name = "task.run", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn run(self) -> Result<(), Error> {
+        self.config.validate()?;
         let retry_config =
             flowgen_core::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
         let cancellation_token = self.task_context.cancellation_token.clone();
@@ -558,7 +825,6 @@ impl flowgen_core::task::runner::Runner for Processor {
                 _ = cancellation_token.cancelled() => return Ok(()),
                 result = init_future => match result {
                     Ok(handler) => {
-                        reconnect_backoff = retry_config.reconnect_strategy();
                         if lost_connectivity {
                             warn!("Subscriber reconnected successfully");
                         }
@@ -580,19 +846,23 @@ impl flowgen_core::task::runner::Runner for Processor {
             };
 
             // Run the event loop until it fails, then reinitialize.
-            let client_key = event_handler.pubsub.client_key.clone();
-            let channel_key = event_handler.pubsub.channel_key.clone();
             tokio::select! {
+                biased;
                 _ = cancellation_token.cancelled() => return Ok(()),
                 result = event_handler.handle() => match result {
+                    _ if cancellation_token.is_cancelled() => return Ok(()),
                     Ok(()) => warn!("Subscriber lost connectivity, reinitializing"),
                     Err(e) => error!(error = %e, "Subscriber lost connectivity, reinitializing"),
                 },
             }
             lost_connectivity = true;
+            if event_handler.streamed.load(Ordering::Relaxed) {
+                reconnect_backoff = retry_config.reconnect_strategy();
+            }
 
-            self.task_context.client_registry.remove(&client_key).await;
-            self.task_context.client_registry.remove(&channel_key).await;
+            let registry = &self.task_context.client_registry;
+            registry.remove(&event_handler.pubsub.client_key).await;
+            registry.remove(&event_handler.pubsub.channel_key).await;
 
             let delay = match reconnect_backoff.next() {
                 Some(d) => d,
@@ -716,6 +986,7 @@ mod tests {
             },
             endpoint: Some("api.pubsub.salesforce.com:7443".to_string()),
             ack_timeout: None,
+            max_deliver: NonZeroU32::new(3),
             depends_on: None,
             retry: None,
         };
@@ -723,6 +994,182 @@ mod tests {
         let json = serde_json::to_string(&subscriber).unwrap();
         let deserialized: Subscribe = serde_json::from_str(&json).unwrap();
         assert_eq!(subscriber, deserialized);
+    }
+
+    #[test]
+    fn subjects_drop_the_topic_prefix() {
+        assert_eq!(subject("/data/AccountChangeEvent"), "accountchangeevent");
+        assert_eq!(subject("/event/Order_Update__e"), "order_update__e");
+        assert_eq!(subject("Custom"), "custom");
+    }
+
+    #[test]
+    fn a_zero_max_deliver_is_rejected() {
+        let json = r#"{
+            "name": "n",
+            "credentials_path": "c",
+            "topic": { "name": "/event/Test__e" },
+            "max_deliver": 0
+        }"#;
+        assert!(serde_json::from_str::<Subscribe>(json).is_err());
+    }
+
+    fn with_num_requested(num_requested: Option<i32>) -> Subscribe {
+        Subscribe {
+            topic: Topic {
+                name: "/event/Test__e".to_string(),
+                num_requested,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn num_requested_must_be_within_the_server_maximum() {
+        for accepted in [None, Some(1), Some(100)] {
+            assert!(with_num_requested(accepted).validate().is_ok());
+        }
+        for rejected in [0, -1, 101, 200] {
+            assert!(matches!(
+                with_num_requested(Some(rejected)).validate(),
+                Err(Error::InvalidNumRequested { num_requested }) if num_requested == rejected
+            ));
+        }
+    }
+
+    fn batch(replay_ids: &[u8], pending_num_requested: i32) -> Fetched {
+        Fetched {
+            events: replay_ids
+                .iter()
+                .map(|replay_id| ConsumerEvent {
+                    replay_id: vec![*replay_id],
+                    ..Default::default()
+                })
+                .collect(),
+            latest_replay_id: Vec::new(),
+            pending_num_requested,
+        }
+    }
+
+    fn keepalive(latest_replay_id: &[u8]) -> Fetched {
+        Fetched {
+            events: Vec::new(),
+            latest_replay_id: latest_replay_id.to_vec(),
+            pending_num_requested: 100,
+        }
+    }
+
+    fn replay_ids(batch: Option<Vec<ConsumerEvent>>) -> Option<Vec<Vec<u8>>> {
+        batch.map(|events| events.into_iter().map(|event| event.replay_id).collect())
+    }
+
+    #[test]
+    fn the_next_batch_is_requested_before_the_last_one_is_delivered() {
+        let now = Instant::now();
+        let mut backlog = Backlog::default();
+
+        assert_eq!(backlog.receive(batch(&[1, 2], 0), now), None);
+        assert_eq!(
+            replay_ids(backlog.next_batch()),
+            Some(vec![vec![1], vec![2]])
+        );
+        assert_eq!(backlog.fetch(100, now), Some(100));
+        assert_eq!(backlog.fetch(100, now), None);
+    }
+
+    #[test]
+    fn a_batch_still_owed_events_requests_nothing() {
+        let now = Instant::now();
+        let mut backlog = Backlog::default();
+
+        backlog.receive(batch(&[1], 99), now);
+        assert!(backlog.next_batch().is_some());
+        assert_eq!(backlog.fetch(100, now + FETCH_DEADLINE * 10), None);
+    }
+
+    #[test]
+    fn the_request_owed_for_a_waiting_batch_is_sent_when_it_starts() {
+        let now = Instant::now();
+        let mut backlog = Backlog::default();
+        backlog.receive(batch(&[1], 0), now);
+        backlog.next_batch();
+        backlog.fetch(100, now);
+
+        backlog.receive(batch(&[2], 0), now);
+        assert!(backlog.next_batch().is_none());
+        assert_eq!(backlog.fetch(100, now), None);
+
+        backlog.finish();
+        assert_eq!(replay_ids(backlog.next_batch()), Some(vec![vec![2]]));
+        assert_eq!(backlog.fetch(100, now), Some(100));
+    }
+
+    #[test]
+    fn a_long_delivery_keeps_the_stream_open_one_event_at_a_time() {
+        let now = Instant::now();
+        let mut backlog = Backlog::default();
+        backlog.receive(batch(&[1], 0), now);
+        backlog.next_batch();
+        backlog.fetch(100, now);
+        backlog.receive(batch(&[2], 0), now);
+
+        assert_eq!(backlog.fetch(100, now + FETCH_DEADLINE), Some(1));
+        assert_eq!(backlog.fetch(100, now + FETCH_DEADLINE), None);
+
+        let later = now + FETCH_DEADLINE;
+        backlog.receive(batch(&[3], 0), later);
+        assert_eq!(backlog.fetch(100, later), None);
+        assert_eq!(backlog.fetch(100, later + FETCH_DEADLINE), Some(1));
+    }
+
+    #[test]
+    fn batches_are_delivered_one_at_a_time_in_order() {
+        let now = Instant::now();
+        let mut backlog = Backlog::default();
+        backlog.receive(batch(&[1], 50), now);
+        backlog.receive(batch(&[2], 0), now);
+
+        assert_eq!(replay_ids(backlog.next_batch()), Some(vec![vec![1]]));
+        assert!(backlog.next_batch().is_none());
+        backlog.finish();
+        assert_eq!(replay_ids(backlog.next_batch()), Some(vec![vec![2]]));
+        backlog.finish();
+        assert!(backlog.next_batch().is_none());
+    }
+
+    #[test]
+    fn a_keepalive_position_is_saved_only_when_every_batch_is_finished() {
+        let now = Instant::now();
+        let mut backlog = Backlog::default();
+
+        assert_eq!(backlog.receive(keepalive(&[7]), now), Some(vec![7]));
+        assert_eq!(backlog.receive(keepalive(&[]), now), None);
+
+        backlog.receive(batch(&[1], 99), now);
+        assert_eq!(backlog.receive(keepalive(&[7]), now), None);
+        backlog.next_batch();
+        assert_eq!(backlog.receive(keepalive(&[7]), now), None);
+        backlog.finish();
+        assert_eq!(backlog.receive(keepalive(&[8]), now), Some(vec![8]));
+    }
+
+    #[test]
+    fn a_commit_response_is_not_a_keepalive() {
+        let response = ManagedFetchResponse {
+            latest_replay_id: vec![7],
+            pending_num_requested: 100,
+            commit_response: Some(Default::default()),
+            ..Default::default()
+        };
+        assert!(committed(response).latest_replay_id.is_empty());
+
+        let response = ManagedFetchResponse {
+            latest_replay_id: vec![7],
+            pending_num_requested: 100,
+            ..Default::default()
+        };
+        assert_eq!(committed(response).latest_replay_id, vec![7]);
     }
 
     #[test]

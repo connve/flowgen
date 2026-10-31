@@ -197,19 +197,6 @@ pub enum Error {
         #[source]
         source: Box<crate::flow::Error>,
     },
-    /// HTTP handler startup error.
-    #[error("Failed to run HTTP handlers for {flow_name}: {source}")]
-    HttpHandlerStartup {
-        flow_name: String,
-        #[source]
-        source: Box<crate::flow::Error>,
-    },
-    /// HTTP handler setup completion error.
-    #[error("Failed to complete HTTP handler setup: {source}")]
-    HttpHandlerSetup {
-        #[source]
-        source: tokio::task::JoinError,
-    },
     /// HTTP server startup error.
     #[error("Failed to start HTTP server: {source}")]
     HttpServerStart {
@@ -708,6 +695,24 @@ impl App {
     pub async fn start(self, shutdown_rx: tokio::sync::oneshot::Receiver<()>) -> Result<(), Error> {
         let app_config = Arc::new(self.config);
 
+        let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let health_handle = match app_config.health.enabled {
+            true => {
+                let port = app_config.health.port;
+                let ready = Arc::clone(&ready);
+                let readiness: flowgen_core::health::ReadinessCheck =
+                    Arc::new(move || ready.load(std::sync::atomic::Ordering::Acquire));
+                Some(tokio::spawn(async move {
+                    if let Err(source) =
+                        flowgen_core::health::start_health_server(port, readiness).await
+                    {
+                        error!("{}", source);
+                    }
+                }))
+            }
+            false => None,
+        };
+
         // Load flows from filesystem and (optionally) from the distributed cache.
         // The two sources are merged so a worker can run any combination of:
         //   - filesystem only (no cache section, classic mode);
@@ -1044,6 +1049,13 @@ impl App {
         let peer_informer_handle =
             peer_registry.spawn_informer(tokio_util::sync::CancellationToken::new());
 
+        let servers = crate::reconciler::FlowServers {
+            http_server: http_server.clone(),
+            mcp_server: mcp_server.clone(),
+            ai_gateway_server: ai_gateway_server.clone(),
+            inproc: Arc::clone(&inproc),
+        };
+
         // Build all flows from configuration files.
         let mut flows: Vec<super::flow::Flow> = Vec::new();
         for config in flow_configs {
@@ -1056,7 +1068,8 @@ impl App {
                 .client_registry(Arc::clone(&client_registry))
                 .inproc(Arc::clone(&inproc))
                 .holder_identity(holder_identity.clone())
-                .peer_registry(Arc::clone(&peer_registry));
+                .peer_registry(Arc::clone(&peer_registry))
+                .servers(servers.clone());
 
             if let Some(server) = http_server {
                 flow_builder = flow_builder.service(server);
@@ -1091,35 +1104,6 @@ impl App {
         }
 
         let flows = init_flows(flows).await;
-
-        let mut http_handler_tasks = Vec::new();
-        for flow in &flows {
-            match flow.start_tasks().await {
-                Ok(handles) => http_handler_tasks.extend(handles),
-                Err(source) => {
-                    let err = Error::HttpHandlerStartup {
-                        flow_name: flow.name().to_string(),
-                        source: Box::new(source),
-                    };
-                    error!("{}", err);
-                }
-            }
-        }
-
-        if !http_handler_tasks.is_empty() {
-            info!(
-                "Waiting for {} HTTP handler(s) to complete setup...",
-                http_handler_tasks.len()
-            );
-            let results = futures_util::future::join_all(http_handler_tasks).await;
-            for result in results {
-                match result {
-                    Ok(Ok(())) => {}
-                    Ok(Err(source)) => error!(error = %source, "Blocking task failed during setup"),
-                    Err(source) => error!("{}", Error::HttpHandlerSetup { source }),
-                }
-            }
-        }
 
         let mut background_handles = Vec::new();
         background_handles.push(peer_renewal_handle);
@@ -1216,10 +1200,6 @@ impl App {
             background_handles.push(server_handle);
         }
 
-        // Collect task managers for shutdown cleanup.
-        let task_managers: Vec<Arc<flowgen_core::task::manager::TaskManager>> =
-            flows.iter().filter_map(|f| f.task_manager()).collect();
-
         // Start all background flow tasks and populate the registry.
         for flow in flows {
             let identity = flow.identity().to_string();
@@ -1270,9 +1250,7 @@ impl App {
                 },
             };
 
-            let cancellation_token = flow
-                .cancellation_token()
-                .unwrap_or_else(tokio_util::sync::CancellationToken::new);
+            let cancellation_token = flow.cancellation_token();
 
             let task_manager = flow.task_manager();
 
@@ -1371,35 +1349,10 @@ impl App {
             }
         }
 
-        // Start the dedicated k8s health listener. Readiness reports true once
-        // at least one flow is registered; liveness is always 200.
-        if app_config.health.enabled {
-            let port = app_config.health.port;
-            let registry_for_health = Arc::clone(&flow_registry);
-            let readiness: flowgen_core::health::ReadinessCheck =
-                Arc::new(move || match registry_for_health.read() {
-                    Ok(guard) => !guard.is_empty(),
-                    Err(_) => false,
-                });
-            let health_handle = tokio::spawn(async move {
-                if let Err(source) =
-                    flowgen_core::health::start_health_server(port, readiness).await
-                {
-                    error!("{}", source);
-                }
-            });
-            background_handles.push(health_handle);
-        }
-
         // Spawn the hot-reload watcher and reconciler if the system cache supports watching.
         // The watcher subscribes to flow key changes and the reconciler applies them.
-        let servers = crate::reconciler::FlowServers {
-            http_server: http_server.clone(),
-            mcp_server: mcp_server.clone(),
-            ai_gateway_server: ai_gateway_server.clone(),
-            inproc: Arc::clone(&inproc),
-        };
         let watcher_shutdown = tokio_util::sync::CancellationToken::new();
+        let mut reconciler = None;
         let runtime_cache = Arc::clone(&cache);
         // Only cache-backed flows have keys to watch.
         if let Some((system_cache_arc, cache_opts)) = &flow_cache {
@@ -1427,17 +1380,21 @@ impl App {
                 client_registry: Arc::clone(&client_registry),
                 holder_identity: holder_identity.clone(),
                 peer_registry: Arc::clone(&peer_registry),
+                shutdown: watcher_shutdown.clone(),
             };
-            let reconciler_shutdown = watcher_shutdown.clone();
-            let reconciler_handle = tokio::spawn(async move {
-                crate::reconciler::run(watch_rx, reconciler_ctx, reconciler_shutdown).await;
-            });
-            background_handles.push(reconciler_handle);
+            reconciler = Some(tokio::spawn(crate::reconciler::run(
+                watch_rx,
+                reconciler_ctx,
+            )));
         }
+
+        ready.store(true, std::sync::atomic::Ordering::Release);
+        info!("Startup finished");
 
         // Wait for shutdown signal. In production, flows run indefinitely until shutdown.
         shutdown_rx.await.ok();
 
+        ready.store(false, std::sync::atomic::Ordering::Release);
         info!("Shutdown signal received, stopping all flows...");
 
         // Stop the watcher and reconciler first so no new reload events arrive
@@ -1448,20 +1405,10 @@ impl App {
             handle.abort();
         }
         let _ = futures::future::join_all(background_handles).await;
-        stop_flows(
-            &flow_registry,
-            &servers,
-            crate::reconciler::FLOW_STOP_TIMEOUT,
-        )
-        .await;
-
-        // All flows have now fully stopped. Clean up leases to allow new pods to acquire leadership.
-        // At this point it is safe to delete leases because no flows are processing events.
-        for task_manager in task_managers {
-            if let Err(e) = task_manager.shutdown().await {
-                warn!("Failed to shutdown task manager: {}", e);
-            }
-        }
+        tokio::join!(
+            finish_reconciler(reconciler),
+            stop_flows(&flow_registry, &servers)
+        );
 
         // Remove this pod from the peer list so remaining pods stop hashing
         // flows onto it as a preferred owner.
@@ -1469,6 +1416,9 @@ impl App {
             warn!("Failed to deregister peer: {}", e);
         }
 
+        if let Some(health_handle) = health_handle {
+            health_handle.abort();
+        }
         info!("Shutdown complete, all flows stopped and leases released");
         Ok(())
     }
@@ -1543,26 +1493,53 @@ async fn load_api_keys(path: &std::path::Path) -> Vec<flowgen_core::credentials:
 
 /// Cancels every registered flow, deregisters it from the shared servers so its
 /// tasks see their input close, and waits up to `timeout` for all of them to stop.
+///
+/// Then releases the leases of every flow, including hot-reloaded ones, so
+/// other pods take them over without waiting for them to expire.
 async fn stop_flows(
     flow_registry: &RwLock<HashMap<String, FlowHandle>>,
     servers: &crate::reconciler::FlowServers,
-    timeout: std::time::Duration,
 ) {
     let handles: Vec<(String, FlowHandle)> = match flow_registry.write() {
         Ok(mut registry) => registry.drain().collect(),
         Err(poisoned) => poisoned.into_inner().drain().collect(),
     };
-    let mut join_handles = Vec::with_capacity(handles.len());
+    let mut stopping = Vec::with_capacity(handles.len());
+    let mut task_managers = Vec::with_capacity(handles.len());
     for (flow, handle) in handles {
         handle.cancellation_token.cancel();
         servers.deregister_flow(&flow);
-        join_handles.push(handle.join_handle);
+        stopping.push(crate::reconciler::join_stopped_flow(handle.join_handle));
+        task_managers.extend(handle.task_manager);
     }
-    if tokio::time::timeout(timeout, futures::future::join_all(join_handles))
+    let aborted = futures::future::join_all(stopping)
+        .await
+        .iter()
+        .filter(|stopped| stopped.is_none())
+        .count();
+    if aborted > 0 {
+        warn!(aborted, "Not every flow stopped in time, aborted them");
+    }
+    for task_manager in task_managers {
+        if let Err(e) = task_manager.shutdown().await {
+            warn!(error = %e, "Failed to release the leases of a flow");
+        }
+    }
+}
+
+/// Lets the reconciler finish a reload in progress, which stops the old flow
+/// and releases its lease, and aborts it after the time a flow has to stop.
+async fn finish_reconciler(reconciler: Option<tokio::task::JoinHandle<()>>) {
+    let Some(mut reconciler) = reconciler else {
+        return;
+    };
+    let timeout = crate::reconciler::FLOW_STOP_TIMEOUT + crate::reconciler::FLOW_ABORT_GRACE;
+    if tokio::time::timeout(timeout, &mut reconciler)
         .await
         .is_err()
     {
-        warn!(timeout = ?timeout, "Not every flow stopped in time, shutting down anyway");
+        warn!("The reconciler did not finish a reload in time, aborted it");
+        reconciler.abort();
     }
 }
 
@@ -1802,12 +1779,48 @@ mod tests {
 
         let stopped = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            stop_flows(&flow_registry, &servers, std::time::Duration::from_secs(60)),
+            stop_flows(&flow_registry, &servers),
         )
         .await;
 
         assert!(stopped.is_ok());
         assert!(flow_registry.read().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn stopping_flows_releases_the_lease_of_every_registered_flow() {
+        let mut flow = flow_from_yaml(
+            "elected",
+            "flow:\n  require_leader_election: true\n  tasks:\n    - generate:\n        name: tick\n        interval: 1h\n",
+        );
+        flow.init().await.unwrap();
+        let system_cache = flow.system_cache();
+        let cancellation_token = flow.cancellation_token();
+        let task_manager = flow.task_manager();
+        let lease = format!(
+            "{}{}",
+            flowgen_core::executor::LEASE_KEY_PREFIX,
+            flowgen_core::identity::FlowIdentity::new("elected").as_key()
+        );
+        let mut handle = flow_handle("elected", true, flow.run(), task_manager);
+        handle.cancellation_token = cancellation_token;
+        let flow_registry = RwLock::new(HashMap::from([("elected".to_string(), handle)]));
+        let leased = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while system_cache.get(&lease).await.unwrap().is_none() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+
+        let stopped = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stop_flows(&flow_registry, &crate::reconciler::FlowServers::default()),
+        )
+        .await;
+
+        assert!(leased.is_ok(), "the flow never took its lease");
+        assert!(stopped.is_ok());
+        assert!(system_cache.get(&lease).await.unwrap().is_none());
     }
 
     #[tokio::test]

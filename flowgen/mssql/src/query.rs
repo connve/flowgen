@@ -1,172 +1,86 @@
-//! The `mssql_query` task: SQL Server queries with Arrow RecordBatch conversion.
+//! The `mssql_query` task: SQL Server queries with Arrow RecordBatch output.
 
 use crate::client::{Client, Error as ClientError};
-use crate::config::Credentials;
-use arrow::array::*;
-use arrow::datatypes::{DataType, Field, Schema};
+use crate::rows::{Converter, Error as RowsError};
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
 use flowgen_core::config::ConfigExt;
-use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
+use flowgen_core::event::{Event, EventBuilder, EventData, EventExt, SharedCompletionTx};
 use flowgen_core::task::context::TaskContext;
 use flowgen_core::task::runner::Runner;
 use flowgen_core::task::TaskConfig;
+use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tiberius::{ColumnData, Query as TiberiusQuery, Row};
+use std::time::Duration;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::error;
 
-/// Configuration for MSSQL query processor.
+/// Configuration for the `mssql_query` task.
 ///
-/// Executes SQL queries against Microsoft SQL Server and returns results as Arrow RecordBatch.
+/// Runs a statement and emits the rows of its first result as Arrow record batches.
 ///
-/// ## Example
-///
-/// Basic query with inline SQL:
 /// ```yaml
 /// - mssql_query:
 ///     name: fetch_customers
 ///     credentials_path: /etc/mssql/credentials.json
-///     query: "SELECT * FROM customers WHERE created_at > @p1"
+///     query: "SELECT * FROM customers WHERE created_at > @P1"
 ///     parameters:
 ///       - "{{event.data.since}}"
-/// ```
-///
-/// Query from resource file with custom timeout:
-/// ```yaml
-/// - mssql_query:
-///     name: fetch_large_dataset
-///     credentials_path: /etc/mssql/credentials.json
-///     query:
-///       resource: "queries/large_dataset.sql"
-///     query_timeout: "5m"
-///     batch_size: 5000
 /// ```
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TaskConfig)]
 #[serde(deny_unknown_fields)]
 pub struct Query {
     /// Unique task identifier.
     pub name: String,
-
-    /// Path to SQL Server credentials file (JSON format).
-    ///
-    /// Expected format:
-    /// ```json
-    /// {
-    ///   "host": "localhost",
-    ///   "port": 1433,
-    ///   "database": "mydb",
-    ///   "username": "sa",
-    ///   "password": "SecurePassword123",
-    ///   "trust_server_certificate": true
-    /// }
-    /// ```
+    /// Path to the SQL Server credentials file (JSON).
     pub credentials_path: PathBuf,
-
-    /// SQL query to execute (inline string or resource file).
-    ///
-    /// Supports Handlebars template syntax for dynamic queries.
-    /// Inline: `query: "SELECT * FROM table WHERE id = {{event.data.id}}"`
-    /// Resource: `query: { resource: "queries/fetch.sql" }`
+    /// SQL statement, inline or from a resource file (supports Handlebars templating).
     pub query: flowgen_core::resource::Source,
-
-    /// Optional query parameters for parameterized queries.
-    ///
-    /// Parameters are bound as `@p1`, `@p2`, etc. in the SQL query.
-    /// Values support Handlebars template substitution from event data.
-    ///
-    /// Example: `parameters: ["{{event.data.start_date}}", "{{event.data.end_date}}"]`
+    /// Values bound to `@P1`, `@P2`, ... as text, converted to the parameter types by the server.
     #[serde(default)]
     pub parameters: Option<Vec<String>>,
-
-    /// Number of rows per Arrow RecordBatch.
-    ///
-    /// Larger batches use more memory but reduce overhead.
-    /// Default: 10000 rows per batch.
+    /// Rows per record batch.
     #[serde(default = "default_batch_size")]
-    pub batch_size: usize,
-
-    /// Maximum number of connections in the connection pool.
-    ///
-    /// Each task maintains its own connection pool.
-    /// Connections are created on-demand up to this limit.
-    /// Default: 10 connections.
+    pub batch_size: NonZeroUsize,
+    /// Maximum connections in the pool.
     #[serde(default = "default_max_connections")]
     pub max_connections: u32,
-
-    /// Connection establishment timeout.
-    ///
-    /// Maximum time to wait when establishing new database connections.
-    /// Useful for unreliable SQL servers with network issues.
-    ///
-    /// Default: "30s" (30 seconds).
-    /// Examples: "30s", "1m", "2m"
+    /// Maximum time to open a connection.
     #[serde(default = "default_connection_timeout", with = "humantime_serde")]
-    pub connection_timeout: std::time::Duration,
-
-    /// Query execution timeout.
-    ///
-    /// Maximum time to wait for both acquiring a connection from the pool
-    /// and executing the query. Use human-readable duration strings.
-    ///
-    /// Default: "2m" (2 minutes).
-    /// Examples: "30s", "5m", "1h"
+    pub connection_timeout: Duration,
+    /// Maximum time to wait for a connection from the pool and the first result.
     #[serde(default = "default_query_timeout", with = "humantime_serde")]
-    pub query_timeout: std::time::Duration,
-
+    pub query_timeout: Duration,
     /// Optional list of upstream task names this task depends on.
-    /// When set, this task only receives events from the named tasks.
-    /// When not set, the task receives from the previous task in the list (linear chain).
     #[serde(default)]
     pub depends_on: Option<Vec<String>>,
-    /// Optional retry configuration for this task.
+    /// Optional retry configuration (overrides app-level retry config).
     #[serde(default)]
     pub retry: Option<flowgen_core::retry::RetryConfig>,
     /// Events handled at once; defaults to 64.
     #[serde(default)]
-    pub max_in_flight: Option<std::num::NonZeroUsize>,
+    pub max_in_flight: Option<NonZeroUsize>,
 }
 
 impl ConfigExt for Query {}
 
-impl Query {
-    /// Builds ADO connection string from credentials file.
-    ///
-    /// Loads credentials from JSON file and constructs a SQL Server connection string.
-    pub async fn build_connection_string(&self) -> Result<String, std::io::Error> {
-        let creds_json = tokio::fs::read_to_string(&self.credentials_path).await?;
-        let creds: Credentials = serde_json::from_str(&creds_json)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-
-        Ok(format!(
-            "server=tcp:{},{};database={};user={};password={};TrustServerCertificate={};Encrypt={}",
-            creds.host,
-            creds.port,
-            creds.database,
-            creds.username,
-            creds.password,
-            creds.trust_server_certificate,
-            creds.encrypt
-        ))
-    }
-}
-
-fn default_batch_size() -> usize {
-    10000
+fn default_batch_size() -> NonZeroUsize {
+    NonZeroUsize::MIN.saturating_add(9_999)
 }
 
 fn default_max_connections() -> u32 {
     10
 }
 
-fn default_connection_timeout() -> std::time::Duration {
-    std::time::Duration::from_secs(30) // 30 seconds
+fn default_connection_timeout() -> Duration {
+    Duration::from_secs(30)
 }
 
-fn default_query_timeout() -> std::time::Duration {
-    std::time::Duration::from_secs(120) // 2 minutes
+fn default_query_timeout() -> Duration {
+    Duration::from_secs(120)
 }
 
 /// Errors that can occur during query processing.
@@ -178,61 +92,56 @@ pub enum Error {
         #[source]
         source: flowgen_core::config::Error,
     },
-
-    #[error("Failed to build event: {source}")]
-    EventBuilder {
-        #[source]
-        source: flowgen_core::event::Error,
-    },
-
-    #[error("Failed to send event to channel: {source}")]
-    SendMessage {
-        #[source]
-        source: flowgen_core::event::Error,
-    },
-
-    #[error("MSSQL client error: {source}")]
-    Client {
-        #[source]
-        source: ClientError,
-    },
-
-    #[error("Query execution failed: {source}")]
-    QueryExecution {
-        #[source]
-        source: tiberius::error::Error,
-    },
-
-    #[error("Failed to convert to Arrow: {source}")]
-    ArrowConversion {
-        #[source]
-        source: arrow::error::ArrowError,
-    },
-
-    #[error("Missing required builder attribute: {}", _0)]
-    MissingRequiredAttribute(String),
-
-    #[error("Task failed after all retry attempts: {source}")]
-    RetryExhausted {
-        #[source]
-        source: Box<Error>,
-    },
-
     #[error("Failed to load query from resource: {source}")]
     ResourceLoad {
         #[source]
         source: flowgen_core::resource::Error,
     },
-
-    #[error("Failed to load credentials file: {source}")]
-    CredentialsLoad {
+    #[error("Failed to build event: {source}")]
+    EventBuilder {
         #[source]
-        source: std::io::Error,
+        source: flowgen_core::event::Error,
     },
+    #[error("Failed to send event to channel: {source}")]
+    SendMessage {
+        #[source]
+        source: flowgen_core::event::Error,
+    },
+    #[error(transparent)]
+    Client(#[from] ClientError),
+    #[error("Query failed: {source}")]
+    Query {
+        #[source]
+        source: tiberius::error::Error,
+    },
+    #[error("Reading the rows failed after some batches were sent: {source}")]
+    Stream {
+        #[source]
+        source: tiberius::error::Error,
+    },
+    #[error("Query did not return a result within {timeout:?}")]
+    QueryTimeout { timeout: Duration },
+    #[error(transparent)]
+    Rows(#[from] RowsError),
+    #[error("Missing required builder attribute: {0}")]
+    MissingBuilderAttribute(&'static str),
     #[error(
         "Client registry type mismatch — same credentials used with incompatible client types"
     )]
     ClientRegistryMismatch,
+}
+
+impl Error {
+    /// Whether retrying might help: no connection, or a transient server
+    /// error. A query that failed after sending batches is not retried, as
+    /// that would send them again.
+    fn is_retryable(&self) -> bool {
+        match self {
+            Self::Client(_) => true,
+            Self::Query { source } => crate::client::is_transient(source),
+            _ => false,
+        }
+    }
 }
 
 /// Handles individual query execution events.
@@ -245,7 +154,7 @@ pub struct EventHandler {
     task_context: Arc<TaskContext>,
 }
 
-#[async_trait::async_trait]
+#[async_trait]
 impl flowgen_core::task::runner::Handler for EventHandler {
     type Error = Error;
 
@@ -253,125 +162,127 @@ impl flowgen_core::task::runner::Handler for EventHandler {
         self.tx.as_ref()
     }
 
-    /// Processes an event by executing the configured SQL query.
+    fn is_retryable(&self, error: &Error) -> bool {
+        error.is_retryable()
+    }
+
     #[tracing::instrument(skip(self, event), name = "task.handle", fields(duration_ms = tracing::field::Empty))]
     async fn handle(&self, event: Event) -> Result<(), Error> {
         if self.task_context.cancellation_token.is_cancelled() {
             return Ok(());
         }
-
         let event = Arc::new(event);
-        let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
-
         flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
-            let event_value = serde_json::value::Value::try_from(event.as_ref())
+            let event_value = serde_json::Value::try_from(event.as_ref())
                 .map_err(|source| Error::EventBuilder { source })?;
             let config = self
                 .config
                 .render(&event_value)
                 .map_err(|source| Error::ConfigRender { source })?;
-
-            // Render query (inline queries already rendered, resource files need rendering).
-            let query_string = config
+            let statement = config
                 .query
                 .render(self.task_context.resource_loader.as_ref(), &event_value)
                 .await
                 .map_err(|source| Error::ResourceLoad { source })?;
-
-            let mut connection = self
-                .client
-                .get_connection()
+            let subject = format!("{}.{}", event.subject, config.name);
+            self.run_query(&config, statement, &subject, &event.completion_tx)
                 .await
-                .map_err(|source| Error::Client { source })?;
-
-            let mut query = TiberiusQuery::new(query_string);
-
-            if let Some(params) = &config.parameters {
-                for param in params {
-                    query.bind(param.as_str());
-                }
-            }
-
-            let stream = query
-                .query(&mut connection)
-                .await
-                .map_err(|source| Error::QueryExecution { source })?;
-
-            let rows = stream
-                .into_first_result()
-                .await
-                .map_err(|source| Error::QueryExecution { source })?;
-
-            if rows.is_empty() {
-                let empty_batch = RecordBatch::new_empty(Arc::new(Schema::empty()));
-                let mut result_event = EventBuilder::new()
-                    .data(EventData::ArrowRecordBatch(empty_batch))
-                    .subject(format!("{}.{}", event.subject, config.name))
-                    .task_id(self.task_id)
-                    .task_type(self.task_type)
-                    .build()
-                    .map_err(|source| Error::EventBuilder { source })?;
-
-                // Signal completion or pass through to next task.
-                match self.tx {
-                    None => {
-                        // Leaf task: signal completion.
-                        if let Some(arc) = completion_tx_arc.as_ref() {
-                            arc.signal_completion(result_event.data_as_json().ok());
-                        }
-                    }
-                    Some(_) => {
-                        // Pass through completion_tx to next task.
-                        result_event.completion_tx = completion_tx_arc.clone();
-                    }
-                }
-
-                result_event
-                    .send_with_logging(self.tx.as_ref())
-                    .await
-                    .map_err(|source| Error::SendMessage { source })?;
-
-                return Ok(());
-            }
-
-            let batches = rows_to_record_batches(&rows, config.batch_size)
-                .map_err(|source| Error::ArrowConversion { source })?;
-
-            let total_batches = batches.len();
-            for (idx, batch) in batches.into_iter().enumerate() {
-                let mut result_event = EventBuilder::new()
-                    .data(EventData::ArrowRecordBatch(batch))
-                    .subject(format!("{}.{}", event.subject, config.name))
-                    .task_id(self.task_id)
-                    .task_type(self.task_type)
-                    .build()
-                    .map_err(|source| Error::EventBuilder { source })?;
-
-                // Only handle completion on the last batch
-                if idx == total_batches - 1 {
-                    match self.tx {
-                        None => {
-                            // Leaf task: signal completion.
-                            if let Some(arc) = completion_tx_arc.as_ref() {
-                                arc.signal_completion(result_event.data_as_json().ok());
-                            }
-                        }
-                        Some(_) => {
-                            // Pass through completion_tx to next task.
-                            result_event.completion_tx = completion_tx_arc.clone();
-                        }
-                    }
-                }
-
-                result_event
-                    .send_with_logging(self.tx.as_ref())
-                    .await
-                    .map_err(|source| Error::SendMessage { source })?;
-            }
-
-            Ok(())
         })
         .await
+    }
+}
+
+impl EventHandler {
+    /// Streams the rows of the statement's first result, emitting a record
+    /// batch every `batch_size` rows. Completion travels with the last batch,
+    /// so one batch is held back until the next one is full or the rows end.
+    async fn run_query(
+        &self,
+        config: &Query,
+        statement: String,
+        subject: &str,
+        completion_tx: &Option<SharedCompletionTx>,
+    ) -> Result<(), Error> {
+        let mut connection = self.client.connection().await?;
+        let timeout = self.client.query_timeout();
+        let mut query = tiberius::Query::new(statement);
+        for parameter in config.parameters.iter().flatten() {
+            query.bind(parameter.as_str());
+        }
+        let started = async {
+            let mut stream = query.query(&mut connection).await?;
+            let columns = stream.columns().await?.map(<[_]>::to_vec);
+            Ok::<_, tiberius::error::Error>((stream, columns))
+        };
+        let (stream, columns) = match tokio::time::timeout(timeout, started).await {
+            Ok(started) => started.map_err(|source| Error::Query { source })?,
+            Err(_) => return Err(Error::QueryTimeout { timeout }),
+        };
+        let converter = match columns {
+            Some(columns) => Converter::new(&columns)?,
+            None => Converter::new(&[])?,
+        };
+
+        let mut rows = stream.into_row_stream();
+        let batch_size = config.batch_size.get();
+        let mut chunk = Vec::with_capacity(batch_size);
+        let mut pending: Option<RecordBatch> = None;
+        let mut emitted = false;
+        loop {
+            let row = match rows.try_next().await {
+                Ok(Some(row)) if row.result_index() == 0 => row,
+                Ok(Some(_)) => continue,
+                Ok(None) => break,
+                Err(source) if emitted => return Err(Error::Stream { source }),
+                Err(source) => return Err(Error::Query { source }),
+            };
+            chunk.push(row);
+            if chunk.len() == batch_size {
+                let batch = converter.batch(&chunk)?;
+                chunk.clear();
+                if let Some(previous) = pending.replace(batch) {
+                    self.emit(previous, subject, None).await?;
+                    emitted = true;
+                }
+            }
+        }
+        let last = match (pending, chunk.is_empty()) {
+            (Some(previous), true) => previous,
+            (previous, _) => {
+                if let Some(previous) = previous {
+                    self.emit(previous, subject, None).await?;
+                }
+                converter.batch(&chunk)?
+            }
+        };
+        self.emit(last, subject, Some(completion_tx)).await
+    }
+
+    /// Sends one batch; `completion_tx` is set on the last batch only.
+    async fn emit(
+        &self,
+        batch: RecordBatch,
+        subject: &str,
+        completion_tx: Option<&Option<SharedCompletionTx>>,
+    ) -> Result<(), Error> {
+        let mut event = EventBuilder::new()
+            .data(EventData::ArrowRecordBatch(batch))
+            .subject(subject.to_string())
+            .task_id(self.task_id)
+            .task_type(self.task_type)
+            .build()
+            .map_err(|source| Error::EventBuilder { source })?;
+        match (completion_tx, &self.tx) {
+            (Some(Some(completion_tx)), None) => {
+                completion_tx.signal_completion(event.data_as_json().ok());
+            }
+            (Some(completion_tx), Some(_)) => event.completion_tx = completion_tx.clone(),
+            _ => {}
+        }
+        event
+            .send_with_logging(self.tx.as_ref())
+            .await
+            .map_err(|source| Error::SendMessage { source })
     }
 }
 
@@ -394,33 +305,29 @@ impl Runner for Processor {
     async fn init(&self) -> Result<EventHandler, Error> {
         let init_config = self
             .config
-            .render(&serde_json::json!({}))
+            .render(&serde_json::Map::new())
             .map_err(|source| Error::ConfigRender { source })?;
 
-        let credentials_path = init_config.credentials_path.clone();
         let client = self
             .task_context
             .client_registry
             .get_or_init(
                 flowgen_core::client_registry::ClientKeyBuilder::new(self.task_type)
-                    .field("credentials_path", &credentials_path)
+                    .field("credentials_path", &init_config.credentials_path)
                     .field("max_connections", &init_config.max_connections)
                     .field("connection_timeout", &init_config.connection_timeout)
                     .field("query_timeout", &init_config.query_timeout)
                     .build(),
                 || async {
-                    let connection_string = init_config
-                        .build_connection_string()
-                        .await
-                        .map_err(|source| Error::CredentialsLoad { source })?;
-                    Client::new(
-                        &connection_string,
+                    let credentials =
+                        crate::client::read_credentials(&init_config.credentials_path)?;
+                    Ok(Client::new(
+                        &credentials,
                         init_config.max_connections,
                         init_config.connection_timeout,
                         init_config.query_timeout,
                     )
-                    .await
-                    .map_err(|source| Error::Client { source })
+                    .await?)
                 },
             )
             .await
@@ -429,16 +336,14 @@ impl Runner for Processor {
                 flowgen_core::client_registry::Error::TypeMismatch => Error::ClientRegistryMismatch,
             })?;
 
-        let event_handler = EventHandler {
+        Ok(EventHandler {
             client,
             config: Arc::clone(&self.config),
             task_id: self.task_id,
             tx: self.tx.clone(),
             task_type: self.task_type,
             task_context: Arc::clone(&self.task_context),
-        };
-
-        Ok(event_handler)
+        })
     }
 
     #[tracing::instrument(skip(self), name = "task.run", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
@@ -446,29 +351,23 @@ impl Runner for Processor {
         let retry_config =
             flowgen_core::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
 
-        let event_handler = match tokio_retry::Retry::spawn(
+        let event_handler = tokio_retry::Retry::spawn(
             retry_config.init_strategy(self.task_context.startup_delay),
             || async {
                 match self.init().await {
                     Ok(handler) => Ok(handler),
                     Err(e) => {
-                        error!(error = %e, "Failed to initialize MSSQL query processor");
+                        error!(error = %e, "Failed to initialize SQL Server query processor");
                         Err(tokio_retry::RetryError::transient(e))
                     }
                 }
             },
         )
-        .await
-        {
-            Ok(handler) => Arc::new(handler),
-            Err(e) => {
-                return Err(e);
-            }
-        };
+        .await?;
 
         flowgen_core::task::runner::process_events(
             self.rx,
-            event_handler,
+            Arc::new(event_handler),
             &retry_config,
             self.config.max_in_flight,
             &self.task_context,
@@ -479,10 +378,11 @@ impl Runner for Processor {
 }
 
 /// Builder for creating Processor instances.
+#[derive(Default)]
 pub struct ProcessorBuilder {
     config: Option<Arc<Query>>,
     rx: Option<Receiver<Event>>,
-    tx: Option<Option<Sender<Event>>>,
+    tx: Option<Sender<Event>>,
     task_id: Option<usize>,
     task_context: Option<Arc<TaskContext>>,
     task_type: Option<&'static str>,
@@ -490,14 +390,7 @@ pub struct ProcessorBuilder {
 
 impl ProcessorBuilder {
     pub fn new() -> Self {
-        Self {
-            config: None,
-            rx: None,
-            tx: None,
-            task_id: None,
-            task_context: None,
-            task_type: None,
-        }
+        Self::default()
     }
 
     pub fn config(mut self, config: Arc<Query>) -> Self {
@@ -511,7 +404,7 @@ impl ProcessorBuilder {
     }
 
     pub fn sender(mut self, tx: Sender<Event>) -> Self {
-        self.tx = Some(Some(tx));
+        self.tx = Some(tx);
         self
     }
 
@@ -530,687 +423,107 @@ impl ProcessorBuilder {
         self
     }
 
-    pub async fn build(self) -> Result<Processor, Error> {
+    pub fn build(self) -> Result<Processor, Error> {
         Ok(Processor {
             config: self
                 .config
-                .ok_or_else(|| Error::MissingRequiredAttribute("config".to_string()))?,
-            rx: self
-                .rx
-                .ok_or_else(|| Error::MissingRequiredAttribute("receiver".to_string()))?,
-            tx: self
-                .tx
-                .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
+                .ok_or(Error::MissingBuilderAttribute("config"))?,
+            rx: self.rx.ok_or(Error::MissingBuilderAttribute("receiver"))?,
+            tx: self.tx,
             task_id: self
                 .task_id
-                .ok_or_else(|| Error::MissingRequiredAttribute("task_id".to_string()))?,
+                .ok_or(Error::MissingBuilderAttribute("task_id"))?,
             task_context: self
                 .task_context
-                .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
+                .ok_or(Error::MissingBuilderAttribute("task_context"))?,
             task_type: self
                 .task_type
-                .ok_or_else(|| Error::MissingRequiredAttribute("task_type".to_string()))?,
+                .ok_or(Error::MissingBuilderAttribute("task_type"))?,
         })
     }
-}
-
-impl Default for ProcessorBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Converts MSSQL rows to Arrow RecordBatches.
-fn rows_to_record_batches(
-    rows: &[Row],
-    batch_size: usize,
-) -> Result<Vec<RecordBatch>, arrow::error::ArrowError> {
-    if rows.is_empty() {
-        return Ok(vec![]);
-    }
-
-    let schema = infer_schema_from_rows(rows)?;
-    let arrow_schema = Arc::new(schema);
-
-    let mut batches = Vec::new();
-    for chunk in rows.chunks(batch_size) {
-        let columns = build_columns(chunk, &arrow_schema)?;
-        let batch = RecordBatch::try_new(Arc::clone(&arrow_schema), columns)?;
-        batches.push(batch);
-    }
-
-    Ok(batches)
-}
-
-/// Infers Arrow schema from MSSQL rows using column metadata.
-fn infer_schema_from_rows(rows: &[Row]) -> Result<Schema, arrow::error::ArrowError> {
-    if rows.is_empty() {
-        return Ok(Schema::empty());
-    }
-
-    let first_row = &rows[0];
-    let mut fields = Vec::new();
-
-    for column in first_row.columns().iter() {
-        let field_name = column.name().to_string();
-
-        // Map Tiberius column type to Arrow data type.
-        let data_type = match column.column_type() {
-            tiberius::ColumnType::Null => DataType::Null,
-            tiberius::ColumnType::Bit | tiberius::ColumnType::Bitn => DataType::Boolean,
-            tiberius::ColumnType::Int1 => DataType::Int8,
-            tiberius::ColumnType::Int2 => DataType::Int16,
-            tiberius::ColumnType::Int4 | tiberius::ColumnType::Intn => DataType::Int32,
-            tiberius::ColumnType::Int8 => DataType::Int64,
-            tiberius::ColumnType::Float4 | tiberius::ColumnType::Floatn => DataType::Float32,
-            tiberius::ColumnType::Float8 => DataType::Float64,
-            tiberius::ColumnType::Money | tiberius::ColumnType::Money4 => DataType::Float64,
-            tiberius::ColumnType::Numericn | tiberius::ColumnType::Decimaln => DataType::Float64,
-            tiberius::ColumnType::Datetime
-            | tiberius::ColumnType::Datetime4
-            | tiberius::ColumnType::Datetimen
-            | tiberius::ColumnType::Datetime2 => {
-                DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None)
-            }
-            tiberius::ColumnType::DatetimeOffsetn => {
-                DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, Some("UTC".into()))
-            }
-            tiberius::ColumnType::Daten => DataType::Utf8,
-            tiberius::ColumnType::Timen => DataType::Utf8,
-            tiberius::ColumnType::BigVarBin
-            | tiberius::ColumnType::BigBinary
-            | tiberius::ColumnType::Image => DataType::Utf8,
-            tiberius::ColumnType::Guid => DataType::Utf8,
-            // All string/text types map to Utf8.
-            _ => DataType::Utf8,
-        };
-
-        fields.push(Field::new(field_name, data_type, true));
-    }
-
-    Ok(Schema::new(fields))
-}
-
-/// Builds Arrow column arrays from MSSQL rows.
-fn build_columns(
-    rows: &[Row],
-    schema: &Schema,
-) -> Result<Vec<Arc<dyn Array>>, arrow::error::ArrowError> {
-    let mut columns: Vec<Arc<dyn Array>> = Vec::new();
-
-    for (col_idx, field) in schema.fields().iter().enumerate() {
-        let array: Arc<dyn Array> = match field.data_type() {
-            DataType::Int8 => {
-                let mut builder = Int8Builder::new();
-                for row in rows {
-                    if let Some((_, col_data)) = row.cells().nth(col_idx) {
-                        match col_data {
-                            ColumnData::U8(Some(val)) => builder.append_value(*val as i8),
-                            ColumnData::I16(Some(val)) => builder.append_value(*val as i8),
-                            ColumnData::I32(Some(val)) => builder.append_value(*val as i8),
-                            _ => builder.append_null(),
-                        }
-                    } else {
-                        builder.append_null();
-                    }
-                }
-                Arc::new(builder.finish())
-            }
-            DataType::Int16 => {
-                let mut builder = Int16Builder::new();
-                for row in rows {
-                    if let Some((_, col_data)) = row.cells().nth(col_idx) {
-                        match col_data {
-                            ColumnData::U8(Some(val)) => builder.append_value(*val as i16),
-                            ColumnData::I16(Some(val)) => builder.append_value(*val),
-                            ColumnData::I32(Some(val)) => builder.append_value(*val as i16),
-                            _ => builder.append_null(),
-                        }
-                    } else {
-                        builder.append_null();
-                    }
-                }
-                Arc::new(builder.finish())
-            }
-            DataType::Int32 => {
-                let mut builder = Int32Builder::new();
-                for row in rows {
-                    if let Some((_, col_data)) = row.cells().nth(col_idx) {
-                        match col_data {
-                            ColumnData::U8(Some(val)) => builder.append_value(*val as i32),
-                            ColumnData::I16(Some(val)) => builder.append_value(*val as i32),
-                            ColumnData::I32(Some(val)) => builder.append_value(*val),
-                            ColumnData::I64(Some(val)) => builder.append_value(*val as i32),
-                            _ => builder.append_null(),
-                        }
-                    } else {
-                        builder.append_null();
-                    }
-                }
-                Arc::new(builder.finish())
-            }
-            DataType::Int64 => {
-                let mut builder = Int64Builder::new();
-                for row in rows {
-                    if let Some((_, col_data)) = row.cells().nth(col_idx) {
-                        match col_data {
-                            ColumnData::U8(Some(val)) => builder.append_value(*val as i64),
-                            ColumnData::I16(Some(val)) => builder.append_value(*val as i64),
-                            ColumnData::I32(Some(val)) => builder.append_value(*val as i64),
-                            ColumnData::I64(Some(val)) => builder.append_value(*val),
-                            _ => builder.append_null(),
-                        }
-                    } else {
-                        builder.append_null();
-                    }
-                }
-                Arc::new(builder.finish())
-            }
-            DataType::Float32 => {
-                let mut builder = Float32Builder::new();
-                for row in rows {
-                    if let Some((_, col_data)) = row.cells().nth(col_idx) {
-                        match col_data {
-                            ColumnData::F32(Some(val)) => builder.append_value(*val),
-                            ColumnData::F64(Some(val)) => builder.append_value(*val as f32),
-                            _ => builder.append_null(),
-                        }
-                    } else {
-                        builder.append_null();
-                    }
-                }
-                Arc::new(builder.finish())
-            }
-            DataType::Float64 => {
-                let mut builder = Float64Builder::new();
-                for row in rows {
-                    if let Some((_, col_data)) = row.cells().nth(col_idx) {
-                        match col_data {
-                            ColumnData::F32(Some(val)) => builder.append_value(*val as f64),
-                            ColumnData::F64(Some(val)) => builder.append_value(*val),
-                            ColumnData::Numeric(Some(val)) => builder.append_value(f64::from(*val)),
-                            _ => builder.append_null(),
-                        }
-                    } else {
-                        builder.append_null();
-                    }
-                }
-                Arc::new(builder.finish())
-            }
-            DataType::Boolean => {
-                let mut builder = BooleanBuilder::new();
-                for row in rows {
-                    if let Some((_, col_data)) = row.cells().nth(col_idx) {
-                        match col_data {
-                            ColumnData::Bit(Some(val)) => builder.append_value(*val),
-                            _ => builder.append_null(),
-                        }
-                    } else {
-                        builder.append_null();
-                    }
-                }
-                Arc::new(builder.finish())
-            }
-            DataType::Utf8 => {
-                let mut builder = StringBuilder::new();
-                for row in rows {
-                    if let Some((_, col_data)) = row.cells().nth(col_idx) {
-                        match col_data {
-                            ColumnData::String(Some(val)) => builder.append_value(val.as_ref()),
-                            ColumnData::Guid(Some(val)) => {
-                                builder.append_value(val.to_string());
-                            }
-                            ColumnData::Xml(Some(val)) => {
-                                builder.append_value(val.as_ref());
-                            }
-                            ColumnData::Numeric(Some(val)) => {
-                                builder.append_value(f64::from(*val).to_string());
-                            }
-                            _ => builder.append_null(),
-                        }
-                    } else {
-                        builder.append_null();
-                    }
-                }
-                Arc::new(builder.finish())
-            }
-            DataType::Timestamp(_, _) => {
-                let mut builder = arrow::array::TimestampMicrosecondBuilder::new();
-                for row in rows {
-                    if let Some((_, col_data)) = row.cells().nth(col_idx) {
-                        // Tiberius with chrono feature provides FromSql trait for NaiveDateTime.
-                        // This handles all MSSQL datetime types (datetime, smalldatetime, etc.) uniformly.
-                        let datetime_opt: Option<chrono::NaiveDateTime> = match col_data {
-                            ColumnData::DateTime(_) | ColumnData::SmallDateTime(_) => {
-                                row.get(col_idx)
-                            }
-                            _ => None,
-                        };
-                        if let Some(dt) = datetime_opt {
-                            // Convert to UTC timestamp in microseconds for Arrow compatibility.
-                            builder.append_value(dt.and_utc().timestamp_micros());
-                        } else {
-                            builder.append_null();
-                        }
-                    } else {
-                        builder.append_null();
-                    }
-                }
-                Arc::new(builder.finish())
-            }
-            _ => {
-                // Fallback for unmapped data types: extract the value as a string
-                // representation, or null if the column value is None.
-                let mut builder = StringBuilder::new();
-                for row in rows {
-                    if let Some((_, col_data)) = row.cells().nth(col_idx) {
-                        match col_data {
-                            ColumnData::String(Some(val)) => builder.append_value(val.as_ref()),
-                            ColumnData::Guid(Some(val)) => {
-                                builder.append_value(val.to_string());
-                            }
-                            ColumnData::Xml(Some(val)) => builder.append_value(val.as_ref()),
-                            ColumnData::Numeric(Some(val)) => {
-                                builder.append_value(f64::from(*val).to_string());
-                            }
-                            ColumnData::U8(Some(val)) => builder.append_value(val.to_string()),
-                            ColumnData::I16(Some(val)) => builder.append_value(val.to_string()),
-                            ColumnData::I32(Some(val)) => builder.append_value(val.to_string()),
-                            ColumnData::I64(Some(val)) => builder.append_value(val.to_string()),
-                            ColumnData::F32(Some(val)) => builder.append_value(val.to_string()),
-                            ColumnData::F64(Some(val)) => builder.append_value(val.to_string()),
-                            ColumnData::Bit(Some(val)) => builder.append_value(val.to_string()),
-                            _ => builder.append_null(),
-                        }
-                    } else {
-                        builder.append_null();
-                    }
-                }
-                Arc::new(builder.finish())
-            }
-        };
-
-        columns.push(array);
-    }
-
-    Ok(columns)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-    use std::sync::Arc;
+    use flowgen_core::resource::Source;
 
     #[test]
-    fn config_deser_minimal_inline_query() {
-        let json = r#"{
-            "name": "fetch_users",
-            "credentials_path": "/var/secrets/mssql/creds.json",
-            "query": "SELECT * FROM users"
-        }"#;
-        let config: Query = serde_json::from_str(json).unwrap();
-        assert_eq!(config.name, "fetch_users");
-        assert_eq!(
-            config.credentials_path,
-            PathBuf::from("/var/secrets/mssql/creds.json")
-        );
-        match &config.query {
-            flowgen_core::resource::Source::Inline(s) => {
-                assert_eq!(s, "SELECT * FROM users");
-            }
-            other => panic!("expected Inline query, got {other:?}"),
-        }
-        assert_eq!(config.batch_size, 10000);
-        assert_eq!(config.max_connections, 10);
-        assert_eq!(
-            config.connection_timeout,
-            std::time::Duration::from_secs(30)
-        );
-        assert_eq!(config.query_timeout, std::time::Duration::from_secs(120));
-        assert!(config.parameters.is_none());
-        assert!(config.depends_on.is_none());
-        assert!(config.retry.is_none());
-    }
-
-    #[test]
-    fn config_deser_resource_query() {
-        let json = r#"{
-            "name": "fetch_orders",
-            "credentials_path": "/etc/mssql/creds.json",
-            "query": { "resource": "queries/orders.sql" }
-        }"#;
-        let config: Query = serde_json::from_str(json).unwrap();
-        match &config.query {
-            flowgen_core::resource::Source::Resource { resource } => {
-                assert_eq!(resource, "queries/orders.sql");
-            }
-            other => panic!("expected Resource query, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn config_deser_with_parameters() {
-        let json = r#"{
-            "name": "parameterized",
-            "credentials_path": "/creds.json",
-            "query": "SELECT * FROM t WHERE a = @p1 AND b = @p2",
-            "parameters": ["val1", "val2"]
-        }"#;
-        let config: Query = serde_json::from_str(json).unwrap();
-        let params = config.parameters.unwrap();
-        assert_eq!(params.len(), 2);
-        assert_eq!(params[0], "val1");
-        assert_eq!(params[1], "val2");
-    }
-
-    #[test]
-    fn config_deser_custom_timeouts() {
-        let json = r#"{
-            "name": "slow_query",
-            "credentials_path": "/creds.json",
-            "query": "SELECT 1",
-            "connection_timeout": "1m",
-            "query_timeout": "5m",
-            "batch_size": 500,
-            "max_connections": 3
-        }"#;
-        let config: Query = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            config.connection_timeout,
-            std::time::Duration::from_secs(60)
-        );
-        assert_eq!(config.query_timeout, std::time::Duration::from_secs(300));
-        assert_eq!(config.batch_size, 500);
-        assert_eq!(config.max_connections, 3);
-    }
-
-    #[test]
-    fn config_deser_with_depends_on() {
-        let json = r#"{
-            "name": "downstream",
-            "credentials_path": "/creds.json",
-            "query": "SELECT 1",
-            "depends_on": ["upstream_a", "upstream_b"]
-        }"#;
-        let config: Query = serde_json::from_str(json).unwrap();
-        let deps = config.depends_on.unwrap();
-        assert_eq!(deps.len(), 2);
-        assert_eq!(deps[0], "upstream_a");
-    }
-
-    #[test]
-    fn config_deser_with_retry() {
-        let json = r#"{
-            "name": "retryable",
-            "credentials_path": "/creds.json",
-            "query": "SELECT 1",
-            "retry": { "max_attempts": 3, "initial_backoff": "1s" }
-        }"#;
-        let config: Query = serde_json::from_str(json).unwrap();
-        assert!(config.retry.is_some());
-    }
-
-    #[test]
-    fn config_deser_missing_name_fails() {
-        let json = r#"{
-            "credentials_path": "/creds.json",
-            "query": "SELECT 1"
-        }"#;
-        let result = serde_json::from_str::<Query>(json);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn config_deser_missing_credentials_path_fails() {
-        let json = r#"{
-            "name": "test",
-            "query": "SELECT 1"
-        }"#;
-        let result = serde_json::from_str::<Query>(json);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn config_deser_missing_query_fails() {
-        let json = r#"{
-            "name": "test",
-            "credentials_path": "/creds.json"
-        }"#;
-        let result = serde_json::from_str::<Query>(json);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn credentials_deser_full() {
-        let json = r#"{
-            "host": "sqlserver.example.com",
-            "port": 1434,
-            "database": "proddb",
-            "username": "app",
-            "password": "secret",
-            "trust_server_certificate": true,
-            "encrypt": false
-        }"#;
-        let creds: crate::config::Credentials = serde_json::from_str(json).unwrap();
-        assert_eq!(creds.host, "sqlserver.example.com");
-        assert_eq!(creds.port, 1434);
-        assert_eq!(creds.database, "proddb");
-        assert_eq!(creds.username, "app");
-        assert_eq!(creds.password, "secret");
-        assert!(creds.trust_server_certificate);
-        assert!(!creds.encrypt);
-    }
-
-    #[test]
-    fn credentials_deser_defaults() {
-        let json = r#"{
-            "host": "localhost",
-            "database": "testdb",
-            "username": "sa",
-            "password": "pass"
-        }"#;
-        let creds: crate::config::Credentials = serde_json::from_str(json).unwrap();
-        assert_eq!(creds.port, 1433);
-        assert!(!creds.trust_server_certificate);
-        assert!(creds.encrypt);
-    }
-
-    #[test]
-    fn credentials_deser_missing_host_fails() {
-        let json = r#"{
-            "database": "testdb",
-            "username": "sa",
-            "password": "pass"
-        }"#;
-        let result = serde_json::from_str::<crate::config::Credentials>(json);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn config_roundtrip_serde() {
-        let json = r#"{
-            "name": "roundtrip",
-            "credentials_path": "/creds.json",
-            "query": "SELECT 1",
-            "batch_size": 5000,
-            "max_connections": 5
-        }"#;
-        let config: Query = serde_json::from_str(json).unwrap();
-        let serialized = serde_json::to_string(&config).unwrap();
-        let deserialized: Query = serde_json::from_str(&serialized).unwrap();
-        assert_eq!(config, deserialized);
-    }
-
-    #[test]
-    fn rows_to_record_batches_empty_returns_empty_vec() {
-        let rows: Vec<Row> = vec![];
-        let result = rows_to_record_batches(&rows, 100).unwrap();
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn infer_schema_empty_rows_returns_empty_schema() {
-        let rows: Vec<Row> = vec![];
-        let schema = infer_schema_from_rows(&rows).unwrap();
-        assert_eq!(schema.fields().len(), 0);
-    }
-
-    //
-    // tiberius::Row has pub(crate) fields and cannot be constructed
-    // outside the tiberius crate. We test build_columns with empty row
-    // slices to verify each DataType arm produces the correct Arrow
-    // array type with zero rows.
-
-    fn build_columns_empty(fields: Vec<Field>) -> Vec<Arc<dyn Array>> {
-        let schema = Schema::new(fields);
-        let rows: Vec<Row> = vec![];
-        build_columns(&rows, &schema).unwrap()
-    }
-
-    #[test]
-    fn build_columns_int8_produces_int8_array() {
-        let cols = build_columns_empty(vec![Field::new("a", DataType::Int8, true)]);
-        assert_eq!(cols.len(), 1);
-        assert_eq!(*cols[0].data_type(), DataType::Int8);
-        assert_eq!(cols[0].len(), 0);
-    }
-
-    #[test]
-    fn build_columns_int16_produces_int16_array() {
-        let cols = build_columns_empty(vec![Field::new("a", DataType::Int16, true)]);
-        assert_eq!(*cols[0].data_type(), DataType::Int16);
-        assert_eq!(cols[0].len(), 0);
-    }
-
-    #[test]
-    fn build_columns_int32_produces_int32_array() {
-        let cols = build_columns_empty(vec![Field::new("a", DataType::Int32, true)]);
-        assert_eq!(*cols[0].data_type(), DataType::Int32);
-        assert_eq!(cols[0].len(), 0);
-    }
-
-    #[test]
-    fn build_columns_int64_produces_int64_array() {
-        let cols = build_columns_empty(vec![Field::new("a", DataType::Int64, true)]);
-        assert_eq!(*cols[0].data_type(), DataType::Int64);
-        assert_eq!(cols[0].len(), 0);
-    }
-
-    #[test]
-    fn build_columns_float32_produces_float32_array() {
-        let cols = build_columns_empty(vec![Field::new("a", DataType::Float32, true)]);
-        assert_eq!(*cols[0].data_type(), DataType::Float32);
-        assert_eq!(cols[0].len(), 0);
-    }
-
-    #[test]
-    fn build_columns_float64_produces_float64_array() {
-        let cols = build_columns_empty(vec![Field::new("a", DataType::Float64, true)]);
-        assert_eq!(*cols[0].data_type(), DataType::Float64);
-        assert_eq!(cols[0].len(), 0);
-    }
-
-    #[test]
-    fn build_columns_boolean_produces_boolean_array() {
-        let cols = build_columns_empty(vec![Field::new("a", DataType::Boolean, true)]);
-        assert_eq!(*cols[0].data_type(), DataType::Boolean);
-        assert_eq!(cols[0].len(), 0);
-    }
-
-    #[test]
-    fn build_columns_utf8_produces_string_array() {
-        let cols = build_columns_empty(vec![Field::new("a", DataType::Utf8, true)]);
-        assert_eq!(*cols[0].data_type(), DataType::Utf8);
-        assert_eq!(cols[0].len(), 0);
-    }
-
-    #[test]
-    fn build_columns_timestamp_produces_timestamp_array() {
-        let dt = DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None);
-        let cols = build_columns_empty(vec![Field::new("a", dt.clone(), true)]);
-        assert_eq!(*cols[0].data_type(), dt);
-        assert_eq!(cols[0].len(), 0);
-    }
-
-    #[test]
-    fn build_columns_timestamp_utc_produces_timestamp_array() {
-        let dt = DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, Some("UTC".into()));
-        let cols = build_columns_empty(vec![Field::new("a", dt.clone(), true)]);
-        // Timestamp with timezone still uses the Timestamp branch, producing
-        // a TimestampMicrosecond array (timezone metadata is on the field, not
-        // the builder). The fallback branch handles non-matching timestamps.
-        assert_eq!(cols[0].len(), 0);
-    }
-
-    #[test]
-    fn build_columns_fallback_unmapped_type_produces_utf8() {
-        // DataType::Date32 has no explicit branch; should hit the fallback arm.
-        let cols = build_columns_empty(vec![Field::new("a", DataType::Date32, true)]);
-        assert_eq!(*cols[0].data_type(), DataType::Utf8);
-        assert_eq!(cols[0].len(), 0);
-    }
-
-    #[test]
-    fn build_columns_multiple_fields() {
-        let cols = build_columns_empty(vec![
-            Field::new("id", DataType::Int32, true),
-            Field::new("name", DataType::Utf8, true),
-            Field::new("active", DataType::Boolean, true),
-            Field::new("score", DataType::Float64, true),
-        ]);
-        assert_eq!(cols.len(), 4);
-        assert_eq!(*cols[0].data_type(), DataType::Int32);
-        assert_eq!(*cols[1].data_type(), DataType::Utf8);
-        assert_eq!(*cols[2].data_type(), DataType::Boolean);
-        assert_eq!(*cols[3].data_type(), DataType::Float64);
-    }
-
-    #[test]
-    fn build_columns_empty_schema_produces_no_columns() {
-        let cols = build_columns_empty(vec![]);
-        assert!(cols.is_empty());
-    }
-
-    #[test]
-    fn build_columns_empty_rows_forms_valid_record_batch() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Int64, true),
-            Field::new("val", DataType::Utf8, true),
-        ]));
-        let rows: Vec<Row> = vec![];
-        let columns = build_columns(&rows, &schema).unwrap();
-        let batch = RecordBatch::try_new(schema, columns).unwrap();
-        assert_eq!(batch.num_rows(), 0);
-        assert_eq!(batch.num_columns(), 2);
-    }
-
-    #[test]
-    fn test_deserialize_mssql_query() {
+    fn config_deser_minimal() {
         let yaml = r#"
-            name: test-query
-            credentials_path: /var/secrets/mssql/creds.json
+            name: fetch_users
+            credentials_path: /etc/mssql/credentials.json
             query: "SELECT * FROM users"
         "#;
-
         let config: Query = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.name, "test-query");
-        assert_eq!(config.batch_size, 10000);
+        assert_eq!(
+            config.query,
+            Source::Inline("SELECT * FROM users".to_string())
+        );
+        assert_eq!(config.batch_size.get(), 10000);
         assert_eq!(config.max_connections, 10);
+        assert_eq!(config.connection_timeout, Duration::from_secs(30));
+        assert_eq!(config.query_timeout, Duration::from_secs(120));
+        assert!(config.parameters.is_none());
     }
 
     #[test]
-    fn test_deserialize_with_parameters() {
+    fn config_deser_resource_query_with_parameters() {
         let yaml = r#"
-            name: parameterized-query
-            credentials_path: /var/secrets/mssql/creds.json
-            query: "SELECT * FROM users WHERE id = @p1"
+            name: fetch_orders
+            credentials_path: /etc/mssql/credentials.json
+            query:
+              resource: queries/orders.sql
             parameters:
-              - "{{event.data.user_id}}"
+              - "{{event.data.status}}"
+            batch_size: 500
+            query_timeout: 5m
         "#;
-
         let config: Query = serde_yaml::from_str(yaml).unwrap();
-        assert!(config.parameters.is_some());
-        assert_eq!(config.parameters.as_ref().unwrap().len(), 1);
+        assert_eq!(
+            config.query,
+            Source::Resource {
+                resource: "queries/orders.sql".to_string()
+            }
+        );
+        assert_eq!(
+            config.parameters,
+            Some(vec!["{{event.data.status}}".to_string()])
+        );
+        assert_eq!(config.batch_size.get(), 500);
+        assert_eq!(config.query_timeout, Duration::from_secs(300));
+    }
+
+    #[test]
+    fn config_deser_rejects_unknown_fields_and_a_zero_batch_size() {
+        assert!(serde_yaml::from_str::<Query>(
+            "{name: a, credentials_path: /c.json, query: 'SELECT 1', params: ['1']}"
+        )
+        .is_err());
+        assert!(serde_yaml::from_str::<Query>(
+            "{name: a, credentials_path: /c.json, query: 'SELECT 1', batch_size: 0}"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn timeouts_and_row_errors_are_not_retried() {
+        assert!(!Error::QueryTimeout {
+            timeout: Duration::from_secs(1)
+        }
+        .is_retryable());
+        assert!(!Error::Rows(RowsError::UnsupportedType {
+            column: "v".to_string(),
+            type_name: "SSVariant".to_string(),
+        })
+        .is_retryable());
+    }
+
+    #[test]
+    fn a_processor_needs_its_attributes() {
+        assert!(matches!(
+            ProcessorBuilder::new().build(),
+            Err(Error::MissingBuilderAttribute("config"))
+        ));
     }
 }

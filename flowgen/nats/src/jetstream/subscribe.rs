@@ -3,6 +3,7 @@ use async_nats::jetstream::{self, AckKind};
 use flowgen_core::{
     client::Client,
     config::ConfigExt,
+    delivery::STILL_HELD_REPORT_INTERVAL,
     event::{new_completion_channel, CompletionRx, Event, EventExt},
     task::TaskConfig,
 };
@@ -13,11 +14,15 @@ use tokio::sync::mpsc::Sender;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 use tokio_stream::StreamExt;
-use tracing::{error, warn, Instrument};
+use tokio_util::sync::CancellationToken;
+use tracing::{error, info, warn, Instrument};
 
 /// How often a message in the flow is reported as in progress when the
 /// consumer's ack wait is unknown.
 const DEFAULT_PROGRESS_INTERVAL: Duration = Duration::from_secs(15);
+
+/// How long a stopping subscriber waits for NATS to take its last acks.
+const FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// `nats_jetstream_subscribe` task config.
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, TaskConfig)]
@@ -51,7 +56,12 @@ pub enum Error {
     #[error("Failed to request messages: {source}")]
     Batch {
         #[source]
-        source: async_nats::jetstream::consumer::pull::BatchError,
+        source: async_nats::jetstream::consumer::pull::BatchRequestError,
+    },
+    #[error("NATS ended the pull request with status {status}: {description}")]
+    PullStatus {
+        status: async_nats::StatusCode,
+        description: String,
     },
     #[error("Stream management error: {source}")]
     StreamManagement {
@@ -105,6 +115,7 @@ pub enum Error {
 /// Event handler for processing NATS messages.
 pub struct EventHandler {
     consumer: jetstream::consumer::Consumer<jetstream::consumer::pull::Config>,
+    jetstream: jetstream::Context,
     /// Checked via `connection_state()` to distinguish a dead connection
     /// from a live consumer with nothing to deliver.
     client: async_nats::Client,
@@ -126,14 +137,31 @@ struct Delivery {
     ack_wait: Duration,
     /// How long the flow may take before the message is redelivered.
     ack_timeout: Option<Duration>,
-    backoff: Vec<Duration>,
+    /// Sets the delay before a failed message is delivered again.
+    retry_config: flowgen_core::retry::RetryConfig,
+    /// Cancelled once the pull request has ended at a stop, so the messages
+    /// in the flow are handed back after it.
+    stopping: CancellationToken,
 }
 
 impl EventHandler {
+    /// Reads messages until the task stops or the consumer fails, then sends
+    /// the last acks and hand-backs to NATS. The client only queues them, and
+    /// a client dropped first discards them.
+    async fn handle(self) -> Result<(), Error> {
+        let handled = self.pull().await;
+        match tokio::time::timeout(FLUSH_TIMEOUT, self.client.flush()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(source)) => warn!(error = %source, "Failed to send the last acks to NATS"),
+            Err(_) => warn!(timeout = ?FLUSH_TIMEOUT, "NATS did not take the last acks in time"),
+        }
+        handled
+    }
+
     /// Pulls messages only into free `max_in_flight` slots and hands each to
     /// its own task, so the next message is read while earlier ones are still
     /// in the flow and no pulled message waits unacknowledged in a buffer.
-    async fn handle(self) -> Result<(), Error> {
+    async fn pull(&self) -> Result<(), Error> {
         let max_in_flight = match self.config.max_in_flight {
             Some(max_in_flight) => max_in_flight,
             None => self.delivery.task_context.max_in_flight,
@@ -150,7 +178,11 @@ impl EventHandler {
         loop {
             let first = tokio::select! {
                 biased;
-                _ = cancellation.cancelled() => return Ok(()),
+                _ = cancellation.cancelled() => {
+                    self.delivery.stopping.cancel();
+                    join_all(&mut in_flight).await;
+                    return Ok(());
+                }
                 slot = Arc::clone(&slots).acquire_owned() => match slot {
                     Ok(slot) => slot,
                     Err(_) => return Ok(()),
@@ -164,36 +196,51 @@ impl EventHandler {
                 }
             }
 
-            let mut batch = self
-                .consumer
-                .batch()
-                .max_messages(permits.len())
-                .expires(self.config.batch_expires)
-                .heartbeat(self.config.batch_expires / 4)
-                .messages()
-                .await
-                .map_err(|source| Error::Batch { source })?;
+            let request = PullRequest::send(
+                &self.consumer,
+                &self.jetstream,
+                permits.len(),
+                self.config.batch_expires,
+            )
+            .await;
+            let mut request = match request {
+                Ok(request) => request,
+                Err(source) => {
+                    join_all(&mut in_flight).await;
+                    return Err(source);
+                }
+            };
 
             let mut received = 0;
             loop {
                 let next = tokio::select! {
                     biased;
-                    _ = cancellation.cancelled() => return Ok(()),
-                    next = batch.next() => next,
+                    _ = cancellation.cancelled() => {
+                        stop(request, None, &mut in_flight, &self.delivery.stopping).await;
+                        return Ok(());
+                    }
+                    next = request.next() => next,
                 };
                 let message = match next {
-                    Some(Ok(message)) => message,
-                    Some(Err(source)) => {
-                        while in_flight.join_next().await.is_some() {}
-                        return Err(Error::Other(source));
+                    Ok(Some(message)) => message,
+                    Ok(None) => break,
+                    Err(source) => {
+                        join_all(&mut in_flight).await;
+                        return Err(source);
                     }
-                    None => break,
                 };
                 let Some(permit) = permits.pop() else {
                     break;
                 };
                 if let Some(throttle) = throttle.as_mut() {
-                    throttle.tick().await;
+                    tokio::select! {
+                        biased;
+                        _ = cancellation.cancelled() => {
+                            stop(request, Some(message), &mut in_flight, &self.delivery.stopping).await;
+                            return Ok(());
+                        }
+                        _ = throttle.tick() => {}
+                    }
                 }
                 received += 1;
                 let span = tracing::info_span!("task.handle", duration_ms = tracing::field::Empty);
@@ -203,26 +250,119 @@ impl EventHandler {
                         .instrument(span),
                 );
             }
-            while in_flight.try_join_next().is_some() {}
+            reap(&mut in_flight);
 
             if received == 0
                 && self.client.connection_state() == async_nats::connection::State::Disconnected
             {
-                while in_flight.join_next().await.is_some() {}
+                join_all(&mut in_flight).await;
                 return Err(Error::StreamEnded);
             }
         }
     }
 }
 
+/// One pull request: the messages NATS sends to its inbox until the request
+/// expires or is full.
+struct PullRequest {
+    inbox: async_nats::Subscriber,
+    jetstream: jetstream::Context,
+    pending: usize,
+    /// When the request is over even if NATS never says so.
+    deadline: tokio::time::Instant,
+}
+
+impl PullRequest {
+    /// Asks the consumer for up to `max_messages`, waiting at most `expires`.
+    async fn send(
+        consumer: &jetstream::consumer::PullConsumer,
+        jetstream: &jetstream::Context,
+        max_messages: usize,
+        expires: Duration,
+    ) -> Result<Self, Error> {
+        let client = jetstream.client();
+        let subject = client.new_inbox();
+        let inbox = client
+            .subscribe(subject.clone())
+            .await
+            .map_err(|source| Error::Subscribe { source })?;
+        let request = jetstream::consumer::pull::BatchConfig {
+            batch: max_messages,
+            expires: Some(expires),
+            ..Default::default()
+        };
+        consumer
+            .request_batch(request, subject.into())
+            .await
+            .map_err(|source| Error::Batch { source })?;
+        Ok(Self {
+            inbox,
+            jetstream: jetstream.clone(),
+            pending: max_messages,
+            deadline: tokio::time::Instant::now() + expires + Duration::from_secs(5),
+        })
+    }
+
+    /// The next message, or `None` once the request is over.
+    async fn next(&mut self) -> Result<Option<jetstream::Message>, Error> {
+        while self.pending > 0 {
+            let message = match tokio::time::timeout_at(self.deadline, self.inbox.next()).await {
+                Ok(Some(message)) => message,
+                Ok(None) | Err(_) => return Ok(None),
+            };
+            match message.status {
+                None | Some(async_nats::StatusCode::OK) => {
+                    self.pending -= 1;
+                    return Ok(Some(jetstream::Message {
+                        message,
+                        context: self.jetstream.clone(),
+                    }));
+                }
+                Some(async_nats::StatusCode::IDLE_HEARTBEAT) => {}
+                Some(async_nats::StatusCode::TIMEOUT | async_nats::StatusCode::NOT_FOUND) => {
+                    return Ok(None)
+                }
+                Some(status) => {
+                    return Err(Error::PullStatus {
+                        status,
+                        description: message.description.unwrap_or_default(),
+                    })
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Ends the request and returns the messages NATS sent before it ended.
+    /// The unsubscribe goes out before anything sent after this returns, so
+    /// NATS cannot deliver a message handed back afterwards into this request.
+    async fn end(mut self) -> Vec<jetstream::Message> {
+        let mut unread = Vec::new();
+        if let Err(source) = self.inbox.drain().await {
+            warn!(error = %source, "Failed to end the pull request");
+            return unread;
+        }
+        self.deadline = self
+            .deadline
+            .min(tokio::time::Instant::now() + FLUSH_TIMEOUT);
+        while let Ok(Some(message)) = self.next().await {
+            unread.push(message);
+        }
+        unread
+    }
+}
+
+/// How a message's time in the flow ended.
+enum Outcome {
+    Completed,
+    Failed,
+    Stopped,
+}
+
 impl Delivery {
     /// Sends the message into the flow and acks it once every leaf has
-    /// completed, sending progress acks meanwhile so NATS doesn't redeliver
-    /// it while the flow is still running.
+    /// completed, or once sent when no task follows.
     async fn process(self: Arc<Self>, message: jetstream::Message, _slot: OwnedSemaphorePermit) {
-        // The completion channel waits for every leaf of the flow's graph.
-        let (completion_state, completion_rx) =
-            new_completion_channel(self.task_context.leaf_count);
         let mut event = match message.to_event(self.task_type, self.task_id) {
             Ok(event) => event,
             Err(source) => {
@@ -231,38 +371,36 @@ impl Delivery {
                 return;
             }
         };
+        let (completion_state, completion_rx) =
+            new_completion_channel(self.task_context.leaf_count);
         event.completion_tx = Some(completion_state);
-        if let Err(source) = event.send_with_logging(self.tx.as_ref()).await {
-            error!(error = %Error::SendMessage { source }, "Failed to send the event to the next task");
-            self.nak(&message).await;
-            return;
-        }
-
-        match self.completed(&message, completion_rx).await {
-            Some(true) => {
+        match self.outcome(&message, event, completion_rx).await {
+            Outcome::Completed => {
                 if let Err(source) = message.double_ack().await {
                     error!(error = %source, "NATS did not confirm the ack, the message will be redelivered");
                 }
             }
-            Some(false) => {
-                warn!("Flow completion failed or timed out");
-                self.nak(&message).await;
-            }
-            None => {}
+            Outcome::Failed => self.nak(&message).await,
+            Outcome::Stopped => release(&message).await,
         }
     }
 
-    /// Whether the flow completed for this message; `None` when the task is stopping.
-    async fn completed(
+    /// Sends the event into the flow and waits for it to complete. From
+    /// receipt on, NATS is told the message is in progress, `ack_timeout`
+    /// runs, and a message the flow holds long is logged.
+    async fn outcome(
         &self,
         message: &jetstream::Message,
+        event: Event,
         mut completion_rx: CompletionRx,
-    ) -> Option<bool> {
+    ) -> Outcome {
+        let started = tokio::time::Instant::now();
         let every = match self.ack_wait / 2 {
             every if every.is_zero() => DEFAULT_PROGRESS_INTERVAL,
             every => every,
         };
-        let mut progress = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+        let mut progress = tokio::time::interval_at(started + every, every);
+        let mut next_warning = STILL_HELD_REPORT_INTERVAL;
         let deadline = async {
             match self.ack_timeout {
                 Some(ack_timeout) => tokio::time::sleep(ack_timeout).await,
@@ -270,38 +408,173 @@ impl Delivery {
             }
         };
         tokio::pin!(deadline);
+        let downstream = self.tx.is_some();
+        let send = std::future::IntoFuture::into_future(event.send_with_logging(self.tx.as_ref()));
+        tokio::pin!(send);
+        let mut sent = false;
         loop {
             tokio::select! {
                 biased;
-                _ = self.task_context.cancellation_token.cancelled() => return None,
-                result = &mut completion_rx => return Some(matches!(result, Ok(Ok(_)))),
-                _ = &mut deadline => return Some(false),
+                result = &mut completion_rx, if sent => match result {
+                    Ok(Ok(_)) => return Outcome::Completed,
+                    _ if self.stopping.is_cancelled() => return Outcome::Stopped,
+                    _ => {
+                        warn!("Flow completion failed");
+                        return Outcome::Failed;
+                    }
+                },
+                _ = self.stopping.cancelled() => return Outcome::Stopped,
+                result = &mut send, if !sent => match (result, downstream) {
+                    (Ok(()), true) => sent = true,
+                    (Ok(()), false) => return Outcome::Completed,
+                    (Err(source), _) => {
+                        error!(error = %Error::SendMessage { source }, "Failed to send the event to the next task");
+                        return Outcome::Failed;
+                    }
+                },
+                _ = &mut deadline => {
+                    warn!(ack_timeout = ?self.ack_timeout, "The flow did not complete the message within ack_timeout");
+                    return Outcome::Failed;
+                }
                 _ = progress.tick() => {
                     if let Err(source) = message.ack_with(AckKind::Progress).await {
                         warn!(error = %source, "Failed to tell NATS the message is still in progress");
+                    }
+                    let held = started.elapsed();
+                    if held >= next_warning {
+                        warn!(held = ?held, sent, "The flow still holds the message");
+                        next_warning += STILL_HELD_REPORT_INTERVAL;
                     }
                 }
             }
         }
     }
 
-    /// Asks NATS to redeliver the message after the `backoff` delay for this
-    /// delivery, or after the ack wait without a `backoff`.
+    /// Asks NATS to redeliver the message after the retry backoff for this
+    /// delivery.
     async fn nak(&self, message: &jetstream::Message) {
-        let delivered = match message.info() {
-            Ok(info) => usize::try_from(info.delivered).unwrap_or(1),
-            Err(_) => 1,
+        let delivered = match message.info().map(|info| u32::try_from(info.delivered)) {
+            Ok(Ok(delivered)) => delivered,
+            _ => 1,
         };
-        let delay = match self
-            .backoff
-            .get(delivered.saturating_sub(1))
-            .or(self.backoff.last())
-        {
-            Some(delay) => *delay,
-            None => self.ack_wait,
-        };
+        let delay = self.retry_config.redelivery_delay(delivered);
         if let Err(source) = message.ack_with(AckKind::Nak(Some(delay))).await {
             warn!(error = %source, "Failed to ask NATS to redeliver the message");
+        }
+    }
+}
+
+/// Ends the pull request, then hands back the messages it delivered that the
+/// flow has not taken, `held`, and the messages in the flow. Handed back
+/// before the request ended, NATS would deliver them into it again.
+async fn stop(
+    request: PullRequest,
+    held: Option<jetstream::Message>,
+    in_flight: &mut JoinSet<()>,
+    stopping: &CancellationToken,
+) {
+    let mut unread = request.end().await;
+    unread.extend(held);
+    for message in &unread {
+        release(message).await;
+    }
+    stopping.cancel();
+    join_all(in_flight).await;
+}
+
+/// Waits for every message task, logging one that panicked.
+async fn join_all(in_flight: &mut JoinSet<()>) {
+    while let Some(joined) = in_flight.join_next().await {
+        log_panic(joined);
+    }
+}
+
+/// Collects the message tasks that have finished, logging one that panicked.
+fn reap(in_flight: &mut JoinSet<()>) {
+    while let Some(joined) = in_flight.try_join_next() {
+        log_panic(joined);
+    }
+}
+
+fn log_panic(joined: Result<(), tokio::task::JoinError>) {
+    if let Err(source) = joined {
+        error!(error = %source, "A message task failed, NATS redelivers the message after ack_wait");
+    }
+}
+
+/// Hands a message back for immediate redelivery when the task stops before
+/// its flow completes.
+async fn release(message: &jetstream::Message) {
+    if let Err(source) = message.ack_with(AckKind::Nak(None)).await {
+        warn!(error = %source, "Failed to hand the message back to NATS");
+    }
+}
+
+/// The live consumer config with the settings the flow sets, and without the
+/// `backoff` older versions put there.
+fn wanted_consumer_config(
+    live: &jetstream::consumer::Config,
+    config: &super::config::Config,
+) -> jetstream::consumer::Config {
+    let mut wanted = live.clone();
+    if let Some(ack_timeout) = config.ack_timeout {
+        wanted.ack_wait = ack_timeout;
+    }
+    if let Some(max_ack_pending) = config.max_ack_pending {
+        wanted.max_ack_pending = max_ack_pending;
+    }
+    if let Some(max_waiting) = config.max_waiting {
+        wanted.max_waiting = max_waiting;
+    }
+    if let Some(max_deliver) = config.max_deliver {
+        wanted.max_deliver = max_deliver;
+    }
+    wanted.backoff = Vec::new();
+    wanted
+}
+
+/// Updates an existing durable to the flow's settings; when the server
+/// refuses, logs how the consumer differs and keeps it as it is.
+async fn update_consumer(
+    stream: &jetstream::stream::Stream,
+    durable_name: &str,
+    live: &jetstream::consumer::Config,
+    wanted: jetstream::consumer::Config,
+) -> Option<jetstream::consumer::PullConsumer> {
+    use jetstream::consumer::FromConsumer;
+    let updated = match jetstream::consumer::pull::Config::try_from_consumer_config(wanted.clone())
+    {
+        Ok(pull) => stream
+            .update_consumer(pull)
+            .await
+            .map_err(|source| source.to_string()),
+        Err(source) => Err(source.to_string()),
+    };
+    match updated {
+        Ok(consumer) => {
+            info!(
+                consumer = durable_name,
+                ack_wait = ?wanted.ack_wait,
+                max_deliver = wanted.max_deliver,
+                max_ack_pending = wanted.max_ack_pending,
+                "Updated the consumer to the flow's settings"
+            );
+            Some(consumer)
+        }
+        Err(error) => {
+            warn!(
+                consumer = durable_name,
+                error,
+                live_ack_wait = ?live.ack_wait,
+                flow_ack_wait = ?wanted.ack_wait,
+                live_max_deliver = live.max_deliver,
+                flow_max_deliver = wanted.max_deliver,
+                live_max_ack_pending = live.max_ack_pending,
+                flow_max_ack_pending = wanted.max_ack_pending,
+                live_backoff = ?live.backoff,
+                "The consumer keeps settings that differ from the flow"
+            );
+            None
         }
     }
 }
@@ -372,17 +645,12 @@ impl flowgen_core::task::runner::Runner for Processor {
             })?;
 
         {
-            let mut jetstream = (*jetstream_ctx).clone();
+            let jetstream = (*jetstream_ctx).clone();
             let stream_opts = self
                 .config
                 .stream
                 .as_ref()
                 .ok_or_else(|| Error::MissingStreamConfig)?;
-
-            // Set timeout on JetStream context if configured.
-            if let Some(timeout) = init_config.ack_timeout {
-                jetstream.set_timeout(timeout);
-            }
 
             let jetstream = match stream_opts.create_or_update {
                 true => super::stream::create_or_update_stream(jetstream, stream_opts)
@@ -423,26 +691,27 @@ impl flowgen_core::task::runner::Runner for Processor {
                 consumer_config.max_deliver = max_deliver;
             }
 
-            if !init_config.backoff.is_empty() {
-                consumer_config.backoff = init_config.backoff.clone();
-            }
-
             let consumer = match stream.get_consumer(durable_name).await {
                 Ok(mut existing_consumer) => {
-                    let consumer_info = existing_consumer
+                    let live = existing_consumer
                         .info()
                         .await
-                        .map_err(|_| Error::ConsumerInfoFailed)?;
-                    let current_filter = consumer_info.config.filter_subject.clone();
-
-                    if current_filter != init_config.subject {
+                        .map_err(|_| Error::ConsumerInfoFailed)?
+                        .config
+                        .clone();
+                    if live.filter_subject != init_config.subject {
                         return Err(Error::ConsumerFilterMismatch {
                             consumer: durable_name.clone(),
-                            existing: current_filter,
+                            existing: live.filter_subject,
                             expected: init_config.subject.clone(),
                         });
-                    } else {
-                        existing_consumer
+                    }
+                    let wanted = wanted_consumer_config(&live, &init_config);
+                    match wanted == live {
+                        true => existing_consumer,
+                        false => update_consumer(&stream, durable_name, &live, wanted)
+                            .await
+                            .unwrap_or(existing_consumer),
                     }
                 }
                 Err(_) => stream
@@ -458,9 +727,14 @@ impl flowgen_core::task::runner::Runner for Processor {
                 task_context: Arc::clone(&self.task_context),
                 ack_wait: consumer.cached_info().config.ack_wait,
                 ack_timeout: init_config.ack_timeout,
-                backoff: init_config.backoff.clone(),
+                retry_config: flowgen_core::retry::RetryConfig::merge(
+                    &self.task_context.retry,
+                    &self.config.retry,
+                ),
+                stopping: CancellationToken::new(),
             };
             Ok(EventHandler {
+                jetstream: jetstream.clone(),
                 client: jetstream_ctx.client(),
                 client_key: nats_key,
                 consumer,
@@ -533,13 +807,13 @@ impl flowgen_core::task::runner::Runner for Processor {
 
             // Run event loop until failure, then reinitialize.
             let client_key = event_handler.client_key.clone();
-            let handle_future = event_handler.handle();
-            tokio::select! {
-                _ = cancellation_token.cancelled() => return Ok(()),
-                result = handle_future => match result {
-                    Ok(()) => warn!("Subscriber lost connectivity, reinitializing"),
-                    Err(e) => error!(error = %e, "Subscriber lost connectivity, reinitializing"),
-                },
+            let result = event_handler.handle().await;
+            if cancellation_token.is_cancelled() {
+                return Ok(());
+            }
+            match result {
+                Ok(()) => warn!("Subscriber lost connectivity, reinitializing"),
+                Err(e) => error!(error = %e, "Subscriber lost connectivity, reinitializing"),
             }
             lost_connectivity = true;
 

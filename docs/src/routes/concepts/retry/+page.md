@@ -6,10 +6,10 @@ Every task in flowgen has retry built in. The same exponential-backoff-with-jitt
 
 | Field | Default | Description |
 |---|---|---|
-| `max_attempts` | `10` | Maximum number of attempts before the task fails. |
+| `max_attempts` | `10` | Maximum number of attempts for an event. |
 | `initial_backoff` | `"1s"` | Delay before the first retry. Each subsequent retry doubles, with jitter applied. |
 
-With the defaults, a task retries for approximately **15 minutes** before giving up. The full sequence (with ±50% jitter on each delay):
+With the defaults, a task retries an event for approximately **15 minutes** before giving up. The full sequence (with ±50% jitter on each delay):
 
 ```
 attempt 1 fails → wait ~1s
@@ -27,6 +27,16 @@ attempt 10 fails → give up
 Total elapsed: about 15 minutes.
 
 `initial_backoff` accepts human-readable durations: `"500ms"`, `"2s"`, `"1m"`, etc. Setting `max_attempts: null` enables infinite retries, which is rarely what you want for a processor — see the patterns below.
+
+## Startup
+
+Task startup retries without a limit, with the delay doubling up to 5 minutes. `max_attempts` does not apply. A task that needs a table another flow creates starts once the table exists.
+
+An invalid configuration, such as a script that doesn't compile, fails the task at once; its startup is not retried. The flow then restarts as described below, so the error repeats in the logs until the configuration is fixed.
+
+## Flow restarts
+
+When a task fails, the whole flow restarts. The other tasks are stopped first and get up to 30 seconds to finish what they hold. The delay starts at `initial_backoff` and doubles up to 5 minutes; it resets after the flow has run for 5 minutes. A flow whose tasks all finish, such as a run-once `generate`, is not restarted.
 
 ## Startup jitter
 
@@ -50,10 +60,13 @@ Failed events are not silently dropped. The error event carries `event.error` wi
 
 Subscribers — `nats_jetstream_subscribe`, `salesforce_pubsubapi_subscribe`, and other long-lived consumers — must maintain connectivity indefinitely. They use the retry config differently:
 
-- **Initialization** is wrapped in the circuit-breaker strategy. If credentials are wrong or the broker is unreachable for the full retry window, the task fails fast so the operator notices.
-- **Connection loss** during the consume loop reconnects forever with exponential backoff (capped at 5 minutes). Each successful reconnect resets the backoff to `initial_backoff`.
+- **Initialization** retries without a limit, see [Startup](#startup).
+- **Connection loss** reconnects without a limit, with the delay doubling up to 5 minutes. A reconnect that receives from the server resets it to `initial_backoff`.
+- **Redelivery**, see below.
 
-If you set `max_attempts: 1` on a subscriber, only the initialisation circuit breaker is affected — the runtime reconnect loop still runs forever. This is intentional: the alternative is silently dropping a critical infrastructure component when the upstream broker has a hiccup.
+## Redelivery
+
+An event a subscriber's flow fails to complete is delivered again after `initial_backoff`, and the delay doubles with each failed delivery up to 5 minutes. `max_attempts` does not apply; the subscriber's `max_deliver` limits deliveries.
 
 ## App-level configuration
 
