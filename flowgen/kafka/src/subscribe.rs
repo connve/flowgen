@@ -8,9 +8,8 @@
 use crate::config::{default_brokers, ConfigError};
 use flowgen_core::client::Client;
 use flowgen_core::config::ConfigExt;
-use flowgen_core::event::{
-    new_completion_channel, CompletionRx, Event, EventBuilder, EventData, EventExt,
-};
+use flowgen_core::delivery::{Delivered, Delivery};
+use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
 use flowgen_core::retry::RetryConfig;
 use flowgen_core::task::TaskConfig;
 use futures_util::{future, StreamExt};
@@ -24,9 +23,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::Sender;
-use tracing::{error, warn};
+use tokio_util::sync::CancellationToken;
+use tracing::{error, info, warn};
 
-/// Where a partition starts when no offset is stored for it.
+/// Where the partitions start when none of them has a stored offset.
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Default, Deserialize, Serialize)]
 #[serde(try_from = "String", into = "String")]
 pub enum StartOffset {
@@ -84,8 +84,8 @@ pub struct Subscribe {
     pub brokers: String,
     /// Topic to consume.
     pub topic: String,
-    /// Where a partition starts when no offset is stored for it, or when the
-    /// stored offset is no longer retained by the topic.
+    /// Where the partitions start when none of them has a stored offset, or
+    /// when a stored offset is past the end of its partition.
     #[serde(default)]
     pub start_offset: StartOffset,
     /// How long to wait for the flow to complete a record. Waits
@@ -95,15 +95,11 @@ pub struct Subscribe {
     /// How many times a record is sent through the flow before it is skipped.
     /// Delivered until the flow completes it when omitted.
     #[serde(default)]
-    pub max_deliver: Option<u32>,
-    /// Delays between deliveries of a record the flow failed to complete
-    /// (e.g. ["1s", "5s", "1m"]); the last entry repeats.
-    #[serde(default, with = "duration_list", skip_serializing_if = "Vec::is_empty")]
-    pub backoff: Vec<Duration>,
+    pub max_deliver: Option<std::num::NonZeroU32>,
     /// Optional list of upstream task names this task depends on.
     #[serde(default)]
     pub depends_on: Option<Vec<String>>,
-    /// Optional retry configuration for connecting (overrides app-level retry config).
+    /// Optional retry configuration for connecting and redelivery (overrides app-level retry config).
     #[serde(default)]
     pub retry: Option<flowgen_core::retry::RetryConfig>,
 }
@@ -118,30 +114,9 @@ impl Default for Subscribe {
             start_offset: StartOffset::default(),
             ack_timeout: None,
             max_deliver: None,
-            backoff: Vec::new(),
             depends_on: None,
             retry: None,
         }
-    }
-}
-
-/// Serde for a list of human-readable durations.
-mod duration_list {
-    use serde::{Deserialize, Deserializer, Serializer};
-    use std::time::Duration;
-
-    pub fn serialize<S: Serializer>(
-        durations: &[Duration],
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        serializer.collect_seq(durations.iter().map(|d| humantime_serde::Serde::from(*d)))
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<Vec<Duration>, D::Error> {
-        let durations = Vec::<humantime_serde::Serde<Duration>>::deserialize(deserializer)?;
-        Ok(durations.into_iter().map(|d| d.into_inner()).collect())
     }
 }
 
@@ -156,8 +131,8 @@ impl Subscribe {
         if self.brokers.trim().is_empty() {
             return Err(ConfigError::EmptyBrokers);
         }
-        if self.max_deliver == Some(0) {
-            return Err(ConfigError::ZeroMaxDeliver);
+        if matches!(self.ack_timeout, Some(ack_timeout) if ack_timeout.is_zero()) {
+            return Err(ConfigError::ZeroAckTimeout);
         }
         Ok(())
     }
@@ -291,6 +266,27 @@ async fn resolve_start_offset(
     }
 }
 
+/// The offset a partition without a stored offset starts at: `start_offset`
+/// when no partition of the topic has one, and the earliest offset otherwise,
+/// since the partition was added after the others started.
+async fn initial_offset(
+    client: &PartitionClient,
+    start_offset: StartOffset,
+    first_start: bool,
+) -> Result<i64, Error> {
+    match first_start {
+        true => resolve_start_offset(client, start_offset).await,
+        false => {
+            let earliest = partition_offset(client, OffsetAt::Earliest).await?;
+            info!(
+                partition = client.partition(),
+                earliest, "Partition has no stored offset while others of the topic do, starting it at its earliest offset"
+            );
+            Ok(earliest)
+        }
+    }
+}
+
 /// Cache key holding the next offset to consume from one partition.
 fn offset_key(flow_key: &str, topic: &str, partition: i32) -> String {
     format!("flow.{flow_key}.kafka_offset.{topic}.{partition}")
@@ -333,51 +329,6 @@ fn record_meta(partition: i32, record: &RecordAndOffset) -> RecordMeta {
             .iter()
             .map(|(name, value)| (name.clone(), String::from_utf8_lossy(value).into_owned()))
             .collect(),
-    }
-}
-
-/// Why the flow did not complete a delivered record.
-#[derive(thiserror::Error, Debug)]
-enum CompletionFailure {
-    #[error("Flow did not complete the record within {timeout:?}")]
-    Timeout { timeout: Duration },
-    #[error("Flow failed to complete the record: {source}")]
-    Failed {
-        #[source]
-        source: Box<dyn std::error::Error + Send + Sync>,
-    },
-    #[error("Flow dropped the record without completing it")]
-    Dropped,
-}
-
-/// Waits for every leaf of the flow to complete the event.
-async fn wait_for_completion(
-    ack_timeout: Option<Duration>,
-    completion_rx: CompletionRx,
-) -> Result<(), CompletionFailure> {
-    let completion = match ack_timeout {
-        Some(timeout) => match tokio::time::timeout(timeout, completion_rx).await {
-            Ok(completion) => completion,
-            Err(_) => return Err(CompletionFailure::Timeout { timeout }),
-        },
-        None => completion_rx.await,
-    };
-    match completion {
-        Ok(Ok(_)) => Ok(()),
-        Ok(Err(source)) => Err(CompletionFailure::Failed { source }),
-        Err(_) => Err(CompletionFailure::Dropped),
-    }
-}
-
-/// Delays between deliveries of a failing record: the configured schedule
-/// with its last entry repeating, or `fallback` when none is configured.
-fn delivery_delays<'a>(
-    backoff: &'a [Duration],
-    fallback: Box<dyn Iterator<Item = Duration> + Send + 'a>,
-) -> Box<dyn Iterator<Item = Duration> + Send + 'a> {
-    match backoff.last() {
-        Some(last) => Box::new(backoff.iter().copied().chain(std::iter::repeat(*last))),
-        None => fallback,
     }
 }
 
@@ -465,7 +416,8 @@ fn build_event(
 
 impl EventHandler {
     /// Sends the record through the flow until it completes, or until
-    /// `max_deliver` deliveries have failed, then stores the next offset.
+    /// `max_deliver` deliveries have failed, then stores the next offset; a
+    /// stop first leaves the offset as it is.
     #[tracing::instrument(
         skip(self, record, key),
         name = "task.handle",
@@ -476,7 +428,7 @@ impl EventHandler {
         partition: i32,
         record: &RecordAndOffset,
         key: &str,
-    ) -> Result<(), Error> {
+    ) -> Result<Delivered, Error> {
         let event = build_event(
             &self.config.topic,
             partition,
@@ -484,46 +436,32 @@ impl EventHandler {
             self.task_id,
             self.task_type,
         )?;
-        let mut delays =
-            delivery_delays(&self.config.backoff, self.retry_config.reconnect_strategy());
-        let mut deliveries = 0;
-        loop {
-            deliveries += 1;
-            let (completion_state, completion_rx) =
-                new_completion_channel(self.task_context.leaf_count);
-            let mut delivery = event.clone();
-            delivery.completion_tx = Some(completion_state);
-            delivery
-                .send_with_logging(self.tx.as_ref())
-                .context("partition", partition)
-                .context("offset", record.offset)
-                .await
-                .map_err(|source| Error::SendMessage { source })?;
-            if self.tx.is_none() {
-                break;
-            }
-
-            let reason = match wait_for_completion(self.config.ack_timeout, completion_rx).await {
-                Ok(()) => break,
-                Err(reason) => reason,
-            };
-            if self.config.max_deliver.is_some_and(|max| deliveries >= max) {
-                error!(partition, offset = record.offset, deliveries, error = %reason, "Flow failed for record on every delivery, skipping it");
-                break;
-            }
-            let delay = match delays.next() {
-                Some(delay) => delay,
-                None => self.retry_config.initial_backoff,
-            };
-            warn!(partition, offset = record.offset, deliveries, error = %reason, delay_ms = %delay.as_millis(), "Flow failed for record, delivering it again");
-            tokio::time::sleep(delay).await;
+        let delivery = Delivery {
+            downstream: self.tx.is_some(),
+            leaf_count: self.task_context.leaf_count,
+            ack_timeout: self.config.ack_timeout,
+            max_deliver: self.config.max_deliver,
+            retry: &self.retry_config,
+            cancellation: &self.task_context.cancellation_token,
+        };
+        let delivered = delivery
+            .deliver(&event, |attempt| {
+                attempt
+                    .send_with_logging(self.tx.as_ref())
+                    .context("partition", partition)
+                    .context("offset", record.offset)
+            })
+            .await
+            .map_err(|source| Error::SendMessage { source })?;
+        if delivered == Delivered::Stopped {
+            return Ok(delivered);
         }
 
         if let Err(e) = store_offset(self.task_context.cache.as_ref(), key, record.offset + 1).await
         {
             error!(partition, offset = record.offset, error = %e, "Failed to store the next offset");
         }
-        Ok(())
+        Ok(delivered)
     }
 
     /// Where to continue a partition whose next offset the topic no longer
@@ -544,8 +482,13 @@ impl EventHandler {
         }
     }
 
-    /// Consumes one partition in order, resuming after a failed fetch.
-    async fn consume_partition(&self, partition: &Partition) -> Result<(), Error> {
+    /// Consumes one partition in order, resuming after a failed fetch, until
+    /// `cancellation` stops it after the record in flight.
+    async fn consume_partition(
+        &self,
+        partition: &Partition,
+        cancellation: &CancellationToken,
+    ) -> Result<(), Error> {
         let client = &partition.client;
         let mut next_offset = partition.next_offset;
         let mut backoff = self.retry_config.reconnect_strategy();
@@ -554,10 +497,19 @@ impl EventHandler {
                 StreamConsumerBuilder::new(Arc::clone(client), ConsumerStart::At(next_offset))
                     .build();
             let failure = loop {
-                match stream.next().await {
+                let next = tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => return Ok(()),
+                    next = stream.next() => next,
+                };
+                match next {
                     Some(Ok((record, _high_watermark))) => {
-                        self.process_record(client.partition(), &record, &partition.key)
+                        let delivered = self
+                            .process_record(client.partition(), &record, &partition.key)
                             .await?;
+                        if delivered == Delivered::Stopped {
+                            return Ok(());
+                        }
                         next_offset = record.offset + 1;
                         backoff = self.retry_config.reconnect_strategy();
                     }
@@ -570,7 +522,11 @@ impl EventHandler {
                 Some(KafkaError::ServerError {
                     protocol_error: ProtocolError::OffsetOutOfRange,
                     ..
-                }) => self.recover_offset(client, next_offset).await,
+                }) => tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => return Ok(()),
+                    recovered = self.recover_offset(client, next_offset) => recovered,
+                },
                 Some(source) => Err(Error::Consume {
                     topic: self.config.topic.clone(),
                     partition: client.partition(),
@@ -589,14 +545,17 @@ impl EventHandler {
                         None => self.retry_config.initial_backoff,
                     };
                     warn!(partition = client.partition(), error = %e, delay_ms = %delay.as_millis(), "Consuming partition failed, resuming");
-                    tokio::time::sleep(delay).await;
+                    tokio::select! {
+                        _ = cancellation.cancelled() => return Ok(()),
+                        _ = tokio::time::sleep(delay) => {}
+                    }
                 }
             }
         }
     }
 
     /// Returns once the topic has partitions this handler does not consume,
-    /// after storing their earliest offsets so they are read from the start.
+    /// which the next initialization starts at their earliest offsets.
     async fn watch_partitions(&self) -> Result<(), Error> {
         let topic = &self.config.topic;
         loop {
@@ -624,20 +583,6 @@ impl EventHandler {
             if added.is_empty() {
                 continue;
             }
-            for partition in &added {
-                let client = self
-                    .client
-                    .partition_client(topic.as_str(), *partition, UnknownTopicHandling::Retry)
-                    .await
-                    .map_err(|source| Error::PartitionClient {
-                        topic: topic.clone(),
-                        partition: *partition,
-                        source: Box::new(source),
-                    })?;
-                let key = offset_key(&self.task_context.flow.id(), topic, *partition);
-                let earliest = partition_offset(&client, OffsetAt::Earliest).await?;
-                store_offset(self.task_context.cache.as_ref(), &key, earliest).await?;
-            }
             return Err(Error::PartitionsAdded {
                 topic: topic.clone(),
                 partitions: added,
@@ -645,18 +590,23 @@ impl EventHandler {
         }
     }
 
-    /// Consumes all partitions concurrently until the flow stops taking
-    /// events or the topic gains partitions.
+    /// Consumes all partitions concurrently until the task stops, the flow
+    /// stops taking events or the topic gains partitions.
     async fn handle(&self) -> Result<(), Error> {
+        let partitions = self.task_context.cancellation_token.child_token();
         let consume = future::try_join_all(
             self.partitions
                 .iter()
-                .map(|partition| self.consume_partition(partition)),
+                .map(|partition| self.consume_partition(partition, &partitions)),
         );
-        tokio::select! {
-            result = consume => result.map(|_| ()),
-            result = self.watch_partitions() => result,
-        }
+        tokio::pin!(consume);
+        let added = tokio::select! {
+            result = &mut consume => return result.map(|_| ()),
+            added = self.watch_partitions() => added,
+        };
+        partitions.cancel();
+        consume.await?;
+        added
     }
 }
 
@@ -722,8 +672,17 @@ impl flowgen_core::task::runner::Runner for Subscriber {
 
         let cache = self.task_context.cache.as_ref();
         let flow_key = self.task_context.flow.id();
-        let mut partitions = Vec::with_capacity(metadata.partitions.len());
+        let mut stored = Vec::with_capacity(metadata.partitions.len());
         for partition in metadata.partitions {
+            let key = offset_key(&flow_key, &topic, partition);
+            let offset = stored_offset(cache, &key).await?;
+            stored.push((partition, key, offset));
+        }
+        let first_start = stored.iter().all(|(_, _, offset)| offset.is_none());
+
+        let mut partitions = Vec::with_capacity(stored.len());
+        let mut started = Vec::new();
+        for (partition, key, offset) in stored {
             let partition_client = client
                 .partition_client(topic.as_str(), partition, UnknownTopicHandling::Retry)
                 .await
@@ -732,13 +691,13 @@ impl flowgen_core::task::runner::Runner for Subscriber {
                     partition,
                     source: Box::new(source),
                 })?;
-            let key = offset_key(&flow_key, &topic, partition);
-            let next_offset = match stored_offset(cache, &key).await? {
+            let next_offset = match offset {
                 Some(offset) => offset,
                 None => {
                     let offset =
-                        resolve_start_offset(&partition_client, init_config.start_offset).await?;
-                    store_offset(cache, &key, offset).await?;
+                        initial_offset(&partition_client, init_config.start_offset, first_start)
+                            .await?;
+                    started.push((key.clone(), offset));
                     offset
                 }
             };
@@ -747,6 +706,9 @@ impl flowgen_core::task::runner::Runner for Subscriber {
                 key,
                 next_offset,
             });
+        }
+        for (key, offset) in started {
+            store_offset(cache, &key, offset).await?;
         }
 
         Ok(EventHandler {
@@ -816,12 +778,10 @@ impl flowgen_core::task::runner::Runner for Subscriber {
                 },
             };
 
-            tokio::select! {
-                _ = cancellation_token.cancelled() => return Ok(()),
-                result = event_handler.handle() => match result {
-                    Ok(()) => warn!("Subscriber lost connectivity, reinitializing"),
-                    Err(e) => error!(error = %e, "Subscriber lost connectivity, reinitializing"),
-                },
+            match event_handler.handle().await {
+                _ if cancellation_token.is_cancelled() => return Ok(()),
+                Ok(()) => warn!("Subscriber lost connectivity, reinitializing"),
+                Err(e) => error!(error = %e, "Subscriber lost connectivity, reinitializing"),
             }
             lost_connectivity = true;
 
@@ -1017,28 +977,6 @@ mod tests {
     }
 
     #[test]
-    fn test_delivery_delays_repeat_the_last_configured_delay() {
-        let delays: Vec<_> = delivery_delays(
-            &[Duration::from_secs(1), Duration::from_secs(5)],
-            Box::new(std::iter::empty()),
-        )
-        .take(4)
-        .collect();
-
-        assert_eq!(delays, [1, 5, 5, 5].map(Duration::from_secs).to_vec());
-    }
-
-    #[test]
-    fn test_delivery_delays_fall_back_without_a_schedule() {
-        let delays: Vec<_> =
-            delivery_delays(&[], Box::new(std::iter::repeat(Duration::from_millis(7))))
-                .take(2)
-                .collect();
-
-        assert_eq!(delays, vec![Duration::from_millis(7); 2]);
-    }
-
-    #[test]
     fn test_build_event_maps_the_record_onto_the_event() {
         let event = build_event(
             "orders",
@@ -1061,42 +999,6 @@ mod tests {
         assert_eq!(meta["key"], "key-1");
         assert_eq!(meta["headers"]["source"], "test");
         assert!(meta.contains_key("correlation_id"));
-    }
-
-    #[tokio::test]
-    async fn test_wait_for_completion_succeeds() {
-        let (state, rx) = new_completion_channel(1);
-        state.signal_completion(None);
-        assert!(wait_for_completion(None, rx).await.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_wait_for_completion_reports_a_flow_error() {
-        let (state, rx) = new_completion_channel(1);
-        state.signal_completion_with_error("Write failed".to_string());
-        assert!(matches!(
-            wait_for_completion(None, rx).await,
-            Err(CompletionFailure::Failed { source }) if source.to_string() == "Write failed"
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_wait_for_completion_times_out() {
-        let (_state, rx) = new_completion_channel(1);
-        assert!(matches!(
-            wait_for_completion(Some(Duration::from_millis(10)), rx).await,
-            Err(CompletionFailure::Timeout { .. })
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_wait_for_completion_reports_a_dropped_event() {
-        let (state, rx) = new_completion_channel(1);
-        drop(state);
-        assert!(matches!(
-            wait_for_completion(None, rx).await,
-            Err(CompletionFailure::Dropped)
-        ));
     }
 
     #[tokio::test]
@@ -1206,27 +1108,24 @@ mod tests {
     }
 
     #[test]
-    fn test_subscribe_parses_max_deliver_and_backoff() {
-        let json = r#"{ "name": "n", "topic": "t", "max_deliver": 3, "backoff": ["1s", "1m"] }"#;
+    fn test_subscribe_parses_max_deliver() {
+        let json = r#"{ "name": "n", "topic": "t", "max_deliver": 3 }"#;
         let config: Subscribe = serde_json::from_str(json).unwrap();
 
-        assert_eq!(config.max_deliver, Some(3));
-        assert_eq!(
-            config.backoff,
-            vec![Duration::from_secs(1), Duration::from_secs(60)]
-        );
+        assert_eq!(config.max_deliver, std::num::NonZeroU32::new(3));
         assert_eq!(config.render(&serde_json::json!({})).unwrap(), config);
     }
 
     #[test]
-    fn test_subscribe_validate_rejects_zero_max_deliver() {
-        let config = Subscribe {
-            name: "n".into(),
-            topic: "t".into(),
-            max_deliver: Some(0),
-            ..Default::default()
-        };
-        assert_eq!(config.validate(), Err(ConfigError::ZeroMaxDeliver));
+    fn test_subscribe_rejects_a_backoff_list() {
+        let json = r#"{ "name": "n", "topic": "t", "backoff": ["1s"] }"#;
+        assert!(serde_json::from_str::<Subscribe>(json).is_err());
+    }
+
+    #[test]
+    fn test_subscribe_rejects_zero_max_deliver() {
+        let json = r#"{ "name": "n", "topic": "t", "max_deliver": 0 }"#;
+        assert!(serde_json::from_str::<Subscribe>(json).is_err());
     }
 
     #[test]
@@ -1250,5 +1149,22 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(empty_brokers.validate(), Err(ConfigError::EmptyBrokers));
+    }
+
+    #[test]
+    fn test_subscribe_validate_rejects_a_zero_ack_timeout() {
+        let config = |ack_timeout| Subscribe {
+            name: "n".into(),
+            topic: "t".into(),
+            ack_timeout,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            config(Some(Duration::ZERO)).validate(),
+            Err(ConfigError::ZeroAckTimeout)
+        );
+        assert_eq!(config(Some(Duration::from_secs(1))).validate(), Ok(()));
+        assert_eq!(config(None).validate(), Ok(()));
     }
 }

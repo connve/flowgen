@@ -4,12 +4,12 @@
 # unauthenticated to localhost.
 flow:
   labels:
-    display_name: "MongoDB Change Stream"
+    display_name: "MongoDB CDC"
     description: "Watches the sales database for document changes and publishes each as a NATS event."
-    tags: ["mongo", "change-stream", "cdc", "example"]
+    tags: ["mongo", "cdc", "example"]
   tasks:
 
-    - mongodb_change_stream:
+    - mongodb_cdc:
         name: watch_sales
         credentials_path: /etc/mongodb/credentials.json
         db_name: sales

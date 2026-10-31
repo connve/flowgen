@@ -36,9 +36,6 @@ pub enum Error {
     /// Failed to read the flow registry.
     #[error("Failed to read flow registry")]
     RegistryReadFailed,
-    /// Failed to write the flow registry.
-    #[error("Failed to write flow registry")]
-    RegistryWriteFailed,
     /// Failed to build a new flow during hot-reload.
     #[error("Failed to build flow '{flow}': {source}")]
     FlowBuild {
@@ -53,20 +50,34 @@ pub enum Error {
         #[source]
         source: Box<crate::flow::Error>,
     },
-    /// Failed to start tasks for a new flow during hot-reload. The old flow
-    /// is already stopped at this point, so the flow stays down.
-    #[error(
-        "Failed to start tasks for flow '{flow}', flow is stopped until the next successful reload: {source}"
-    )]
-    FlowStartTasks {
-        flow: String,
-        #[source]
-        source: Box<crate::flow::Error>,
-    },
 }
 
-/// How long stopping a flow may take before it is abandoned.
+/// How long a stopped flow's tasks get to finish what they hold before they
+/// are aborted.
 pub const FLOW_STOP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long the tasks of a flow that lost its leader get to hand back what
+/// they hold, and how long a stopped flow may take beyond `FLOW_STOP_TIMEOUT`
+/// before the flow itself is aborted. Fits in the last quarter of the lease,
+/// which a pod that stops leading keeps for its tasks to stop.
+pub(crate) const FLOW_ABORT_GRACE: Duration = Duration::from_secs(5);
+
+/// Waits for a stopped flow to finish and aborts it, which aborts its tasks,
+/// when it takes longer than `FLOW_STOP_TIMEOUT` and `FLOW_ABORT_GRACE`.
+/// `None` when it had to be aborted.
+pub async fn join_stopped_flow(
+    mut join_handle: tokio::task::JoinHandle<()>,
+) -> Option<Result<(), tokio::task::JoinError>> {
+    let timeout = FLOW_STOP_TIMEOUT + FLOW_ABORT_GRACE;
+    match tokio::time::timeout(timeout, &mut join_handle).await {
+        Ok(result) => Some(result),
+        Err(_) => {
+            join_handle.abort();
+            let _ = join_handle.await;
+            None
+        }
+    }
+}
 
 /// Shared servers that flows register their endpoints with.
 #[derive(Clone, Default)]
@@ -121,23 +132,22 @@ pub struct ReconcilerContext {
     /// Same instance the app built at startup, so hot-reloaded flows see the
     /// same peer list as flows started at boot.
     pub peer_registry: Arc<flowgen_core::peer::PeerRegistry>,
+    /// Cancelled when the app shuts down. A reload in progress then releases
+    /// the old flow's lease instead of starting the new flow.
+    pub shutdown: CancellationToken,
 }
 
-/// Runs the reconciler loop until `shutdown` is cancelled.
+/// Runs the reconciler loop until `ctx.shutdown` is cancelled.
 ///
 /// Performs an initial cleanup of stale cache entries (keys whose flows are
 /// already loaded from the filesystem), then drains `WatchEvent`s from the
 /// watcher channel, coalesces rapid sequences into batches, and calls
 /// `reconcile_batch` for each batch.
-pub async fn run(
-    mut rx: tokio::sync::mpsc::Receiver<WatchEvent>,
-    ctx: ReconcilerContext,
-    shutdown: CancellationToken,
-) {
+pub async fn run(mut rx: tokio::sync::mpsc::Receiver<WatchEvent>, ctx: ReconcilerContext) {
     cleanup_stale_cache_entries(&ctx).await;
 
     loop {
-        let batch = match collect_batch(&mut rx, &shutdown).await {
+        let batch = match collect_batch(&mut rx, &ctx.shutdown).await {
             Some(b) => b,
             None => break,
         };
@@ -246,6 +256,9 @@ async fn reconcile_batch(batch: Vec<WatchEvent>, ctx: &ReconcilerContext) {
     }
 
     for (key, event) in by_key {
+        if ctx.shutdown.is_cancelled() {
+            return;
+        }
         match event {
             WatchEvent::Put { value, .. } => reconcile_put(&key, value, ctx).await,
             WatchEvent::Delete { .. } => reconcile_delete(&key, ctx).await,
@@ -259,6 +272,10 @@ async fn reconcile_batch(batch: Vec<WatchEvent>, ctx: &ReconcilerContext) {
 /// If any step of building or starting the new flow fails, the old flow is left
 /// running and the error is logged. The new flow is fully ready before the old
 /// one is touched.
+///
+/// Once the app shuts down, the new flow is not started and the old flow's
+/// lease is released. Shutdown cancels `ctx.shutdown` before it drains the
+/// registry, so checking it under the registry lock leaves no flow behind.
 async fn reconcile_put(key: &str, value: bytes::Bytes, ctx: &ReconcilerContext) {
     // Gate by the cache prefix so non-flow keys are ignored entirely. The
     // derived name is only used until we have the parsed yaml.
@@ -325,30 +342,7 @@ async fn reconcile_put(key: &str, value: bytes::Bytes, ctx: &ReconcilerContext) 
     }
 
     // Stop the old flow before starting tasks so both never consume the same source concurrently.
-    stop_and_deregister(&flow_id, ctx).await;
-
-    let blocking_handles = match new_flow.start_tasks().await {
-        Ok(h) => h,
-        Err(e) => {
-            error!(
-                error = %Error::FlowStartTasks {
-                    flow: flow_id.clone(),
-                    source: Box::new(e),
-                }
-            );
-            return;
-        }
-    };
-
-    // Await blocking handles (webhook/AI gateway registration) before swapping.
-    let results = futures::future::join_all(blocking_handles).await;
-    for result in results {
-        match result {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => error!(flow = %flow_id, "Blocking task failed during hot-reload: {e}"),
-            Err(e) => error!(flow = %flow_id, "Blocking task panicked during hot-reload: {e}"),
-        }
-    }
+    let old = stop_and_deregister(&flow_id, ctx).await;
 
     let flow_display_name = new_flow
         .config
@@ -400,39 +394,49 @@ async fn reconcile_put(key: &str, value: bytes::Bytes, ctx: &ReconcilerContext) 
         },
     };
 
-    let cancellation_token = new_flow
-        .cancellation_token()
-        .unwrap_or_else(tokio_util::sync::CancellationToken::new);
+    let cancellation_token = new_flow.cancellation_token();
 
     let task_manager = new_flow.task_manager();
 
-    let join_handle = new_flow.run();
-
-    // Insert the new handle into the registry.
-    match ctx.flow_registry.write() {
-        Ok(mut registry) => {
-            registry.insert(
-                flow_id.clone(),
-                FlowHandle {
-                    identity: flow_id.clone(),
-                    flow_display_name,
-                    flow_description,
-                    flow_tags,
-                    require_leader_election,
-                    task_count,
-                    connections,
-                    started_at: std::time::SystemTime::now(),
-                    flow_yaml,
-                    cancellation_token,
-                    join_handle,
-                    from_filesystem: false,
-                    task_manager,
-                },
-            );
-            info!(flow = %flow_id, key = %key, "Flow hot-reloaded");
+    let started = {
+        let mut registry = match ctx.flow_registry.write() {
+            Ok(registry) => registry,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        match ctx.shutdown.is_cancelled() {
+            true => false,
+            false => {
+                registry.insert(
+                    flow_id.clone(),
+                    FlowHandle {
+                        identity: flow_id.clone(),
+                        flow_display_name,
+                        flow_description,
+                        flow_tags,
+                        require_leader_election,
+                        task_count,
+                        connections,
+                        started_at: std::time::SystemTime::now(),
+                        flow_yaml,
+                        cancellation_token,
+                        join_handle: new_flow.run(),
+                        from_filesystem: false,
+                        task_manager,
+                    },
+                );
+                true
+            }
         }
-        Err(_) => {
-            error!(error = %Error::RegistryWriteFailed);
+    };
+    match (started, old) {
+        (true, Some(old)) => old.keep_lease().await,
+        (false, Some(old)) => old.release_lease().await,
+        (_, None) => {}
+    }
+    match started {
+        true => info!(flow = %flow_id, key = %key, "Flow hot-reloaded"),
+        false => {
+            info!(flow = %flow_id, key = %key, "Shutting down, the reloaded flow was not started")
         }
     }
 }
@@ -463,52 +467,66 @@ async fn reconcile_delete(key: &str, ctx: &ReconcilerContext) {
         return;
     }
 
-    stop_and_deregister(&flow_name, ctx).await;
+    if let Some(stopped) = stop_and_deregister(&flow_name, ctx).await {
+        stopped.release_lease().await;
+    }
     info!(flow = %flow_name, key = %key, "Flow removed via hot-reload");
 }
 
 /// Cancels a running flow, deregisters its HTTP routes, MCP tools, and AI
 /// gateway entries from the shared servers, and awaits its shutdown.
 ///
-/// Also aborts the old flow's lease renewal background task via the
-/// `TaskManager` it carries. Skipping this step would leave the renewer alive
-/// in tokio after the `Flow` (and its `TaskManager`) is dropped; that orphan
-/// keeps writing renewals to the lease key and races the replacement flow's
-/// renewer under the same pod-level holder identity, producing endless
-/// "Lost lease ownership during renewal" warnings against `current_holder=self`.
-async fn stop_and_deregister(flow_name: &str, ctx: &ReconcilerContext) {
+/// Returns the stopped flow, whose lease the caller keeps for a replacement
+/// or releases.
+#[must_use]
+async fn stop_and_deregister(flow_name: &str, ctx: &ReconcilerContext) -> Option<StoppedFlow> {
     let old_handle = match ctx.flow_registry.write() {
         Ok(mut registry) => registry.remove(flow_name),
-        Err(_) => {
-            error!(error = %Error::RegistryWriteFailed);
-            return;
-        }
+        Err(poisoned) => poisoned.into_inner().remove(flow_name),
     };
 
-    let old = match old_handle {
-        Some(h) => h,
-        None => return,
-    };
+    let old = old_handle?;
 
     old.cancellation_token.cancel();
     ctx.servers.deregister_flow(flow_name);
 
-    match tokio::time::timeout(FLOW_STOP_TIMEOUT, old.join_handle).await {
-        Ok(Ok(())) => info!(flow = %flow_name, "Old flow stopped"),
-        Ok(Err(e)) => warn!(flow = %flow_name, error = %e, "Old flow task panicked or was aborted"),
-        Err(_) => warn!(
-            flow = %flow_name,
-            timeout = ?FLOW_STOP_TIMEOUT,
-            "Flow did not stop in time, proceeding with deregistration"
-        ),
+    match join_stopped_flow(old.join_handle).await {
+        Some(Ok(())) => info!(flow = %flow_name, "Old flow stopped"),
+        Some(Err(e)) => {
+            warn!(flow = %flow_name, error = %e, "Old flow task panicked or was aborted")
+        }
+        None => warn!(flow = %flow_name, "Flow did not stop in time, aborted it"),
     }
 
-    // Abort the lease renewer without deleting the lease key, so this pod keeps
-    // the lease for the replacement flow instead of opening a window for another pod.
-    if let Some(task_manager) = &old.task_manager {
-        task_manager
-            .unregister(&flowgen_core::identity::FlowIdentity::new(flow_name))
-            .await;
+    old.task_manager.map(|task_manager| StoppedFlow {
+        identity: flowgen_core::identity::FlowIdentity::new(flow_name),
+        task_manager,
+    })
+}
+
+/// A stopped flow whose lease this pod may still hold.
+///
+/// Its lease renewer runs until the lease is kept or released; left running
+/// after the flow is gone, it races the replacement flow's renewer under the
+/// same holder identity.
+#[must_use]
+struct StoppedFlow {
+    identity: flowgen_core::identity::FlowIdentity,
+    task_manager: Arc<flowgen_core::task::manager::TaskManager>,
+}
+
+impl StoppedFlow {
+    /// Stops renewing the lease without deleting it, so the replacement flow
+    /// on this pod takes it over before another pod can.
+    async fn keep_lease(self) {
+        self.task_manager.unregister(&self.identity).await;
+    }
+
+    /// Releases the lease, so another pod takes the flow over at once.
+    async fn release_lease(self) {
+        if let Err(e) = self.task_manager.shutdown().await {
+            warn!(flow = %self.identity, error = %e, "Failed to release the lease of a stopped flow");
+        }
     }
 }
 
@@ -589,6 +607,7 @@ fn test_context(prefix: &str) -> ReconcilerContext {
             holder_identity.clone(),
         )),
         holder_identity,
+        shutdown: CancellationToken::new(),
     }
 }
 
@@ -605,7 +624,8 @@ fn build_flow(
         .client_registry(Arc::clone(&ctx.client_registry))
         .inproc(Arc::clone(&ctx.servers.inproc))
         .holder_identity(ctx.holder_identity.clone())
-        .peer_registry(Arc::clone(&ctx.peer_registry));
+        .peer_registry(Arc::clone(&ctx.peer_registry))
+        .servers(ctx.servers.clone());
 
     if let Some(server) = &ctx.servers.http_server {
         builder = builder.service(Arc::clone(server));
@@ -691,6 +711,7 @@ mod tests {
                 holder_identity.clone(),
             )),
             holder_identity,
+            shutdown: CancellationToken::new(),
         };
 
         let name = derive_flow_name("flows.default-test", &ctx);
@@ -822,6 +843,7 @@ flow:
                 holder_identity.clone(),
             )),
             holder_identity,
+            shutdown: CancellationToken::new(),
         }
     }
 
@@ -988,6 +1010,39 @@ flow:
         );
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reload_cut_short_by_shutdown_releases_the_lease_and_starts_nothing() {
+        let ctx = test_context("flows");
+        let led_flow = |interval: &str| {
+            bytes::Bytes::from(format!(
+                "flow:\n  require_leader_election: true\n  tasks:\n    - generate:\n        name: tick\n        interval: {interval}\n"
+            ))
+        };
+        let lease = format!(
+            "{}{}",
+            flowgen_core::executor::LEASE_KEY_PREFIX,
+            flowgen_core::identity::FlowIdentity::new("led").as_key()
+        );
+        reconcile_put("flows.led", led_flow("1h"), &ctx).await;
+        let leased = tokio::time::timeout(Duration::from_secs(5), async {
+            while ctx.system_cache.get(&lease).await.unwrap().is_none() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+
+        ctx.shutdown.cancel();
+        reconcile_put("flows.led", led_flow("2h"), &ctx).await;
+        let running = ctx.flow_registry.read().unwrap().contains_key("led");
+
+        assert!(leased.is_ok(), "the flow never took its lease");
+        assert!(!running, "a reload during shutdown started the new flow");
+        assert!(
+            ctx.system_cache.get(&lease).await.unwrap().is_none(),
+            "the stopped flow kept its lease"
+        );
+    }
+
     /// Each tick appends the flow version to `seq`, so an old flow that keeps
     /// running after the swap shows up as a `1` after the first `2`.
     fn versioned_flow_yaml(version: u8) -> bytes::Bytes {
@@ -1028,11 +1083,37 @@ flow:
         tokio::time::sleep(Duration::from_millis(500)).await;
         reconcile_put("flows.overlap", versioned_flow_yaml(2), &ctx).await;
         tokio::time::sleep(Duration::from_millis(500)).await;
-        stop_and_deregister("overlap", &ctx).await;
+        stop("overlap", &ctx).await;
 
         let seq = read_seq(&ctx, "overlap").await;
         let first_v2 = seq.find('2').expect("replacement flow should have ticked");
         assert!(seq.starts_with('1'), "old flow should have ticked: {seq}");
+        assert!(
+            !seq[first_v2..].contains('1'),
+            "old flow still ticking after reload: {seq}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hot_reload_replaces_running_flow_after_the_registry_lock_is_poisoned() {
+        let ctx = test_context("flows");
+
+        reconcile_put("flows.poisoned", versioned_flow_yaml(1), &ctx).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let registry = Arc::clone(&ctx.flow_registry);
+        let poisoned = std::thread::spawn(move || {
+            let _registry = registry.write();
+            panic!("Poisoning the registry lock");
+        })
+        .join();
+        reconcile_put("flows.poisoned", versioned_flow_yaml(2), &ctx).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        stop("poisoned", &ctx).await;
+
+        let seq = read_seq(&ctx, "poisoned").await;
+        let first_v2 = seq.find('2').expect("replacement flow should have ticked");
+        assert!(poisoned.is_err());
+        assert!(ctx.flow_registry.is_poisoned());
         assert!(
             !seq[first_v2..].contains('1'),
             "old flow still ticking after reload: {seq}"
@@ -1063,7 +1144,7 @@ flow:
         tokio::time::sleep(Duration::from_millis(50)).await;
         reconcile_put("flows.same", versioned_flow_yaml(2), &ctx).await;
         let revived = started_at(&ctx);
-        stop_and_deregister("same", &ctx).await;
+        stop("same", &ctx).await;
 
         assert!(first.is_some(), "flow should be running");
         assert_eq!(first, unchanged, "the same source restarted the flow");
@@ -1093,7 +1174,7 @@ flow:
         let before = read_seq(&ctx, "keep").await.len();
         tokio::time::sleep(Duration::from_millis(500)).await;
         let after = read_seq(&ctx, "keep").await.len();
-        stop_and_deregister("keep", &ctx).await;
+        stop("keep", &ctx).await;
 
         assert!(
             after > before,
@@ -1117,22 +1198,6 @@ flow:
         ))
     }
 
-    fn probe_registration() -> flowgen_http::server::EndpointRegistration {
-        let (tx, _rx) = tokio::sync::mpsc::channel(1);
-        flowgen_http::server::EndpointRegistration {
-            flow_name: "probe".to_string(),
-            config: Arc::new(flowgen_http::config::Processor::default()),
-            credentials: None,
-            auth_provider: None,
-            tx,
-            task_id: 0,
-            task_type: "probe",
-            response_registry: Arc::new(flowgen_core::registry::ResponseRegistry::new()),
-            leaf_count: 1,
-            cancellation_token: CancellationToken::new(),
-        }
-    }
-
     #[tokio::test(flavor = "multi_thread")]
     async fn hot_reload_keeps_webhook_route_registered() {
         let mut ctx = test_context("flows");
@@ -1145,15 +1210,168 @@ flow:
         let reload_started = std::time::Instant::now();
         reconcile_put("flows.hook", webhook_flow_yaml("debug"), &ctx).await;
         let reload_took = reload_started.elapsed();
-        let route_taken = server
-            .try_register("/receive".to_string(), probe_registration())
-            .is_err();
-        stop_and_deregister("hook", &ctx).await;
+        let route_taken = wait_for_route(&server, "hook").await;
+        stop("hook", &ctx).await;
 
         assert!(route_taken, "reloaded webhook flow lost its route");
         assert!(
             reload_took < Duration::from_secs(10),
             "old webhook flow took {reload_took:?} to stop"
+        );
+    }
+
+    /// Waits up to two seconds for `flow` to hold the `/receive` route.
+    async fn wait_for_route(server: &flowgen_http::server::EndpointServer, flow: &str) -> bool {
+        for _ in 0..200 {
+            if server.is_registered_by("/receive", flow) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        false
+    }
+
+    async fn stop(flow: &str, ctx: &ReconcilerContext) {
+        if let Some(stopped) = stop_and_deregister(flow, ctx).await {
+            stopped.release_lease().await;
+        }
+    }
+
+    fn with_fast_retry(mut ctx: ReconcilerContext) -> ReconcilerContext {
+        ctx.app_config = Arc::new(crate::config::AppConfig {
+            retry: Some(flowgen_core::retry::RetryConfig {
+                max_attempts: Some(1),
+                initial_backoff: Duration::from_millis(10),
+            }),
+            ..(*ctx.app_config).clone()
+        });
+        ctx
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_flow_whose_task_fails_starts_again() {
+        let ctx = with_fast_retry(test_context("flows"));
+        let yaml = r#"
+flow:
+  tasks:
+    - generate:
+        name: once
+        count: 1
+        allow_rerun: true
+    - script:
+        name: record
+        code: |
+          let seq = ctx.cache.get("seq");
+          if seq == () { seq = ""; }
+          ctx.cache.put("seq", seq + "x");
+          throw "failed after recording";
+"#;
+
+        reconcile_put("flows.restart", bytes::Bytes::from(yaml), &ctx).await;
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let runs = read_seq(&ctx, "restart").await.len();
+        let stopped = std::time::Instant::now();
+        stop("restart", &ctx).await;
+
+        assert!(runs >= 2, "the flow ran {runs} time(s), expected restarts");
+        assert!(
+            stopped.elapsed() < Duration::from_secs(5),
+            "a restarting flow took {:?} to stop",
+            stopped.elapsed()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_restarted_webhook_flow_registers_its_route_again() {
+        let mut ctx = with_fast_retry(test_context("flows"));
+        let server = Arc::new(flowgen_http::server::EndpointServer::new(
+            "/api".to_string(),
+        ));
+        ctx.servers.http_server = Some(Arc::clone(&server));
+        let yaml = r#"
+flow:
+  tasks:
+    - http_endpoint:
+        name: receive
+        method: POST
+        endpoint: /receive
+    - log:
+        name: out
+    - generate:
+        name: once
+        count: 1
+        allow_rerun: true
+        depends_on: []
+    - script:
+        name: record
+        code: |
+          let seq = ctx.cache.get("seq");
+          if seq == () { seq = ""; }
+          ctx.cache.put("seq", seq + "x");
+          if seq == "" { throw "failed after recording"; }
+"#;
+
+        reconcile_put("flows.hook", bytes::Bytes::from(yaml), &ctx).await;
+        let mut runs = 0;
+        for _ in 0..100 {
+            runs = read_seq(&ctx, "hook").await.len();
+            if runs >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let route_taken = wait_for_route(&server, "hook").await;
+        stop("hook", &ctx).await;
+
+        assert!(runs >= 2, "the flow ran {runs} time(s), expected a restart");
+        assert!(route_taken, "restarted webhook flow lost its route");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_flow_with_a_buffer_behind_a_webhook_restarts_without_waiting_for_the_stop_timeout(
+    ) {
+        let mut ctx = with_fast_retry(test_context("flows"));
+        ctx.servers.http_server = Some(Arc::new(flowgen_http::server::EndpointServer::new(
+            "/api".to_string(),
+        )));
+        let yaml = r#"
+flow:
+  tasks:
+    - http_endpoint:
+        name: receive
+        method: POST
+        endpoint: /receive
+    - buffer:
+        name: batch
+        size: 10
+    - generate:
+        name: once
+        count: 1
+        allow_rerun: true
+        depends_on: []
+    - script:
+        name: record
+        code: |
+          let seq = ctx.cache.get("seq");
+          if seq == () { seq = ""; }
+          ctx.cache.put("seq", seq + "x");
+          if seq == "" { throw "failed after recording"; }
+"#;
+
+        reconcile_put("flows.batched", bytes::Bytes::from(yaml), &ctx).await;
+        let started = std::time::Instant::now();
+        let mut runs = 0;
+        while runs < 2 && started.elapsed() < FLOW_STOP_TIMEOUT {
+            runs = read_seq(&ctx, "batched").await.len();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let restarted_after = started.elapsed();
+        stop("batched", &ctx).await;
+
+        assert!(runs >= 2, "the flow ran {runs} time(s), expected a restart");
+        assert!(
+            restarted_after < Duration::from_secs(10),
+            "the flow took {restarted_after:?} to restart"
         );
     }
 }

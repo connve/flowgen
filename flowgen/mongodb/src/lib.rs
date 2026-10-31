@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// MongoDB change data capture task.
-pub mod change_stream;
+pub mod cdc;
 /// Configuration for MongoDB client creator.
 pub mod client;
 /// MongoDB collection read/write/upsert task.
@@ -51,11 +51,16 @@ impl TaskMeta for collection::Collection {
     }
 }
 
-impl TaskMeta for change_stream::ChangeStream {
+impl TaskMeta for cdc::Cdc {
     const CONNECTOR: Connector = CONNECTOR;
+    const RUNS_UNTIL_STOPPED: bool = true;
 
     fn connections(&self) -> Vec<Connection> {
         connections(&self.credentials_path)
+    }
+
+    fn validate(&self) -> Result<(), TaskError> {
+        Ok(cdc::Cdc::validate(self)?)
     }
 }
 
@@ -77,9 +82,9 @@ impl Task for collection::Collection {
     }
 }
 
-impl Task for change_stream::ChangeStream {
+impl Task for cdc::Cdc {
     async fn run(self, io: TaskIo, context: Arc<TaskContext>) -> Result<(), TaskError> {
-        let mut builder = change_stream::ChangeStreamReaderBuilder::new()
+        let mut builder = cdc::ProcessorBuilder::new()
             .config(Arc::new(self))
             .task_id(io.task_id)
             .task_type(io.task_type)

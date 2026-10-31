@@ -7,7 +7,10 @@ use crate::event::Event;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tracing::{error, Instrument};
+use tracing::{error, warn, Instrument};
+
+/// How often an event handler that is still running is reported.
+const STILL_RUNNING_REPORT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Trait for executing workflow tasks asynchronously.
 ///
@@ -152,7 +155,7 @@ async fn handle_with_retry<H: Handler>(
     cancellation: &tokio_util::sync::CancellationToken,
 ) {
     loop {
-        let error = match handler.handle(event.clone()).await {
+        let error = match handle_reporting_progress(handler, &event).await {
             Ok(()) => return,
             Err(error) => error,
         };
@@ -178,6 +181,28 @@ async fn handle_with_retry<H: Handler>(
             let message = handler.failure_message(&event, &error);
             event.forward_failure(handler.sender(), message).await;
             return;
+        }
+    }
+}
+
+/// Handles `event`, warning every `STILL_RUNNING_REPORT_INTERVAL` while the
+/// handler runs, since a call without a timeout can hold the event forever.
+async fn handle_reporting_progress<H: Handler>(handler: &H, event: &Event) -> Result<(), H::Error> {
+    let started = tokio::time::Instant::now();
+    let handling = handler.handle(event.clone());
+    tokio::pin!(handling);
+    let mut reports = tokio::time::interval_at(
+        started + STILL_RUNNING_REPORT_INTERVAL,
+        STILL_RUNNING_REPORT_INTERVAL,
+    );
+    loop {
+        tokio::select! {
+            result = &mut handling => return result,
+            _ = reports.tick() => warn!(
+                elapsed_secs = started.elapsed().as_secs(),
+                correlation_id = %event.correlation_id(),
+                "Event handler is still running"
+            ),
         }
     }
 }
@@ -434,6 +459,28 @@ mod tests {
             .unwrap();
 
         assert_eq!(handler.started.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_handler_that_runs_for_long_still_hands_back_its_result() {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let (failed_tx, mut failed_rx) = tokio::sync::mpsc::channel(1);
+        let handler = gated(0, true, false, Some(failed_tx));
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let running = run(rx, &handler, Default::default(), 1, &cancellation);
+        tx.send(event()).await.unwrap();
+        drop(tx);
+        started(&handler, 1).await;
+
+        tokio::time::sleep(STILL_RUNNING_REPORT_INTERVAL * 2 + std::time::Duration::from_secs(1))
+            .await;
+        handler.open.add_permits(1);
+        running.await.unwrap();
+
+        assert_eq!(
+            failed_rx.recv().await.unwrap().error.as_deref(),
+            Some("bad input")
+        );
     }
 
     #[tokio::test]

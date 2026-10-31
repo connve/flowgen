@@ -3948,7 +3948,43 @@ pub(crate) mod tests {
         assert!(released, "the writing pod stops at its next save");
         assert_eq!(last.pending, None);
         assert_eq!(last.error, None);
+        assert_eq!(last.stopped, Some(true));
         assert_eq!(again.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_reply_stopped_on_its_pod_keeps_its_text_and_is_marked_stopped() {
+        let (gateway, frames) = fed_gateway().await;
+        let state = Arc::new(replying_state(&gateway));
+
+        start(&state, None, "a1", "a").await;
+        frames
+            .send(data(r#"{"choices":[{"delta":{"content":"b"}}]}"#))
+            .unwrap();
+        let mut stopped = StatusCode::NOT_FOUND;
+        for _ in 0..50 {
+            if stored(&state, "a1")
+                .await
+                .and_then(|conversation| conversation.messages.last().cloned())
+                .is_some_and(|last| last.content == "b")
+            {
+                stopped = crate::agent_reply::stop_reply(
+                    State(Arc::clone(&state)),
+                    AxumPath("a1".to_string()),
+                    None,
+                )
+                .await
+                .status();
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let reply = reply_ended(&state, "a1").await;
+
+        assert_eq!(stopped, StatusCode::NO_CONTENT);
+        assert_eq!(reply.content, "b");
+        assert_eq!(reply.error, None);
+        assert_eq!(reply.stopped, Some(true));
     }
 
     #[tokio::test]

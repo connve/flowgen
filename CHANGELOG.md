@@ -1,5 +1,142 @@
 # Changelog
 
+## 0.153.0
+
+### Breaking
+
+- `backoff` is removed from `nats_jetstream_subscribe` and `kafka_subscribe`;
+  a flow that sets it fails to load. A failed event is delivered again after
+  the `retry` `initial_backoff`, doubling up to 5 minutes. `retry` is set for
+  the app and can be overridden per task.
+- `nats_jetstream_subscribe` without `backoff` redelivers a failed message
+  after the retry delay, not after `ack_wait`.
+- `mongodb_change_stream` is renamed to `mongodb_cdc`.
+- `salesforce_pubsubapi_subscribe` `num_requested` takes 1 to 100, the
+  server maximum, and defaults to 100; a flow with another value fails to
+  load.
+- An Arrow record batch read as JSON, by a task, script, template or a
+  message a task sends, has every column as a key with `null` for a null
+  value, and binary values in base64, as for byte payloads.
+
+### Added
+
+- `postgres_query` task: runs a SQL statement against PostgreSQL and emits
+  the rows as Arrow record batches.
+- `postgres_write` task: writes the rows of each event into a table with
+  `COPY` in one transaction. Rows are appended, or upserted or deleted by the
+  table's primary key with `change_type`.
+- `postgres_cdc` task: emits each row change of the tables in a publication,
+  read through logical replication. The position is confirmed to the slot
+  once the flow completes a transaction. With `initial_copy`, the existing
+  rows are emitted first in batches of `copy_batch_size`, read at the
+  position the slot starts from and with the publication's row filters and
+  column lists. A copy started again keeps the slot and its changes. The
+  position is reported at least every `status_interval`, also while the flow
+  works on a change, and a slot that lost WAL fails the task with its name.
+  PostgreSQL connections send TCP keepalives.
+- `max_deliver` on `salesforce_pubsubapi_subscribe`, and `max_deliver` and
+  `ack_timeout` on `mongodb_cdc`.
+- `initial_copy` on `mongodb_cdc`: emits the existing documents in batches of
+  `copy_batch_size` before the changes, on the first start and when the oplog
+  no longer holds the stored position.
+- Agents: Up and Down in the message box bring back the prompts sent in the
+  conversation. A reply stopped with Esc is marked Stopped and keeps its
+  text (`stopped` on the conversation message).
+
+### Changed
+
+- `/readyz` returns `200` after startup, also with no flows, and `503` after
+  a shutdown signal. `/livez` answers during startup.
+- Task startup retries without a limit, up to every 5 minutes.
+  `max_attempts` applies to events only.
+- A flow restarts when one of its tasks fails, up to every 5 minutes. A
+  webhook or MCP tool that fails to register restarts its flow the same way,
+  and startup goes on without waiting for it.
+- A stopping `nats_jetstream_subscribe` hands its unfinished messages back to
+  NATS for immediate redelivery and stops its progress acks, so a reloaded
+  flow gets the message that was in flight. "Subscriber lost connectivity" is
+  logged only when the connection is lost.
+- `nats_jetstream_subscribe` updates an existing durable to the flow's
+  `ack_timeout`, `max_deliver`, `max_ack_pending` and `max_waiting`, and
+  clears a `backoff` older versions set. When NATS refuses, it logs a warning
+  with the differences.
+- A subscriber or CDC task that returns while its flow runs fails the flow,
+  which logs an error and restarts with backoff.
+- `nats_jetstream_subscribe` delivers a message published while its pull
+  request waits at once, also after the server's idle heartbeat. Progress
+  acks and `ack_timeout` run from receipt, also while the message waits for a
+  busy next task, and a message held for more than 5 minutes is logged every
+  5 minutes. The subscriber's JetStream requests use the client's request
+  timeout, independent of `ack_timeout`. Messages that arrive while the
+  subscriber stops are handed back, a message the flow completes as the
+  subscriber stops is acked, and a flow without a next task acks each
+  message once read.
+- A pod that loses the leadership of a flow gives its tasks up to 5 seconds
+  to hand back the messages they hold, so the new leader gets them at once.
+- A leader that cannot renew its lease for 45 seconds stops the flow and
+  tries to acquire the lease again, so its tasks have stopped before the
+  60-second lease expires. A pod that hands a lease over to another pod
+  releases it once the flow's tasks have stopped.
+- Shutdown releases the leases of hot-reloaded flows too, and a reload in
+  progress at shutdown releases the old flow's lease without starting the
+  new flow. A flow removed by hot reload releases its lease.
+- A flow that fails or loses its leadership removes its webhooks and tools
+  before its tasks stop.
+- `buffer` renders `partition_key` as text, so number fields and keys such
+  as `{{a}}.{{b}}` keep their digits as written. An event whose key renders
+  empty, or with data other than JSON, is passed on as failed and the buffer
+  keeps running. A failed flush fails the flow, which restarts.
+- An event a task handles, or a source's event the flow holds, for more than
+  5 minutes is logged every 5 minutes.
+- A stopped `salesforce_pubsubapi_subscribe` returns at once, also while
+  the topic is idle.
+- A record in flight when `kafka_subscribe` stops is read again on the next
+  start, also with `max_deliver`. A record the flow completes as the
+  subscriber stops, or as the topic gains partitions, keeps its stored
+  offset and is not read again.
+- `salesforce_pubsubapi_subscribe` runs batches one at a time and asks for
+  the next one when a batch starts, so the stream stays open while the flow
+  works; a batch that waits more than 30 seconds asks for one event at a
+  time. An event the flow fails is delivered again, also without a durable
+  consumer. A managed subscription commits the replay ID of each finished
+  batch, and a durable consumer stores the position Salesforce keepalives
+  report on a quiet topic. A replay ID rejected after the subscription opens
+  is cleared too. The reconnect backoff resets once the new stream delivers
+  a response.
+- `mongodb_cdc` stores the resume token of each completed change and continues
+  after it on restart. A change the flow fails is delivered again after the
+  retry delay, without reconnecting.
+- `mongodb_cdc` watches a dropped and re-created database again after its
+  `invalidate` change, reopens a stream the server closed, and stores its
+  position after 60 quiet seconds. A stored position the oplog no longer
+  holds is logged as an error.
+- A `kafka_subscribe` partition without a stored offset while others of the
+  topic have one starts at its earliest record; `start_offset` applies when
+  no partition has one.
+- `ack_timeout: 0s` fails to load on `kafka_subscribe` and `mongodb_cdc`.
+- A deleted KV bucket is recreated on the next cache or `nats_kv_store`
+  operation.
+- Agents: dialogs are centred, tool steps show the full flow name, and the
+  chat fades out above the message box.
+- `mssql_query` streams the rows of its first result in batches, keeps the
+  result columns when there are no rows, and retries connection errors,
+  deadlocks and transient server errors only. `query_timeout` covers getting
+  a connection and the first result, and each later answer of the server
+  while the rows are read; `connection_timeout` covers the login. TLS uses
+  rustls 0.23 through tiberius 0.13.
+- Braze tasks use braze 0.4.0.
+- Salesforce tasks use salesforce_core 0.24.0.
+
+### Fixed
+
+- `gcp_bigquery_storage_write` writes the binary columns of a record batch
+  to BYTES fields with their bytes; they were read as base64 from hex text.
+- `mssql_query` keeps the values of every column type: a nullable `bigint`
+  is `Int64`, a nullable `float` is `Float64`, `decimal` and `numeric` are
+  exact text, `tinyint` is `UInt8`, and `date`, `time`, `datetime2`,
+  `datetimeoffset` and binary columns carry their values.
+- A SQL Server password with `;` or `=` connects.
+
 ## 0.152.0
 
 ### Breaking

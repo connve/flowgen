@@ -1,0 +1,32 @@
+# Capture row changes of a PostgreSQL publication and publish each to NATS.
+#
+# Required:
+#   - wal_level = logical and a user with the REPLICATION attribute
+#   - CREATE PUBLICATION orders_pub FOR TABLE orders;
+#   - PostgreSQL credentials at /etc/postgres/credentials.json
+flow:
+  require_leader_election: true
+  labels:
+    display_name: "PostgreSQL CDC to NATS"
+    description: "Reads every insert, update and delete of the orders publication and publishes each change to a NATS JetStream subject."
+    tags: ["postgres", "cdc", "nats", "example"]
+  tasks:
+
+    # Row changes; the slot is created on first start.
+    - postgres_cdc:
+        name: watch_orders
+        credentials_path: /etc/postgres/credentials.json
+        publication: orders_pub
+        slot: flowgen_orders
+        max_deliver: 5
+
+    # One NATS message per change.
+    - nats_jetstream_publish:
+        name: publish_changes
+        credentials_path: /etc/nats/credentials.json
+        subject: "postgres.changes"
+        stream:
+          create_or_update: true
+          name: postgres_changes
+          subjects: ["postgres.changes"]
+          max_age: "24h"

@@ -1,6 +1,6 @@
 {
 	"name": "flowgen-web",
-	"version": "0.152.0",
+	"version": "0.153.0",
 	"private": true,
 	"scripts": {
 		"gen-api": "openapi-typescript ../flowgen/api/client/openapi.yaml -o src/lib/api/generated.ts",

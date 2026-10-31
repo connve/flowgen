@@ -250,6 +250,7 @@ pub(crate) async fn start_reply(
         steps: Vec::new(),
         pending: Some(true),
         error: None,
+        stopped: None,
     };
     let (sender, receiver) = watch::channel(reply.clone());
     let stop = CancellationToken::new();
@@ -291,6 +292,7 @@ pub(crate) async fn start_reply(
             steps: Vec::new(),
             pending: None,
             error: None,
+            stopped: None,
         });
         let history = chat_messages(&conversation.messages);
         conversation.messages.push(reply.clone());
@@ -407,6 +409,7 @@ pub(crate) async fn stop_reply(
         match conversation.messages.last_mut() {
             Some(last) if last.pending == Some(true) => {
                 last.pending = None;
+                last.stopped = Some(true);
                 conversation.updated_at = now_millis();
                 Ok(Edit::Write(conversation, true))
             }
@@ -712,8 +715,10 @@ impl Store {
 
 /// How a reply's stream ended.
 enum Ending {
-    /// The agent finished, or the reply stopped on this pod.
+    /// The agent finished or failed.
     Finished,
+    /// The user stopped the reply on this pod.
+    Halted,
     /// The reply stopped elsewhere; its message stays as stored.
     Stopped(api::ConversationMessage),
     /// The conversation was deleted.
@@ -731,7 +736,7 @@ async fn run(
     let mut reply = sender.borrow().clone();
     let ending = tokio::select! {
         ending = stream_reply(&store, &sender, &mut reply, request) => ending,
-        _ = stop.cancelled() => Ok(Ending::Finished),
+        _ = stop.cancelled() => Ok(Ending::Halted),
     };
     let ending = match ending {
         Ok(ending) => ending,
@@ -743,6 +748,10 @@ async fn run(
     };
     let ended = match ending {
         Ending::Finished => finish(&store, reply, followed(&sender)).await,
+        Ending::Halted => {
+            reply.stopped = Some(true);
+            finish(&store, reply, followed(&sender)).await
+        }
         Ending::Stopped(stored) => stored,
         Ending::Deleted => {
             reply.pending = None;
@@ -1002,6 +1011,7 @@ mod tests {
             steps: Vec::new(),
             pending: Some(true),
             error: None,
+            stopped: None,
         }
     }
 

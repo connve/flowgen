@@ -600,3 +600,43 @@ async fn put_entries_writes_changes_and_prunes_the_rest_under_the_prefix() {
         vec!["flows.a", "flows.b"]
     );
 }
+
+#[tokio::test]
+#[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
+async fn a_put_after_the_bucket_is_deleted_recreates_it() {
+    let (_nats, url) = start_nats().await;
+    let (tx, mut rx) = spawn_processor(KvStore {
+        name: "kv_put".to_string(),
+        url: url.clone(),
+        bucket: "kv_recreate_bucket".to_string(),
+        operation: Operation::Put,
+        key: Some("greeting".to_string()),
+        ..Default::default()
+    })
+    .await;
+    tx.send(drive_event("trigger", serde_json::json!({"content": "a"})))
+        .await
+        .expect("send first put");
+    tokio::time::timeout(STEP_TIMEOUT, rx.recv())
+        .await
+        .expect("first put returns")
+        .expect("channel open");
+
+    let client = async_nats::connect(&url).await.expect("nats connect");
+    async_nats::jetstream::new(client)
+        .delete_key_value("kv_recreate_bucket")
+        .await
+        .expect("delete bucket");
+
+    tx.send(drive_event("trigger", serde_json::json!({"content": "b"})))
+        .await
+        .expect("send second put");
+    tokio::time::timeout(STEP_TIMEOUT, rx.recv())
+        .await
+        .expect("second put returns after the bucket is recreated")
+        .expect("channel open");
+    assert_eq!(
+        list_keys(url, "kv_recreate_bucket", "").await,
+        vec!["greeting".to_string()]
+    );
+}

@@ -22,7 +22,7 @@ debug = "line-tables-only"
 allow_attributes = "deny"
 
 [workspace.package]
-version = "0.152.0"
+version = "0.153.0"
 authors = ["CONNVE"]
 license = "MPL-2.0"
 edition = "2021"
@@ -30,7 +30,7 @@ rust-version = "1.97.1"
 publish = false
 
 [workspace.dependencies]
-salesforce_core = { version = "0.23.0" }
+salesforce_core = { version = "0.24.0" }
 google-cloud-bigquery = { package = "gcloud-bigquery", git = "https://github.com/connve/google-cloud-rust" }
 gcloud-auth = { git = "https://github.com/connve/google-cloud-rust" }
 gcloud-gax = { git = "https://github.com/connve/google-cloud-rust" }
@@ -64,7 +64,11 @@ tokio = { version = "1.48", features = ["rt-multi-thread"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 thiserror = { version = "1.0" }
-tiberius = { version = "0.12", features = ["chrono"] }
+tiberius = { version = "0.13", default-features = false, features = [
+    "chrono",
+    "tds73",
+    "rustls",
+] }
 futures-util = { version = "0.3" }
 futures = { version = "0.3" }
 reqwest = { version = "0.13.1", default-features = false, features = [
@@ -101,7 +105,7 @@ flate2 = { version = "1.0", default-features = false, features = [
     "rust_backend",
 ] }
 tar = { version = "0.4", default-features = false }
-braze = { version = "0.3.1", features = ["export", "messaging"] }
+braze = { version = "0.4.0", features = ["export", "messaging"] }
 klaviyo = { version = "0.4.0", features = [
     "campaigns",
     "events",
@@ -132,7 +136,10 @@ time = { version = "0.3" }
 base64 = { version = "0.22" }
 http = { version = "1.4" }
 bb8 = { version = "0.9" }
-bb8-tiberius = { version = "0.16" }
+bb8-postgres = { version = "0.9" }
+tokio-postgres = { version = "0.7" }
+tokio-postgres-rustls = { version = "0.14" }
+postgres-replication = { git = "https://github.com/connve/rust-postgres" }
 async-trait = { version = "0.1" }
 proc-macro2 = { version = "1.0" }
 quote = { version = "1.0" }
@@ -189,3 +196,10 @@ rskafka = { git = "https://github.com/connve/rskafka", default-features = false,
 ] }
 rustls-native-certs = { version = "0.8" }
 pkcs8 = { version = "0.10", features = ["encryption", "pem", "3des"] }
+
+# Logical replication (CopyBoth) is not in upstream rust-postgres yet
+# (rust-postgres/rust-postgres#778); the fork carries it for the whole tree.
+[patch.crates-io]
+tokio-postgres = { git = "https://github.com/connve/rust-postgres" }
+postgres-protocol = { git = "https://github.com/connve/rust-postgres" }
+postgres-types = { git = "https://github.com/connve/rust-postgres" }

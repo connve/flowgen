@@ -8,13 +8,13 @@ use flowgen_core::config::ConfigExt;
 use flowgen_core::event::{Event, EventData, EventExt};
 use flowgen_core::task::runner::Runner;
 use flowgen_core::task::TaskConfig;
-use futures_util::future;
 use salesforce_core::pubsubapi::{ProducerEvent, PublishRequest, SchemaRequest, TopicRequest};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::task::JoinSet;
 use tracing::{error, warn, Instrument};
 
 /// Configuration for publishing events to a Salesforce Pub/Sub API topic.
@@ -263,7 +263,7 @@ impl Runner for Processor {
             None => self.task_context.max_in_flight,
         };
         let slots = Arc::new(tokio::sync::Semaphore::new(max_in_flight.get()));
-        let mut handlers = Vec::new();
+        let mut handlers = JoinSet::new();
 
         loop {
             let slot = tokio::select! {
@@ -284,7 +284,7 @@ impl Runner for Processor {
                 (Some(slot), Some(event)) => (slot, event),
                 _ => {
                     rx.close();
-                    future::join_all(handlers).await;
+                    while handlers.join_next().await.is_some() {}
                     return Ok(());
                 }
             };
@@ -301,7 +301,7 @@ impl Runner for Processor {
                     .await;
                 let rebuilt = tokio::select! {
                     _ = self.task_context.cancellation_token.cancelled() => {
-                        future::join_all(handlers).await;
+                        while handlers.join_next().await.is_some() {}
                         return Ok(());
                     }
                     result = self.init_retrying(&retry_config) => result,
@@ -322,7 +322,7 @@ impl Runner for Processor {
             let event_handler = Arc::clone(&event_handler);
             let needs_reinit = Arc::clone(&needs_reinit);
             let retry_strategy = retry_config.strategy();
-            let handle = tokio::spawn(
+            handlers.spawn(
                 async move {
                     let _slot = slot;
                     let result = tokio_retry::Retry::spawn(retry_strategy, || async {
@@ -358,8 +358,7 @@ impl Runner for Processor {
                 }
                 .instrument(tracing::Span::current()),
             );
-            handlers.push(handle);
-            handlers.retain(|h| !h.is_finished());
+            while handlers.try_join_next().is_some() {}
         }
     }
 }

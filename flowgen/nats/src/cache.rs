@@ -1,6 +1,8 @@
 //! NATS JetStream Key-Value store cache implementation.
 
+use async_nats::jetstream::context::CreateKeyValueErrorKind;
 use flowgen_core::client::Client as _;
+use std::future::Future;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -79,6 +81,50 @@ pub enum Error {
     MissingBuilderAttribute(String),
 }
 
+/// Whether `error` or one of its sources says the stream behind a KV bucket does not exist.
+pub(crate) fn stream_missing(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = Some(error);
+    while let Some(error) = current {
+        if says_stream_missing(error) {
+            return true;
+        }
+        current = error.source();
+    }
+    false
+}
+
+/// Whether `error` itself is "no responders" for the bucket's subjects or a
+/// JetStream "stream not found".
+fn says_stream_missing(error: &(dyn std::error::Error + 'static)) -> bool {
+    use async_nats::jetstream::context::{
+        PublishError, PublishErrorKind, RequestError, RequestErrorKind,
+    };
+    use async_nats::jetstream::stream::{
+        ConsumerError, ConsumerErrorKind, DirectGetError, DirectGetErrorKind,
+    };
+    use async_nats::jetstream::ErrorCode;
+
+    if let Some(e) = error.downcast_ref::<PublishError>() {
+        return e.kind() == PublishErrorKind::StreamNotFound;
+    }
+    if let Some(e) = error.downcast_ref::<DirectGetError>() {
+        return matches!(e.kind(), DirectGetErrorKind::ErrorResponse(status, _) if status == async_nats::StatusCode::NO_RESPONDERS);
+    }
+    if let Some(e) = error.downcast_ref::<RequestError>() {
+        return e.kind() == RequestErrorKind::NoResponders;
+    }
+    if let Some(e) = error.downcast_ref::<async_nats::RequestError>() {
+        return e.kind() == async_nats::RequestErrorKind::NoResponders;
+    }
+    if let Some(e) = error.downcast_ref::<ConsumerError>() {
+        return matches!(e.kind(), ConsumerErrorKind::JetStream(source) if source.error_code() == ErrorCode::STREAM_NOT_FOUND);
+    }
+    match error.downcast_ref::<async_nats::jetstream::Error>() {
+        Some(e) => e.error_code() == ErrorCode::STREAM_NOT_FOUND,
+        None => false,
+    }
+}
+
 /// NATS JetStream Key-Value store cache.
 #[derive(Debug, Default)]
 pub struct Cache {
@@ -86,8 +132,11 @@ pub struct Cache {
     url: String,
     history: Option<i64>,
     tombstone_ttl: Option<Duration>,
+    bucket: String,
     store: Option<async_nats::jetstream::kv::Store>,
     jetstream: Option<async_nats::jetstream::Context>,
+    /// Lets one operation at a time recreate a missing bucket.
+    recovery: tokio::sync::Mutex<()>,
 }
 
 impl Cache {
@@ -109,65 +158,99 @@ impl Cache {
             .jetstream
             .ok_or_else(|| Error::MissingJetStreamContext)?;
 
-        let store = match jetstream.get_key_value(bucket).await {
-            Ok(store) => store,
-            Err(_) => {
-                let history = self.history.unwrap_or(DEFAULT_HISTORY);
-
-                // Try creating with limit_markers (enables per-key TTL, requires NATS 2.11+).
-                // Falls back to creating without if the server rejects it.
-                let with_ttl = jetstream
-                    .create_key_value(async_nats::jetstream::kv::Config {
-                        bucket: bucket.to_string(),
-                        history,
-                        limit_markers: Some(self.tombstone_ttl.unwrap_or(DEFAULT_TOMBSTONE_TTL)),
-                        ..Default::default()
-                    })
-                    .await;
-
-                match with_ttl {
-                    Ok(store) => store,
-                    Err(_) => {
-                        tracing::warn!(
-                            "NATS server does not support limit_markers (requires 2.11+), \
-                             creating KV bucket without per-key TTL support"
-                        );
-                        jetstream
-                            .create_key_value(async_nats::jetstream::kv::Config {
-                                bucket: bucket.to_string(),
-                                history,
-                                ..Default::default()
-                            })
-                            .await
-                            .map_err(|e| Error::KVBucketCreate { source: e })?
-                    }
-                }
-            }
-        };
-
-        self.store = Some(store);
+        self.bucket = bucket.to_string();
+        self.store = Some(self.open_bucket(&jetstream).await?);
         self.jetstream = Some(jetstream);
         Ok(self)
     }
-}
 
-#[async_trait::async_trait]
-impl flowgen_core::cache::Cache for Cache {
-    async fn put(
+    /// Opens the bucket, creating it when it does not exist.
+    async fn open_bucket(
+        &self,
+        jetstream: &async_nats::jetstream::Context,
+    ) -> Result<async_nats::jetstream::kv::Store, Error> {
+        if let Ok(store) = jetstream.get_key_value(&self.bucket).await {
+            return Ok(store);
+        }
+        let history = match self.history {
+            Some(history) => history,
+            None => DEFAULT_HISTORY,
+        };
+        let tombstone_ttl = match self.tombstone_ttl {
+            Some(tombstone_ttl) => tombstone_ttl,
+            None => DEFAULT_TOMBSTONE_TTL,
+        };
+        let with_ttl = jetstream
+            .create_key_value(async_nats::jetstream::kv::Config {
+                bucket: self.bucket.clone(),
+                history,
+                limit_markers: Some(tombstone_ttl),
+                ..Default::default()
+            })
+            .await;
+
+        match with_ttl {
+            Ok(store) => Ok(store),
+            Err(e) if e.kind() != CreateKeyValueErrorKind::LimitMarkersNotSupported => {
+                Err(Error::KVBucketCreate { source: e })
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "NATS server does not support limit_markers (requires 2.11+), \
+                     creating KV bucket without per-key TTL support"
+                );
+                jetstream
+                    .create_key_value(async_nats::jetstream::kv::Config {
+                        bucket: self.bucket.clone(),
+                        history,
+                        ..Default::default()
+                    })
+                    .await
+                    .map_err(|e| Error::KVBucketCreate { source: e })
+            }
+        }
+    }
+
+    /// Runs `op` and, if the bucket is gone, recreates it and runs `op` again.
+    async fn recovering<T, F, Fut>(&self, op: F) -> Result<T, flowgen_core::cache::Error>
+    where
+        F: Fn() -> Fut,
+        Fut: Future<Output = Result<T, flowgen_core::cache::Error>>,
+    {
+        let error = match op().await {
+            Err(error) if stream_missing(&error) => error,
+            result => return result,
+        };
+        let jetstream = self.jetstream()?;
+        let _recovering = self.recovery.lock().await;
+        tracing::warn!(bucket = %self.bucket, "KV bucket is missing, recreating it");
+        if let Err(source) = self.open_bucket(jetstream).await {
+            tracing::warn!(bucket = %self.bucket, error = %source, "Failed to recreate KV bucket");
+            return Err(error);
+        }
+        op().await
+    }
+
+    fn store(&self) -> Result<&async_nats::jetstream::kv::Store, flowgen_core::cache::Error> {
+        self.store
+            .as_ref()
+            .ok_or_else(|| flowgen_core::cache::CacheError::StoreNotInitialized)
+    }
+
+    fn jetstream(&self) -> Result<&async_nats::jetstream::Context, flowgen_core::cache::Error> {
+        self.jetstream
+            .as_ref()
+            .ok_or_else(|| flowgen_core::cache::CacheError::StoreNotInitialized)
+    }
+
+    async fn put_once(
         &self,
         key: &str,
         value: bytes::Bytes,
         ttl_secs: Option<u64>,
     ) -> Result<(), flowgen_core::cache::Error> {
-        let store = self
-            .store
-            .as_ref()
-            .ok_or_else(|| flowgen_core::cache::CacheError::StoreNotInitialized)?;
-
-        let jetstream = self
-            .jetstream
-            .as_ref()
-            .ok_or_else(|| flowgen_core::cache::CacheError::StoreNotInitialized)?;
+        let store = self.store()?;
+        let jetstream = self.jetstream()?;
 
         let subject = format!("{}{}", store.prefix, key);
 
@@ -197,42 +280,29 @@ impl flowgen_core::cache::Cache for Cache {
         Ok(())
     }
 
-    async fn get(&self, key: &str) -> Result<Option<bytes::Bytes>, flowgen_core::cache::Error> {
-        let store = self
-            .store
-            .as_ref()
-            .ok_or_else(|| flowgen_core::cache::CacheError::StoreNotInitialized)?;
-        store.get(key).await.map_err(|e| {
+    async fn get_once(
+        &self,
+        key: &str,
+    ) -> Result<Option<bytes::Bytes>, flowgen_core::cache::Error> {
+        self.store()?.get(key).await.map_err(|e| {
             flowgen_core::cache::CacheError::GetFailed(Box::new(Error::KVEntry { source: e }))
         })
     }
 
-    async fn delete(&self, key: &str) -> Result<(), flowgen_core::cache::Error> {
-        let store = self
-            .store
-            .as_ref()
-            .ok_or_else(|| flowgen_core::cache::CacheError::StoreNotInitialized)?;
-        store.delete(key).await.map_err(|e| {
+    async fn delete_once(&self, key: &str) -> Result<(), flowgen_core::cache::Error> {
+        self.store()?.delete(key).await.map_err(|e| {
             flowgen_core::cache::CacheError::DeleteFailed(Box::new(Error::KVDelete { source: e }))
-        })?;
-        Ok(())
+        })
     }
 
-    async fn create(
+    async fn create_once(
         &self,
         key: &str,
         value: bytes::Bytes,
         ttl_secs: Option<u64>,
     ) -> Result<u64, flowgen_core::cache::Error> {
-        let store = self
-            .store
-            .as_ref()
-            .ok_or_else(|| flowgen_core::cache::CacheError::StoreNotInitialized)?;
-
-        let jetstream = self
-            .jetstream
-            .as_ref()
-            .ok_or_else(|| flowgen_core::cache::CacheError::StoreNotInitialized)?;
+        let store = self.store()?;
+        let jetstream = self.jetstream()?;
 
         let subject = format!("{}{}", store.prefix, key);
 
@@ -269,22 +339,15 @@ impl flowgen_core::cache::Cache for Cache {
         Ok(ack.sequence)
     }
 
-    async fn update(
+    async fn update_once(
         &self,
         key: &str,
         value: bytes::Bytes,
         expected_revision: u64,
         ttl_secs: Option<u64>,
     ) -> Result<u64, flowgen_core::cache::Error> {
-        let store = self
-            .store
-            .as_ref()
-            .ok_or_else(|| flowgen_core::cache::CacheError::StoreNotInitialized)?;
-
-        let jetstream = self
-            .jetstream
-            .as_ref()
-            .ok_or_else(|| flowgen_core::cache::CacheError::StoreNotInitialized)?;
+        let store = self.store()?;
+        let jetstream = self.jetstream()?;
 
         let subject = format!("{}{}", store.prefix, key);
 
@@ -320,9 +383,6 @@ impl flowgen_core::cache::Cache for Cache {
                         actual: 0,
                     }
                 }
-                async_nats::jetstream::context::PublishErrorKind::StreamNotFound => {
-                    flowgen_core::cache::CacheError::NotFound
-                }
                 _ => flowgen_core::cache::CacheError::UpdateFailed(Box::new(
                     Error::JetStreamPublishAck { source },
                 )),
@@ -331,16 +391,11 @@ impl flowgen_core::cache::Cache for Cache {
         Ok(ack.sequence)
     }
 
-    async fn get_with_revision(
+    async fn get_with_revision_once(
         &self,
         key: &str,
     ) -> Result<Option<(bytes::Bytes, u64)>, flowgen_core::cache::Error> {
-        let store = self
-            .store
-            .as_ref()
-            .ok_or_else(|| flowgen_core::cache::CacheError::StoreNotInitialized)?;
-
-        match store.entry(key).await {
+        match self.store()?.entry(key).await {
             Ok(Some(entry)) if !entry.value.is_empty() => {
                 let revision = entry.revision;
                 let value = entry.value;
@@ -353,17 +408,12 @@ impl flowgen_core::cache::Cache for Cache {
         }
     }
 
-    async fn delete_with_revision(
+    async fn delete_with_revision_once(
         &self,
         key: &str,
         expected_revision: u64,
     ) -> Result<(), flowgen_core::cache::Error> {
-        let store = self
-            .store
-            .as_ref()
-            .ok_or_else(|| flowgen_core::cache::CacheError::StoreNotInitialized)?;
-
-        store
+        self.store()?
             .delete_expect_revision(key, Some(expected_revision))
             .await
             .map_err(|e| match e.kind() {
@@ -379,13 +429,11 @@ impl flowgen_core::cache::Cache for Cache {
             })
     }
 
-    async fn get_revision(&self, key: &str) -> Result<Option<u64>, flowgen_core::cache::Error> {
-        let store = self
-            .store
-            .as_ref()
-            .ok_or_else(|| flowgen_core::cache::CacheError::StoreNotInitialized)?;
-
-        match store.entry(key).await {
+    async fn get_revision_once(
+        &self,
+        key: &str,
+    ) -> Result<Option<u64>, flowgen_core::cache::Error> {
+        match self.store()?.entry(key).await {
             Ok(Some(entry)) => Ok(Some(entry.revision)),
             Ok(None) => Ok(None),
             Err(e) => Err(flowgen_core::cache::CacheError::GetFailed(Box::new(
@@ -393,15 +441,14 @@ impl flowgen_core::cache::Cache for Cache {
             ))),
         }
     }
-    async fn list_keys(&self, prefix: &str) -> Result<Vec<String>, flowgen_core::cache::Error> {
-        let store = self
-            .store
-            .as_ref()
-            .ok_or_else(|| flowgen_core::cache::CacheError::StoreNotInitialized)?;
 
+    async fn list_keys_once(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<String>, flowgen_core::cache::Error> {
         use futures_util::StreamExt;
         let mut keys = Vec::new();
-        let mut key_stream = store.keys().await.map_err(|e| {
+        let mut key_stream = self.store()?.keys().await.map_err(|e| {
             flowgen_core::cache::CacheError::GetFailed(Box::new(Error::KVKeys { source: e }))
         })?;
         while let Some(result) = key_stream.next().await {
@@ -414,12 +461,7 @@ impl flowgen_core::cache::Cache for Cache {
         Ok(keys)
     }
 
-    /// Subscribes to key changes under the given prefix.
-    ///
-    /// When `include_history` is true, replays retained per-key history (up to
-    /// the bucket's `history` setting) before switching to live updates —
-    /// enabling consumers to reconstruct recent state on connect.
-    async fn watch(
+    async fn watch_once(
         &self,
         prefix: &str,
         include_history: bool,
@@ -433,11 +475,7 @@ impl flowgen_core::cache::Cache for Cache {
         use async_nats::jetstream::kv::Operation;
         use futures_util::StreamExt;
 
-        let store = self
-            .store
-            .as_ref()
-            .ok_or_else(|| flowgen_core::cache::CacheError::StoreNotInitialized)?
-            .clone();
+        let store = self.store()?.clone();
 
         // Append the NATS wildcard so the watch covers all keys under the prefix.
         let subject = format!("{prefix}.>");
@@ -465,6 +503,97 @@ impl flowgen_core::cache::Cache for Cache {
         });
 
         Ok(stream.boxed())
+    }
+}
+
+#[async_trait::async_trait]
+impl flowgen_core::cache::Cache for Cache {
+    async fn put(
+        &self,
+        key: &str,
+        value: bytes::Bytes,
+        ttl_secs: Option<u64>,
+    ) -> Result<(), flowgen_core::cache::Error> {
+        self.recovering(|| self.put_once(key, value.clone(), ttl_secs))
+            .await
+    }
+
+    async fn get(&self, key: &str) -> Result<Option<bytes::Bytes>, flowgen_core::cache::Error> {
+        self.recovering(|| self.get_once(key)).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), flowgen_core::cache::Error> {
+        self.recovering(|| self.delete_once(key)).await
+    }
+
+    async fn create(
+        &self,
+        key: &str,
+        value: bytes::Bytes,
+        ttl_secs: Option<u64>,
+    ) -> Result<u64, flowgen_core::cache::Error> {
+        self.recovering(|| self.create_once(key, value.clone(), ttl_secs))
+            .await
+    }
+
+    async fn update(
+        &self,
+        key: &str,
+        value: bytes::Bytes,
+        expected_revision: u64,
+        ttl_secs: Option<u64>,
+    ) -> Result<u64, flowgen_core::cache::Error> {
+        match self
+            .recovering(|| self.update_once(key, value.clone(), expected_revision, ttl_secs))
+            .await
+        {
+            Err(error) if stream_missing(&error) => Err(flowgen_core::cache::CacheError::NotFound),
+            result => result,
+        }
+    }
+
+    async fn get_with_revision(
+        &self,
+        key: &str,
+    ) -> Result<Option<(bytes::Bytes, u64)>, flowgen_core::cache::Error> {
+        self.recovering(|| self.get_with_revision_once(key)).await
+    }
+
+    async fn delete_with_revision(
+        &self,
+        key: &str,
+        expected_revision: u64,
+    ) -> Result<(), flowgen_core::cache::Error> {
+        self.recovering(|| self.delete_with_revision_once(key, expected_revision))
+            .await
+    }
+
+    async fn get_revision(&self, key: &str) -> Result<Option<u64>, flowgen_core::cache::Error> {
+        self.recovering(|| self.get_revision_once(key)).await
+    }
+
+    async fn list_keys(&self, prefix: &str) -> Result<Vec<String>, flowgen_core::cache::Error> {
+        self.recovering(|| self.list_keys_once(prefix)).await
+    }
+
+    /// Subscribes to key changes under the given prefix.
+    ///
+    /// When `include_history` is true, replays retained per-key history (up to
+    /// the bucket's `history` setting) before switching to live updates —
+    /// enabling consumers to reconstruct recent state on connect.
+    async fn watch(
+        &self,
+        prefix: &str,
+        include_history: bool,
+    ) -> Result<
+        futures_util::stream::BoxStream<
+            'static,
+            Result<flowgen_core::cache::WatchEvent, flowgen_core::cache::Error>,
+        >,
+        flowgen_core::cache::Error,
+    > {
+        self.recovering(|| self.watch_once(prefix, include_history))
+            .await
     }
 }
 
@@ -566,6 +695,26 @@ mod tests {
     fn error_missing_jetstream_context_display() {
         let err = Error::MissingJetStreamContext;
         assert_eq!(err.to_string(), "Missing required value JetStream Context");
+    }
+
+    #[test]
+    fn a_publish_to_no_stream_means_the_stream_is_missing() {
+        let error =
+            flowgen_core::cache::CacheError::PutFailed(Box::new(Error::JetStreamPublishAck {
+                source: async_nats::jetstream::context::PublishError::new(
+                    async_nats::jetstream::context::PublishErrorKind::StreamNotFound,
+                ),
+            }));
+        assert!(stream_missing(&error));
+    }
+
+    #[test]
+    fn a_revision_mismatch_does_not_mean_the_stream_is_missing() {
+        let error = flowgen_core::cache::CacheError::RevisionMismatch {
+            expected: 1,
+            actual: 0,
+        };
+        assert!(!stream_missing(&error));
     }
 
     #[test]

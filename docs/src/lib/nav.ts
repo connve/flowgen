@@ -167,7 +167,7 @@ export const navigation: NavSection[] = [
 		items: [
 			{ title: 'Overview', href: '/mongodb' },
 			{ title: 'Collection', href: '/mongodb/collection' },
-			{ title: 'Change Stream', href: '/mongodb/change_stream' }
+			{ title: 'CDC', href: '/mongodb/cdc' }
 		]
 	},
 	{
@@ -176,6 +176,16 @@ export const navigation: NavSection[] = [
 		items: [
 			{ title: 'Overview', href: '/mssql' },
 			{ title: 'Query', href: '/mssql/query' }
+		]
+	},
+	{
+		title: 'PostgreSQL',
+		icon: '/icons/postgres.svg',
+		items: [
+			{ title: 'Overview', href: '/postgres' },
+			{ title: 'Query', href: '/postgres/query' },
+			{ title: 'Write', href: '/postgres/write' },
+			{ title: 'CDC', href: '/postgres/cdc' }
 		]
 	},
 	{

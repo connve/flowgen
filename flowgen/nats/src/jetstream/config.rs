@@ -1,50 +1,7 @@
 use flowgen_core::config::ConfigExt;
 use flowgen_core::task::TaskConfig;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, time::Duration};
-
-/// Errors that can occur during configuration parsing.
-#[derive(thiserror::Error, Debug)]
-#[non_exhaustive]
-pub enum ConfigError {
-    #[error("Failed to parse backoff duration '{value}': {source}")]
-    BackoffDurationParse {
-        value: String,
-        #[source]
-        source: humantime::DurationError,
-    },
-}
-
-/// Deserializes a list of human-readable duration strings into a vector of durations.
-/// Accepts formats like ["1s", "5s", "30s", "1m", "5m"] for NATS consumer backoff schedules.
-fn deserialize_backoff<'de, D>(deserializer: D) -> Result<Vec<Duration>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let strings: Vec<String> = Vec::deserialize(deserializer)?;
-    strings
-        .into_iter()
-        .map(|s| {
-            humantime::parse_duration(&s).map_err(|source| {
-                serde::de::Error::custom(ConfigError::BackoffDurationParse { value: s, source })
-            })
-        })
-        .collect()
-}
-
-/// Serializes a vector of durations as human-readable strings.
-/// This ensures ConfigExt::render JSON round-trip compatibility with deserialize_backoff.
-fn serialize_backoff<S>(durations: &Vec<Duration>, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    use serde::ser::SerializeSeq;
-    let mut seq = serializer.serialize_seq(Some(durations.len()))?;
-    for d in durations {
-        seq.serialize_element(&humantime::format_duration(*d).to_string())?;
-    }
-    seq.end()
-}
 
 /// Default NATS server URL function for serde.
 fn default_nats_url() -> String {
@@ -132,8 +89,8 @@ pub struct Config {
     /// Acknowledgment timeout used for both publisher and subscriber contexts.
     /// For publishers: timeout for receiving publish acknowledgments from the server.
     /// For subscribers: sets the NATS consumer Ack Wait duration and how long
-    /// the flow may take for one message; while it runs, the subscriber tells
-    /// NATS the message is in progress so it isn't redelivered. If not
+    /// a message may stay in the flow from receipt; meanwhile the subscriber
+    /// tells NATS the message is in progress so it isn't redelivered. If not
     /// specified, NATS waits 30s and the flow has no time limit.
     /// Accepts duration strings: "5s", "30s", "1m", "2m", etc.
     #[serde(default, with = "humantime_serde")]
@@ -143,17 +100,6 @@ pub struct Config {
     /// Set to -1 for unlimited redelivery (NATS default).
     /// Requires a dead letter configuration on the NATS server side to avoid data loss.
     pub max_deliver: Option<i64>,
-    /// Redelivery backoff schedule (subscriber only).
-    /// Defines delays between redelivery attempts (e.g., ["1s", "5s", "30s", "1m", "5m"]).
-    /// If fewer entries than max_deliver, the last entry repeats for subsequent attempts.
-    /// NATS natively supports this via consumer backoff config.
-    #[serde(
-        default,
-        deserialize_with = "deserialize_backoff",
-        serialize_with = "serialize_backoff",
-        skip_serializing_if = "Vec::is_empty"
-    )]
-    pub backoff: Vec<Duration>,
     /// Optional list of upstream task names this task depends on.
     /// When set, this task only receives events from the named tasks.
     /// When not set, the task receives from the previous task in the list (linear chain).
@@ -192,7 +138,6 @@ impl Default for Config {
             throttle: None,
             ack_timeout: None,
             max_deliver: None,
-            backoff: Vec::new(),
             depends_on: None,
             msg_id: None,
             retry: None,
@@ -577,63 +522,26 @@ mod tests {
     }
 
     #[test]
-    fn test_config_default_max_deliver_and_backoff() {
-        let config = Config::default();
-        assert_eq!(config.max_deliver, None);
-        assert!(config.backoff.is_empty());
-    }
-
-    #[test]
-    fn test_subscriber_with_max_deliver_and_backoff() {
+    fn test_subscriber_with_max_deliver() {
         let json = r#"{
             "name": "test_sub",
             "credentials_path": "/path/to/creds.jwt",
             "subject": "test.subject",
-            "max_deliver": 5,
-            "backoff": ["1s", "5s", "30s", "1m", "5m"]
+            "max_deliver": 5
         }"#;
         let config: Config = serde_json::from_str(json).expect("Failed to parse config.");
         assert_eq!(config.max_deliver, Some(5));
-        assert_eq!(config.backoff.len(), 5);
-        assert_eq!(config.backoff[0], Duration::from_secs(1));
-        assert_eq!(config.backoff[1], Duration::from_secs(5));
-        assert_eq!(config.backoff[2], Duration::from_secs(30));
-        assert_eq!(config.backoff[3], Duration::from_secs(60));
-        assert_eq!(config.backoff[4], Duration::from_secs(300));
+        assert_eq!(Config::default().max_deliver, None);
     }
 
     #[test]
-    fn test_backoff_empty_when_omitted() {
-        let json = r#"{
-            "name": "test_sub",
-            "credentials_path": "/path/to/creds.jwt",
-            "subject": "test.subject"
-        }"#;
-        let config: Config = serde_json::from_str(json).expect("Failed to parse config.");
-        assert!(config.backoff.is_empty());
-    }
-
-    #[test]
-    fn test_backoff_invalid_duration_returns_error() {
+    fn test_backoff_list_is_rejected() {
         let json = r#"{
             "name": "test_sub",
             "credentials_path": "/path/to/creds.jwt",
             "subject": "test.subject",
-            "backoff": ["1s", "invalid", "5s"]
+            "backoff": ["1s", "5s"]
         }"#;
-        let result: Result<Config, _> = serde_json::from_str(json);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_backoff_skipped_in_serialization_when_empty() {
-        let config = Config {
-            name: "test".to_string(),
-            credentials_path: Some(PathBuf::from("/path/to/creds.jwt")),
-            subject: "test.subject".to_string(),
-            ..Default::default()
-        };
-        let json = serde_json::to_string(&config).expect("Failed to serialize config.");
-        assert!(!json.contains("backoff"));
+        assert!(serde_json::from_str::<Config>(json).is_err());
     }
 }

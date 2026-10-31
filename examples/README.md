@@ -18,6 +18,7 @@ This directory contains example flows demonstrating various flowgen features and
 - **`mcp/`** - MCP server tasks (`mcp_tool`, `mcp_prompt`, `mcp_resource`)
 - **`mssql/`** - Microsoft SQL Server integrations
 - **`object-store/`** - Reading/writing files (local, S3, GCS)
+- **`postgres/`** - PostgreSQL integrations
 - **`oci/`** - `oci_sync` and `oci_push` tasks (pull and push workspace artifacts)
 - **`resources/`** - Shared resource files (SQL, templates, scripts, schemas)
 - **`salesforce/`** - Salesforce (CDC replication, data activation/export, sobject CRUD)

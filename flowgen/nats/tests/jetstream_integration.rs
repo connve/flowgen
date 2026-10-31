@@ -613,9 +613,8 @@ async fn idle_subscriber_still_delivers_a_message_published_later() {
         let _ = subscriber.run().await;
     });
 
-    // Go idle first, so the message lands on a request that is already parked
-    // rather than on a fresh one.
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // Idle past the server's first idle heartbeat on the parked request.
+    tokio::time::sleep(Duration::from_secs(10)).await;
 
     let pub_config = Arc::new(JsConfig {
         name: "publisher".to_string(),
@@ -812,6 +811,90 @@ async fn a_message_in_a_flow_longer_than_the_ack_wait_is_delivered_once() {
                 completion.signal_completion(None);
             }
         });
+    }
+
+    assert_eq!(delivered.len(), total, "delivered: {delivered:?}");
+
+    drop(pub_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(2), pub_handle).await;
+    sub_handle.abort();
+}
+
+#[tokio::test]
+#[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
+async fn a_message_waiting_for_a_busy_next_task_is_delivered_once() {
+    let _lock = lock_nats_test().await;
+
+    let (_nats, url) = start_nats().await;
+    let stream = stream_options("blocked_stream", "blocked.subject");
+    let pub_config = Arc::new(JsConfig {
+        name: "publisher".to_string(),
+        url: url.clone(),
+        subject: "blocked.subject".to_string(),
+        stream: Some(stream.clone()),
+        ..Default::default()
+    });
+    let (pub_tx, mut pub_out_rx, pub_handle) = spawn_publisher(pub_config).await;
+    let total = 3;
+    for n in 0..total {
+        let event = EventBuilder::new()
+            .data(EventData::Json(serde_json::json!({ "n": n })))
+            .subject("blocked.subject".to_string())
+            .task_id(0)
+            .task_type("test")
+            .build()
+            .expect("build event");
+        pub_tx.send(event).await.expect("publish event");
+        tokio::time::timeout(Duration::from_secs(10), pub_out_rx.recv())
+            .await
+            .expect("publish acked")
+            .expect("publisher output open");
+    }
+    async_nats::jetstream::new(async_nats::connect(&url).await.expect("connect"))
+        .get_stream("blocked_stream")
+        .await
+        .expect("get stream")
+        .create_consumer(async_nats::jetstream::consumer::pull::Config {
+            durable_name: Some("blocked_consumer".to_string()),
+            filter_subject: "blocked.subject".to_string(),
+            ack_wait: Duration::from_secs(2),
+            ..Default::default()
+        })
+        .await
+        .expect("create consumer");
+
+    let sub_config = Arc::new(JsConfig {
+        name: "subscriber".to_string(),
+        url: url.clone(),
+        subject: "blocked.subject".to_string(),
+        stream: Some(stream),
+        durable_name: Some("blocked_consumer".to_string()),
+        batch_expires: Duration::from_secs(2),
+        ..Default::default()
+    });
+    let (sub_out_tx, mut sub_out_rx) = mpsc::channel(1);
+    let subscriber = subscribe::ProcessorBuilder::new()
+        .config(sub_config)
+        .sender(sub_out_tx)
+        .task_id(1)
+        .task_type("nats_jetstream_subscribe")
+        .task_context(test_task_context())
+        .build()
+        .await
+        .expect("build subscriber");
+    let sub_handle = tokio::spawn(async move {
+        use flowgen_core::task::runner::Runner;
+        let _ = subscriber.run().await;
+    });
+
+    tokio::time::sleep(Duration::from_secs(9)).await;
+    let mut delivered = Vec::new();
+    let window = tokio::time::Instant::now() + Duration::from_secs(6);
+    while let Ok(Some(event)) = tokio::time::timeout_at(window, sub_out_rx.recv()).await {
+        delivered.push(event.data_as_json().expect("json data"));
+        if let Some(completion) = event.completion_tx.as_ref() {
+            completion.signal_completion(None);
+        }
     }
 
     assert_eq!(delivered.len(), total, "delivered: {delivered:?}");
@@ -1314,3 +1397,238 @@ async fn separate_streams_keep_independent_limits() {
     let _ = tokio::time::timeout(Duration::from_secs(2), pub_a_handle).await;
     let _ = tokio::time::timeout(Duration::from_secs(2), pub_b_handle).await;
 }
+
+fn subscriber_context(
+    cancellation_token: tokio_util::sync::CancellationToken,
+) -> Arc<flowgen_core::task::context::TaskContext> {
+    let task_manager = Arc::new(
+        flowgen_core::task::manager::TaskManagerBuilder::new()
+            .build()
+            .expect("build TaskManager"),
+    );
+    let cache = Arc::new(flowgen_core::cache::memory::MemoryCache::new())
+        as Arc<dyn flowgen_core::cache::Cache>;
+    Arc::new(
+        flowgen_core::task::context::TaskContextBuilder::new()
+            .flow_name("test_flow".to_string())
+            .task_manager(task_manager)
+            .cache(cache)
+            .cancellation_token(cancellation_token)
+            .build()
+            .expect("build TaskContext"),
+    )
+}
+
+async fn spawn_subscriber(
+    config: Arc<JsConfig>,
+    cancellation_token: tokio_util::sync::CancellationToken,
+) -> (
+    mpsc::Receiver<flowgen_core::event::Event>,
+    tokio::task::JoinHandle<()>,
+) {
+    let (out_tx, out_rx) = mpsc::channel(4);
+    let subscriber = subscribe::ProcessorBuilder::new()
+        .config(config)
+        .sender(out_tx)
+        .task_id(0)
+        .task_type("nats_jetstream_subscribe")
+        .task_context(subscriber_context(cancellation_token))
+        .build()
+        .await
+        .expect("build subscriber");
+    let handle = tokio::spawn(async move {
+        use flowgen_core::task::runner::Runner;
+        let _ = subscriber.run().await;
+    });
+    (out_rx, handle)
+}
+
+/// A pod that stops while a message is in its flow hands the message back,
+/// so the pod that replaces it gets it without waiting out the ack wait.
+#[tokio::test]
+#[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
+async fn a_message_in_flight_when_the_subscriber_stops_goes_to_the_next_one() {
+    let _lock = lock_nats_test().await;
+
+    let (_nats, url) = start_nats().await;
+    let stream = stream_options("handover_stream", "handover.subject");
+    let pub_config = Arc::new(JsConfig {
+        name: "publisher".to_string(),
+        url: url.clone(),
+        subject: "handover.subject".to_string(),
+        stream: Some(stream.clone()),
+        ..Default::default()
+    });
+    let (pub_tx, mut pub_out_rx, pub_handle) = spawn_publisher(pub_config).await;
+    let event = EventBuilder::new()
+        .data(EventData::Json(serde_json::json!({ "n": 1 })))
+        .subject("handover.subject".to_string())
+        .task_id(0)
+        .task_type("test")
+        .build()
+        .expect("build event");
+    pub_tx.send(event).await.expect("publish event");
+    tokio::time::timeout(Duration::from_secs(10), pub_out_rx.recv())
+        .await
+        .expect("publish acked")
+        .expect("publisher output open");
+
+    let client = async_nats::connect(&url).await.expect("connect");
+    async_nats::jetstream::new(client)
+        .get_stream("handover_stream")
+        .await
+        .expect("get stream")
+        .create_consumer(async_nats::jetstream::consumer::pull::Config {
+            durable_name: Some("handover_consumer".to_string()),
+            filter_subject: "handover.subject".to_string(),
+            ack_wait: Duration::from_secs(60),
+            ..Default::default()
+        })
+        .await
+        .expect("create consumer");
+    let sub_config = Arc::new(JsConfig {
+        name: "subscriber".to_string(),
+        url: url.clone(),
+        subject: "handover.subject".to_string(),
+        stream: Some(stream),
+        durable_name: Some("handover_consumer".to_string()),
+        batch_expires: Duration::from_secs(2),
+        ..Default::default()
+    });
+
+    let stopping = tokio_util::sync::CancellationToken::new();
+    let (mut first_rx, first) = spawn_subscriber(Arc::clone(&sub_config), stopping.clone()).await;
+    let in_flight = tokio::time::timeout(Duration::from_secs(10), first_rx.recv())
+        .await
+        .expect("first subscriber gets the message")
+        .expect("channel open");
+    stopping.cancel();
+    tokio::time::timeout(Duration::from_secs(10), first)
+        .await
+        .expect("first subscriber stops")
+        .expect("first subscriber did not panic");
+
+    let (mut second_rx, second) =
+        spawn_subscriber(sub_config, tokio_util::sync::CancellationToken::new()).await;
+    let redelivered = tokio::time::timeout(Duration::from_secs(15), second_rx.recv()).await;
+    drop(in_flight);
+
+    assert!(
+        matches!(redelivered, Ok(Some(_))),
+        "the next subscriber did not get the message within 15s (ack wait 60s)"
+    );
+
+    drop(pub_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(2), pub_handle).await;
+    second.abort();
+}
+
+/// A record the shared source tests write and read back.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Record {
+    payload: String,
+}
+
+/// A subscriber on a durable whose ack wait is 2 seconds, for the shared
+/// source tests.
+struct NatsSource {
+    _lock: tokio::sync::MutexGuard<'static, ()>,
+    _server: ContainerAsync<GenericImage>,
+    jetstream: async_nats::jetstream::Context,
+    config: Arc<JsConfig>,
+}
+
+impl NatsSource {
+    const SUBJECT: &str = "conformance.records";
+
+    async fn start() -> Self {
+        let lock = lock_nats_test().await;
+        let (server, url) = start_nats().await;
+        let jetstream =
+            async_nats::jetstream::new(async_nats::connect(&url).await.expect("connect"));
+        jetstream
+            .create_stream(async_nats::jetstream::stream::Config {
+                name: "conformance".to_string(),
+                subjects: vec![Self::SUBJECT.to_string()],
+                retention: async_nats::jetstream::stream::RetentionPolicy::WorkQueue,
+                ..Default::default()
+            })
+            .await
+            .expect("create stream")
+            .create_consumer(async_nats::jetstream::consumer::pull::Config {
+                durable_name: Some("conformance".to_string()),
+                filter_subject: Self::SUBJECT.to_string(),
+                ack_wait: Duration::from_secs(2),
+                ..Default::default()
+            })
+            .await
+            .expect("create consumer");
+        let config = Arc::new(JsConfig {
+            name: "subscriber".to_string(),
+            url,
+            subject: Self::SUBJECT.to_string(),
+            stream: Some(stream_options("conformance", Self::SUBJECT)),
+            durable_name: Some("conformance".to_string()),
+            batch_expires: Duration::from_secs(2),
+            ..Default::default()
+        });
+        Self {
+            _lock: lock,
+            _server: server,
+            jetstream,
+            config,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl flowgen_core::conformance::Source for NatsSource {
+    async fn produce(&self, payload: &str) {
+        let record = Record {
+            payload: payload.to_string(),
+        };
+        let body = serde_json::to_vec(&record).expect("serialize record");
+        self.jetstream
+            .publish(Self::SUBJECT, body.into())
+            .await
+            .expect("publish record")
+            .await
+            .expect("record stored");
+    }
+
+    async fn start(
+        &self,
+        context: Arc<flowgen_core::task::context::TaskContext>,
+        tx: mpsc::Sender<flowgen_core::event::Event>,
+    ) -> tokio::task::JoinHandle<()> {
+        let subscriber = subscribe::ProcessorBuilder::new()
+            .config(Arc::clone(&self.config))
+            .sender(tx)
+            .task_id(0)
+            .task_type("nats_jetstream_subscribe")
+            .task_context(context)
+            .build()
+            .await
+            .expect("build subscriber");
+        tokio::spawn(async move {
+            use flowgen_core::task::runner::Runner;
+            let _ = subscriber.run().await;
+        })
+    }
+
+    fn payload(&self, event: &flowgen_core::event::Event) -> String {
+        let data = event.data_as_json().expect("JSON record");
+        let record: Record = serde_json::from_value(data).expect("record");
+        record.payload
+    }
+
+    fn idle(&self) -> Duration {
+        Duration::from_secs(10)
+    }
+
+    fn ack_deadline(&self) -> Duration {
+        Duration::from_secs(2)
+    }
+}
+
+flowgen_core::source_conformance!(NatsSource::start().await);

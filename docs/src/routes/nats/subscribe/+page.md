@@ -35,8 +35,7 @@ Consumes messages from a NATS JetStream stream. Source task — typically first 
 | `batch_expires` | duration | `30s` | How long each batch request waits on the server before returning empty. Prevents empty fetch loops. |
 | `delay` | duration | | Deprecated and ignored. Use `throttle` to rate-limit individual messages. |
 | `throttle` | duration | | Delay between individual messages. |
-| `ack_timeout` | duration | wait indefinitely | Max time the flow may take for one message. Also applied to the JetStream context timeout and the consumer `ack_wait`. |
-| `backoff` | list | | Delay before each redelivery after a failed flow (list of durations); the last one repeats. Without it, a failed message is redelivered after `ack_wait`. |
+| `ack_timeout` | duration | wait indefinitely | Max time a message may stay in the flow, from receipt. Also sets the consumer `ack_wait`. |
 | `depends_on` | list | | Upstream task names. |
 | `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
 
@@ -57,7 +56,13 @@ Consumes messages from a NATS JetStream stream. Source task — typically first 
 
 ## Delivery
 
-A message is acked when every last task of the flow has finished with it. While the flow runs, the subscriber tells NATS the message is still in progress, so NATS doesn't redeliver it. A failed or timed-out flow asks NATS to redeliver the message after the `backoff` delay. Delivery is at least once: a message can still arrive twice, for example after a pod stops mid-flow, so tasks with side effects should check an idempotency key.
+A message is acked when every last task of the flow has finished with it. From receipt, also while it waits for a busy next task, the subscriber tells NATS the message is still in progress, so NATS doesn't redeliver it. A message the flow holds for more than 5 minutes is logged as a warning every 5 minutes. A flow without a next task acks the message once it is read. A failed or timed-out flow asks NATS to redeliver the message after the [redelivery delay](/docs/flowgen/concepts/retry#redelivery). Delivery is at least once: a message can still arrive twice, for example after a pod stops mid-flow, so tasks with side effects should check an idempotency key.
+
+When the flow stops or reloads, the messages it holds go back to NATS for immediate redelivery, and progress acks stop. If the subscriber ever stops reading while the flow runs, the flow fails and restarts.
+
+## Durable consumer
+
+The subscriber creates the durable when it is missing. An existing durable gets the flow's `ack_timeout`, `max_deliver`, `max_ack_pending` and `max_waiting` on start, and loses a `backoff` that older versions set. When NATS refuses the update, the subscriber logs a warning with the live and the flow's values and keeps the durable as it is. A durable whose filter subject differs from `subject` fails the task; delete it or use another `durable_name`.
 
 ## Output
 

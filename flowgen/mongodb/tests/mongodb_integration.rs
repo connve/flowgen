@@ -1,4 +1,4 @@
-//! Integration tests for the `mongodb_collection` and `mongodb_change_stream`
+//! Integration tests for the `mongodb_collection` and `mongodb_cdc`
 //! processors against a real MongoDB server in a Docker container.
 //!
 //! Exercises `read`, `write`, `upsert`, and change-stream watching with the same
@@ -11,9 +11,7 @@
 //! `cargo test` skips it; CI runs the ignored set explicitly.
 
 use flowgen_core::event::{Event, EventBuilder, EventData};
-use flowgen_mongodb::change_stream::{
-    ChangeStream as ChangeStreamConfig, ChangeStreamReaderBuilder,
-};
+use flowgen_mongodb::cdc::{self, Cdc};
 use flowgen_mongodb::collection::{Collection, Operation, ProcessorBuilder};
 use std::sync::Arc;
 use std::time::Duration;
@@ -432,21 +430,22 @@ async fn read_emits_every_matching_document() {
 
 #[tokio::test]
 #[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
-async fn change_stream_emits_event_on_insert() {
+async fn cdc_emits_event_on_insert() {
     let (_mongo, credentials_path) = start_mongo().await;
 
     let (change_tx, mut change_rx) = mpsc::channel::<Event>(4);
-    let change_reader = ChangeStreamReaderBuilder::new()
-        .config(Arc::new(ChangeStreamConfig {
+    let change_reader = cdc::ProcessorBuilder::new()
+        .config(Arc::new(Cdc {
             name: "watch_sales".to_string(),
             credentials_path: Some(credentials_path.clone()),
             db_name: "sales".to_string(),
             depends_on: None,
             retry: None,
+            ..Default::default()
         }))
         .sender(change_tx)
         .task_id(0)
-        .task_type("mongodb_change_stream")
+        .task_type("mongodb_cdc")
         .task_context(test_task_context())
         .build()
         .await
@@ -495,7 +494,7 @@ async fn change_stream_emits_event_on_insert() {
 
 #[tokio::test]
 #[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
-async fn change_stream_emits_updates_and_deletes() {
+async fn cdc_emits_updates_and_deletes() {
     let (mongo, credentials_path) = start_mongo().await;
     let port = mongo
         .get_host_port_ipv4(27017)
@@ -503,17 +502,18 @@ async fn change_stream_emits_updates_and_deletes() {
         .expect("map mongo port");
 
     let (change_tx, mut change_rx) = mpsc::channel::<Event>(8);
-    let change_reader = ChangeStreamReaderBuilder::new()
-        .config(Arc::new(ChangeStreamConfig {
+    let change_reader = cdc::ProcessorBuilder::new()
+        .config(Arc::new(Cdc {
             name: "watch".to_string(),
             credentials_path: Some(credentials_path),
             db_name: "d".to_string(),
             depends_on: None,
             retry: None,
+            ..Default::default()
         }))
         .sender(change_tx)
         .task_id(0)
-        .task_type("mongodb_change_stream")
+        .task_type("mongodb_cdc")
         .task_context(test_task_context())
         .build()
         .await
@@ -559,6 +559,9 @@ async fn change_stream_emits_updates_and_deletes() {
             .await
             .expect("change stream emits event")
             .expect("channel open");
+        if let Some(completion) = event.completion_tx.as_ref() {
+            completion.signal_completion(None);
+        }
         let meta = event.meta.clone().expect("meta");
         ids.insert(event.id.clone().expect("event id"));
         received.push((
@@ -770,3 +773,548 @@ async fn upsert_updates_matching_or_inserts_new_document() {
         "the matched upsert must update in place, not insert a duplicate"
     );
 }
+
+fn context_sharing(
+    cache: &Arc<dyn flowgen_core::cache::Cache>,
+    cancellation_token: tokio_util::sync::CancellationToken,
+) -> Arc<flowgen_core::task::context::TaskContext> {
+    let task_manager = Arc::new(
+        flowgen_core::task::manager::TaskManagerBuilder::new()
+            .build()
+            .expect("build TaskManager"),
+    );
+    Arc::new(
+        flowgen_core::task::context::TaskContextBuilder::new()
+            .flow_name("test_flow".to_string())
+            .task_manager(task_manager)
+            .cache(Arc::clone(cache))
+            .cancellation_token(cancellation_token)
+            .build()
+            .expect("build TaskContext"),
+    )
+}
+
+fn change_config(credentials_path: std::path::PathBuf) -> Cdc {
+    Cdc {
+        name: "watch_sales".to_string(),
+        credentials_path: Some(credentials_path),
+        db_name: "sales".to_string(),
+        retry: Some(flowgen_core::retry::RetryConfig {
+            max_attempts: None,
+            initial_backoff: Duration::from_millis(10),
+        }),
+        ..Default::default()
+    }
+}
+
+async fn spawn_change_reader(
+    credentials_path: std::path::PathBuf,
+    task_context: Arc<flowgen_core::task::context::TaskContext>,
+) -> mpsc::Receiver<Event> {
+    spawn_change_reader_with(change_config(credentials_path), task_context).await
+}
+
+async fn spawn_change_reader_with(
+    config: Cdc,
+    task_context: Arc<flowgen_core::task::context::TaskContext>,
+) -> mpsc::Receiver<Event> {
+    spawn_running_change_reader(config, task_context).await.0
+}
+
+/// Spawns the reader and returns its task too, to wait for it to stop.
+async fn spawn_running_change_reader(
+    config: Cdc,
+    task_context: Arc<flowgen_core::task::context::TaskContext>,
+) -> (mpsc::Receiver<Event>, tokio::task::JoinHandle<()>) {
+    let (change_tx, change_rx) = mpsc::channel::<Event>(4);
+    let change_reader = cdc::ProcessorBuilder::new()
+        .config(Arc::new(config))
+        .sender(change_tx)
+        .task_id(0)
+        .task_type("mongodb_cdc")
+        .task_context(task_context)
+        .build()
+        .await
+        .expect("build change stream reader");
+    let running = tokio::spawn(async move {
+        use flowgen_core::task::runner::Runner;
+        let _ = change_reader.run().await;
+    });
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    (change_rx, running)
+}
+
+async fn insert_customer(credentials_path: &std::path::Path, name: &str) {
+    let (write_tx, mut write_rx) = spawn_collection_processor(Collection {
+        name: "write_customer".to_string(),
+        operation: Operation::Write,
+        credentials_path: Some(credentials_path.to_path_buf()),
+        db_name: "sales".to_string(),
+        collection_name: "customers".to_string(),
+        filter: Default::default(),
+        depends_on: None,
+        retry: None,
+        max_in_flight: None,
+    })
+    .await;
+    write_tx
+        .send(drive_event(serde_json::json!({ "name": name })))
+        .await
+        .expect("send write event");
+    let _ = tokio::time::timeout(Duration::from_secs(10), write_rx.recv())
+        .await
+        .expect("write completes");
+}
+
+async fn next_change_name(rx: &mut mpsc::Receiver<Event>) -> Option<String> {
+    let event = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+        .await
+        .ok()??;
+    if let Some(completion) = event.completion_tx.as_ref() {
+        completion.signal_completion(None);
+    }
+    event
+        .data_as_json()
+        .ok()?
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+}
+
+#[tokio::test]
+#[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
+async fn a_restarted_cdc_resumes_after_the_last_completed_change() {
+    let (_mongo, credentials_path) = start_mongo().await;
+    let cache: Arc<dyn flowgen_core::cache::Cache> =
+        Arc::new(flowgen_core::cache::memory::MemoryCache::new());
+
+    let stopping = tokio_util::sync::CancellationToken::new();
+    let (mut first_rx, first_reader) = spawn_running_change_reader(
+        change_config(credentials_path.clone()),
+        context_sharing(&cache, stopping.clone()),
+    )
+    .await;
+    insert_customer(&credentials_path, "Ann").await;
+    assert_eq!(
+        next_change_name(&mut first_rx).await.as_deref(),
+        Some("Ann")
+    );
+    insert_customer(&credentials_path, "Grace").await;
+    let in_flight = tokio::time::timeout(Duration::from_secs(10), first_rx.recv())
+        .await
+        .expect("first reader gets the change")
+        .expect("channel open");
+    stopping.cancel();
+    tokio::time::timeout(Duration::from_secs(10), first_reader)
+        .await
+        .expect("the stopped reader returns while its change is still in the flow")
+        .expect("the stopped reader did not panic");
+    insert_customer(&credentials_path, "Ada").await;
+
+    let mut second_rx = spawn_change_reader(
+        credentials_path,
+        context_sharing(&cache, tokio_util::sync::CancellationToken::new()),
+    )
+    .await;
+    let first = next_change_name(&mut second_rx).await;
+    let second = next_change_name(&mut second_rx).await;
+    drop(in_flight);
+
+    assert_eq!(
+        (first.as_deref(), second.as_deref()),
+        (Some("Grace"), Some("Ada")),
+        "the restarted reader must get the unfinished change and the one made while it was down"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
+async fn a_failed_change_is_delivered_again_until_max_deliver() {
+    let (_mongo, credentials_path) = start_mongo().await;
+    let cache: Arc<dyn flowgen_core::cache::Cache> =
+        Arc::new(flowgen_core::cache::memory::MemoryCache::new());
+    let mut rx = spawn_change_reader_with(
+        Cdc {
+            max_deliver: std::num::NonZeroU32::new(2),
+            ..change_config(credentials_path.clone())
+        },
+        context_sharing(&cache, tokio_util::sync::CancellationToken::new()),
+    )
+    .await;
+    insert_customer(&credentials_path, "Ann").await;
+    insert_customer(&credentials_path, "Grace").await;
+
+    let mut failed = Vec::new();
+    for _ in 0..2 {
+        let event = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("change arrives")
+            .expect("channel open");
+        event
+            .completion_tx
+            .as_ref()
+            .expect("completion channel")
+            .signal_completion_with_error("Write failed".to_string());
+        failed.push(event);
+    }
+
+    assert_eq!(failed[0].id, failed[1].id);
+    assert_eq!(
+        next_change_name(&mut rx).await.as_deref(),
+        Some("Grace"),
+        "the change is skipped after max_deliver failed deliveries"
+    );
+}
+
+async fn spawn_copying_reader(
+    credentials_path: &std::path::Path,
+    task_context: Arc<flowgen_core::task::context::TaskContext>,
+    batch_size: Option<usize>,
+) -> mpsc::Receiver<Event> {
+    spawn_change_reader_with(
+        Cdc {
+            initial_copy: true,
+            copy_batch_size: batch_size.and_then(std::num::NonZeroUsize::new),
+            ..change_config(credentials_path.to_path_buf())
+        },
+        task_context,
+    )
+    .await
+}
+
+async fn next_event(rx: &mut mpsc::Receiver<Event>) -> Event {
+    tokio::time::timeout(Duration::from_secs(10), rx.recv())
+        .await
+        .expect("event arrives")
+        .expect("channel open")
+}
+
+fn complete(event: &Event) {
+    event
+        .completion_tx
+        .as_ref()
+        .expect("completion channel")
+        .signal_completion(None);
+}
+
+fn operation_type(event: &Event) -> Option<&str> {
+    event
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get("operation_type"))
+        .and_then(|value| value.as_str())
+}
+
+fn name(event: &Event) -> String {
+    event.data_as_json().expect("JSON data")["name"]
+        .as_str()
+        .expect("name")
+        .to_string()
+}
+
+/// Receives `count` events of the copy and the names of the documents they
+/// hold, sorted.
+async fn receive_copy(rx: &mut mpsc::Receiver<Event>, count: usize) -> (Vec<Event>, Vec<String>) {
+    let mut events = Vec::new();
+    let mut names = Vec::new();
+    for _ in 0..count {
+        let event = next_event(rx).await;
+        assert_eq!(operation_type(&event), Some("copy"));
+        let documents = event.data_as_json().expect("JSON data");
+        names.extend(
+            documents
+                .as_array()
+                .expect("copied documents")
+                .iter()
+                .map(|document| document["name"].as_str().expect("name").to_string()),
+        );
+        events.push(event);
+    }
+    names.sort();
+    (events, names)
+}
+
+#[tokio::test]
+#[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
+async fn an_initial_copy_emits_existing_documents_in_batches_before_the_changes() {
+    let (_mongo, credentials_path) = start_mongo().await;
+    insert_customer(&credentials_path, "Ann").await;
+    insert_customer(&credentials_path, "Grace").await;
+
+    let mut rx = spawn_copying_reader(&credentials_path, test_task_context(), None).await;
+    let (copied, names) = receive_copy(&mut rx, 1).await;
+    insert_customer(&credentials_path, "Ada").await;
+    copied.iter().for_each(complete);
+    let change = next_event(&mut rx).await;
+    complete(&change);
+
+    assert_eq!(names, ["Ann", "Grace"]);
+    assert_eq!(copied[0].subject, "customers");
+    assert_eq!(operation_type(&change), Some("insert"));
+    assert_eq!(name(&change), "Ada");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
+async fn an_unfinished_initial_copy_starts_again() {
+    let (_mongo, credentials_path) = start_mongo().await;
+    insert_customer(&credentials_path, "Ann").await;
+    insert_customer(&credentials_path, "Grace").await;
+    let cache: Arc<dyn flowgen_core::cache::Cache> =
+        Arc::new(flowgen_core::cache::memory::MemoryCache::new());
+
+    let stopping = tokio_util::sync::CancellationToken::new();
+    let mut first_rx = spawn_copying_reader(
+        &credentials_path,
+        context_sharing(&cache, stopping.clone()),
+        Some(1),
+    )
+    .await;
+    let in_flight = next_event(&mut first_rx).await;
+    stopping.cancel();
+    drop(in_flight);
+    drop(first_rx);
+
+    let mut second_rx = spawn_copying_reader(
+        &credentials_path,
+        context_sharing(&cache, tokio_util::sync::CancellationToken::new()),
+        Some(1),
+    )
+    .await;
+    let (copied, names) = receive_copy(&mut second_rx, 2).await;
+    copied.iter().for_each(complete);
+
+    assert_ne!(copied[0].id, copied[1].id);
+    assert_eq!(names, ["Ann", "Grace"]);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
+async fn a_finished_initial_copy_is_not_repeated() {
+    let (_mongo, credentials_path) = start_mongo().await;
+    insert_customer(&credentials_path, "Ann").await;
+    let cache: Arc<dyn flowgen_core::cache::Cache> =
+        Arc::new(flowgen_core::cache::memory::MemoryCache::new());
+
+    let stopping = tokio_util::sync::CancellationToken::new();
+    let mut first_rx = spawn_copying_reader(
+        &credentials_path,
+        context_sharing(&cache, stopping.clone()),
+        None,
+    )
+    .await;
+    receive_copy(&mut first_rx, 1)
+        .await
+        .0
+        .iter()
+        .for_each(complete);
+    insert_customer(&credentials_path, "Grace").await;
+    assert_eq!(
+        next_change_name(&mut first_rx).await.as_deref(),
+        Some("Grace")
+    );
+    stopping.cancel();
+    drop(first_rx);
+    insert_customer(&credentials_path, "Ada").await;
+
+    let mut second_rx = spawn_copying_reader(
+        &credentials_path,
+        context_sharing(&cache, tokio_util::sync::CancellationToken::new()),
+        None,
+    )
+    .await;
+    let change = next_event(&mut second_rx).await;
+    complete(&change);
+    assert_eq!(operation_type(&change), Some("insert"));
+    assert_eq!(name(&change), "Ada");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
+async fn a_dropped_database_is_watched_again_after_its_invalidate_event() {
+    let (mongo, credentials_path) = start_mongo().await;
+    let port = mongo
+        .get_host_port_ipv4(27017)
+        .await
+        .expect("map mongo port");
+    let cache: Arc<dyn flowgen_core::cache::Cache> =
+        Arc::new(flowgen_core::cache::memory::MemoryCache::new());
+    let stopping = tokio_util::sync::CancellationToken::new();
+    let (mut rx, reader) = spawn_running_change_reader(
+        change_config(credentials_path.clone()),
+        context_sharing(&cache, stopping.clone()),
+    )
+    .await;
+    insert_customer(&credentials_path, "Ann").await;
+    assert_eq!(next_change_name(&mut rx).await.as_deref(), Some("Ann"));
+
+    mongodb::Client::with_uri_str(format!("mongodb://127.0.0.1:{port}/?directConnection=true"))
+        .await
+        .expect("connect")
+        .database("sales")
+        .drop()
+        .await
+        .expect("drop database");
+    let mut operations = Vec::new();
+    for _ in 0..3 {
+        let event = next_event(&mut rx).await;
+        complete(&event);
+        operations.push(operation_type(&event).map(String::from));
+    }
+    insert_customer(&credentials_path, "Grace").await;
+    let recreated = next_change_name(&mut rx).await;
+    stopping.cancel();
+    let stopped = tokio::time::timeout(Duration::from_secs(10), reader).await;
+
+    assert_eq!(
+        operations,
+        [
+            Some("drop".to_string()),
+            Some("dropDatabase".to_string()),
+            Some("invalidate".to_string())
+        ]
+    );
+    assert_eq!(
+        recreated.as_deref(),
+        Some("Grace"),
+        "changes to the recreated database must be delivered after the invalidate event"
+    );
+    assert!(
+        matches!(stopped, Ok(Ok(()))),
+        "the reader must stop within 10s once cancelled"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
+async fn an_idle_cdc_stores_its_position_for_a_restart() {
+    let (_mongo, credentials_path) = start_mongo().await;
+    let cache: Arc<dyn flowgen_core::cache::Cache> =
+        Arc::new(flowgen_core::cache::memory::MemoryCache::new());
+    let stopping = tokio_util::sync::CancellationToken::new();
+    let task_context = context_sharing(&cache, stopping.clone());
+    let key = format!("flow.{}.mongodb_resume_token.sales", task_context.flow.id());
+    let (first_rx, first_reader) =
+        spawn_running_change_reader(change_config(credentials_path.clone()), task_context).await;
+    let stored = tokio::time::timeout(Duration::from_secs(90), async {
+        while !matches!(cache.get(&key).await, Ok(Some(_))) {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    })
+    .await;
+    stopping.cancel();
+    tokio::time::timeout(Duration::from_secs(10), first_reader)
+        .await
+        .expect("the stopped reader returns")
+        .expect("the stopped reader did not panic");
+    drop(first_rx);
+    insert_customer(&credentials_path, "Grace").await;
+
+    let mut second_rx = spawn_change_reader(
+        credentials_path,
+        context_sharing(&cache, tokio_util::sync::CancellationToken::new()),
+    )
+    .await;
+
+    assert!(
+        stored.is_ok(),
+        "a reader with no changes must store its position"
+    );
+    assert_eq!(
+        next_change_name(&mut second_rx).await.as_deref(),
+        Some("Grace"),
+        "the restarted reader must get the change made while it was down"
+    );
+}
+
+/// A record the shared source tests write and read back.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Record {
+    payload: String,
+}
+
+/// A change stream reader on a fixed database, for the shared source tests.
+struct MongoSource {
+    records: mongodb::Collection<Record>,
+    config: Arc<Cdc>,
+    _server: ContainerAsync<GenericImage>,
+}
+
+impl MongoSource {
+    const DATABASE: &str = "conformance";
+    const COLLECTION: &str = "records";
+
+    async fn start() -> Self {
+        let (server, credentials_path) = start_mongo().await;
+        let port = server
+            .get_host_port_ipv4(27017)
+            .await
+            .expect("map mongo port");
+        let records = mongodb::Client::with_uri_str(format!(
+            "mongodb://127.0.0.1:{port}/?directConnection=true"
+        ))
+        .await
+        .expect("connect")
+        .database(Self::DATABASE)
+        .collection(Self::COLLECTION);
+        let config = Arc::new(Cdc {
+            db_name: Self::DATABASE.to_string(),
+            initial_copy: false,
+            ..change_config(credentials_path)
+        });
+        Self {
+            records,
+            config,
+            _server: server,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl flowgen_core::conformance::Source for MongoSource {
+    async fn produce(&self, payload: &str) {
+        let record = Record {
+            payload: payload.to_string(),
+        };
+        self.records
+            .insert_one(record)
+            .await
+            .expect("insert record");
+    }
+
+    async fn start(
+        &self,
+        context: Arc<flowgen_core::task::context::TaskContext>,
+        tx: mpsc::Sender<Event>,
+    ) -> tokio::task::JoinHandle<()> {
+        let reader = cdc::ProcessorBuilder::new()
+            .config(Arc::clone(&self.config))
+            .sender(tx)
+            .task_id(0)
+            .task_type("mongodb_cdc")
+            .task_context(context)
+            .build()
+            .await
+            .expect("build change stream reader");
+        tokio::spawn(async move {
+            use flowgen_core::task::runner::Runner;
+            let _ = reader.run().await;
+        })
+    }
+
+    fn payload(&self, event: &Event) -> String {
+        let data = event.data_as_json().expect("JSON record");
+        let record: Record = serde_json::from_value(data).expect("record");
+        record.payload
+    }
+
+    fn idle(&self) -> Duration {
+        Duration::from_secs(5)
+    }
+
+    fn ack_deadline(&self) -> Duration {
+        Duration::from_secs(2)
+    }
+}
+
+flowgen_core::source_conformance!(MongoSource::start().await);

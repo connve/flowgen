@@ -207,16 +207,6 @@ pub enum Error {
     },
     #[error("Missing required builder attribute: {}", _0)]
     MissingBuilderAttribute(String),
-    #[error("Failed to encode JSON to protobuf: {source}")]
-    ProtoEncode {
-        #[source]
-        source: serde_json::Error,
-    },
-    #[error("Arrow conversion error: {source}")]
-    Arrow {
-        #[source]
-        source: arrow::error::ArrowError,
-    },
     #[error("Table metadata retrieval error: {source}")]
     TableMetadata {
         #[source]
@@ -593,70 +583,27 @@ impl flowgen_core::task::runner::Handler for EventHandler {
                 .render_for_event(event.as_ref())
                 .map_err(|source| Error::ConfigRender { source })?;
 
-            // Encode event data as protobuf rows.
-            // Supports both JSON (single row) and Arrow RecordBatch (multiple rows).
-            let proto_rows = match &event.data {
-                EventData::ArrowRecordBatch(batch) => {
-                    let mut rows = Vec::with_capacity(batch.num_rows());
-                    let mut json_writer = arrow_json::ArrayWriter::new(Vec::new());
-                    json_writer
-                        .write(batch)
-                        .map_err(|source| Error::Arrow { source })?;
-                    json_writer
-                        .finish()
-                        .map_err(|source| Error::Arrow { source })?;
-                    let json_bytes = json_writer.into_inner();
-                    let json_rows: Vec<JsonValue> = serde_json::from_slice(&json_bytes)
-                        .map_err(|source| Error::ProtoEncode { source })?;
-
-                    if let Some(first) = json_rows.first() {
-                        report_unwritable_fields(first, &self.table_fields, &config.table_id);
-                    }
-
-                    for row in &json_rows {
-                        let mut proto_bytes = json_to_proto_bytes(row, &self.table_fields)?;
-                        if let Some(ref change_type) = config.change_type {
-                            let tag = (self.table_fields.len() + 1) as u32;
-                            prost::encoding::string::encode(
-                                tag,
-                                &change_type.to_string(),
-                                &mut proto_bytes,
-                            );
-                        }
-                        rows.push(proto_bytes);
-                    }
-                    rows
-                }
-                _ => {
-                    let data = event.data_as_json()?;
-
-                    // Support both single JSON objects and JSON arrays as input.
-                    let json_rows: Vec<&JsonValue> = match &data {
-                        JsonValue::Array(arr) => arr.iter().collect(),
-                        _ => vec![&data],
-                    };
-
-                    if let Some(first) = json_rows.first() {
-                        report_unwritable_fields(first, &self.table_fields, &config.table_id);
-                    }
-
-                    let mut rows = Vec::with_capacity(json_rows.len());
-                    for row in json_rows {
-                        let mut proto_bytes =
-                            json_to_proto_bytes(row, &self.table_fields)?;
-                        if let Some(ref change_type) = config.change_type {
-                            let tag = (self.table_fields.len() + 1) as u32;
-                            prost::encoding::string::encode(
-                                tag,
-                                &change_type.to_string(),
-                                &mut proto_bytes,
-                            );
-                        }
-                        rows.push(proto_bytes);
-                    }
-                    rows
-                }
+            // Encode event data as protobuf rows: one JSON object, an array of
+            // them, or the rows of an Arrow record batch.
+            let data = event.data_as_json()?;
+            let json_rows: Vec<&JsonValue> = match &data {
+                JsonValue::Array(arr) => arr.iter().collect(),
+                _ => vec![&data],
             };
+
+            if let Some(first) = json_rows.first() {
+                report_unwritable_fields(first, &self.table_fields, &config.table_id);
+            }
+
+            let mut proto_rows = Vec::with_capacity(json_rows.len());
+            for row in json_rows {
+                let mut proto_bytes = json_to_proto_bytes(row, &self.table_fields)?;
+                if let Some(ref change_type) = config.change_type {
+                    let tag = (self.table_fields.len() + 1) as u32;
+                    prost::encoding::string::encode(tag, &change_type.to_string(), &mut proto_bytes);
+                }
+                proto_rows.push(proto_bytes);
+            }
 
             // Create append request with proper proto descriptor.
             let mut builder = AppendRowsRequestBuilder::new(

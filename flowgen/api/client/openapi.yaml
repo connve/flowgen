@@ -5,7 +5,7 @@ info:
     HTTP API for flowgen. Two listeners: `web` (flow / resource /
     SSE endpoints under `web.path`) and `health` (Kubernetes probes
     on the root path).
-  version: 0.152.0
+  version: 0.153.0
   license:
     name: MPL-2.0
 servers:
@@ -1675,6 +1675,9 @@ components:
         error:
           type: string
           description: Why the agent's reply ended without finishing, e.g. the AI gateway failed.
+        stopped:
+          type: boolean
+          description: The user stopped the agent's reply before it finished.
 
     ConversationUpdate:
       type: object

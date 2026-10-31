@@ -11,7 +11,7 @@ use serde_json::{Map, Value};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::task::JoinHandle;
+use tokio::task::JoinSet;
 use tracing::Instrument;
 
 /// Environment overrides for any config key, layered over the config file.
@@ -279,25 +279,31 @@ macro_rules! task_types {
                 }
             }
 
-            /// Spawns the task in the current span.
+            /// Spawns the task into `tasks`, in the current span.
             pub fn spawn(
                 self,
                 io: TaskIo,
                 context: Arc<TaskContext>,
-            ) -> JoinHandle<Result<(), crate::flow::Error>> {
+                tasks: &mut JoinSet<Result<(), crate::flow::Error>>,
+            ) {
                 let span = tracing::Span::current();
+                let task = self.name().to_string();
                 match self {
-                    $(TaskType::$tag(config) => tokio::spawn(
-                        async move {
-                            config.run(io, context).await.map_err(|source| {
-                                crate::flow::Error::Task {
-                                    task_type: stringify!($tag),
-                                    source,
-                                }
-                            })
-                        }
-                        .instrument(span),
-                    ),)+
+                    $(TaskType::$tag(config) => {
+                        let stop = context.cancellation_token.clone();
+                        tasks.spawn(
+                            async move {
+                                let result = config.run(io, context).await;
+                                crate::flow::task_result(
+                                    task,
+                                    stringify!($tag),
+                                    <$config as TaskMeta>::RUNS_UNTIL_STOPPED && !stop.is_cancelled(),
+                                    result,
+                                )
+                            }
+                            .instrument(span),
+                        );
+                    })+
                 }
             }
         }
@@ -361,6 +367,12 @@ task_types! {
     gcp_bigquery_storage_write(flowgen_gcp::bigquery::storage_write::StorageWrite),
     /// Microsoft SQL Server query task.
     mssql_query(flowgen_mssql::query::Query),
+    /// PostgreSQL query task.
+    postgres_query(flowgen_postgres::query::Query),
+    /// PostgreSQL write task, with COPY.
+    postgres_write(flowgen_postgres::write::Write),
+    /// PostgreSQL change data capture task.
+    postgres_cdc(flowgen_postgres::cdc::Cdc),
     /// NATS Key-Value store operations (get, put, list, delete).
     nats_kv_store(flowgen_nats::kv_store::KvStore),
     /// AI completion task for generating responses using LLMs.
@@ -397,8 +409,8 @@ task_types! {
     klaviyo_profiles(flowgen_klaviyo::profiles::Profiles),
     /// MongoDB collection read/write task.
     mongodb_collection(flowgen_mongodb::collection::Collection),
-    /// MongoDB change stream reader task.
-    mongodb_change_stream(flowgen_mongodb::change_stream::ChangeStream),
+    /// MongoDB change data capture task.
+    mongodb_cdc(flowgen_mongodb::cdc::Cdc),
     /// Kafka produce task.
     kafka_produce(flowgen_kafka::produce::Produce),
     /// Kafka subscribe task.

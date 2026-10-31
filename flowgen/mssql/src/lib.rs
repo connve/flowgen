@@ -13,6 +13,7 @@ use std::sync::Arc;
 pub mod client;
 pub mod config;
 pub mod query;
+pub mod rows;
 
 pub use client::Client;
 pub use query::{Processor, Query};
@@ -55,7 +56,7 @@ impl Task for query::Query {
         if let Some(tx) = io.tx {
             builder = builder.sender(tx);
         }
-        builder.build().await?.run().await?;
+        builder.build()?.run().await?;
         Ok(())
     }
 }

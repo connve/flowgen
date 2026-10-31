@@ -7,7 +7,7 @@
 //! - `GET /livez` — liveness. 200 as long as the axum task is scheduling.
 //! - `GET /healthz` — alias of `/livez` for pre-1.16 k8s convention.
 //! - `GET /readyz` — readiness. 200 iff the caller-supplied predicate returns
-//!   true. flowgen wires this to "at least one flow is registered".
+//!   true. flowgen wires this to "startup has finished".
 //!
 //! Liveness fails only if the whole process is wedged (kubelet restarts the
 //! pod). Readiness fails during startup or when the app cannot do useful
