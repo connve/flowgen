@@ -13,6 +13,7 @@ Tasks that talk to external systems load credentials from a JSON file referenced
 | `gcp_*` (BigQuery) | GCP service account JSON | Google Cloud APIs. |
 | `salesforce_*` | Salesforce credentials JSON | Salesforce REST / Pub/Sub / Bulk APIs. |
 | `mssql_query` | MSSQL credentials JSON | SQL Server connection. |
+| `postgres_query`, `postgres_write`, `postgres_cdc` | PostgreSQL credentials JSON | PostgreSQL connection. |
 | `object_store` | Cloud-specific credentials JSON | S3, GCS, or Azure. |
 | `git_sync` | Git credentials JSON (HTTPS token) | Git remote. |
 | `web.auth` | `client_secret`, `cookie_secret` | The web UI's OIDC login. |
@@ -131,7 +132,7 @@ The key fields used for deduplication depend on the task family:
 |---|---|
 | `salesforce_*` | `credentials_path` |
 | `gcp_*` (BigQuery) | `credentials_path` |
-| `mssql_query` | `credentials_path`, `max_connections`, `connection_timeout`, `query_timeout` |
+| `mssql_query`, `postgres_query`, `postgres_write` | `credentials_path`, `max_connections`, `connection_timeout`, `query_timeout` |
 | `nats_jetstream_*`, `nats_kv_store` | `credentials_path`, `url` |
 | `object_store_*` | `path`, `credentials_path` |
 
@@ -141,7 +142,7 @@ Tasks with different identity fields get separate clients. Two MSSQL tasks with 
 
 The **Connections** tab lists the external systems the loaded flows connect to, including `ai_completion` MCP servers. Each row is one connector and credentials file, so Salesforce tasks that share a credentials file are one connection.
 
-- Next to the name, a row shows what the credentials file points to, read from its non-secret fields: a Salesforce org host, a service account email, an MSSQL server and database, MongoDB hosts, or a Braze REST endpoint.
+- Next to the name, a row shows what the credentials file points to, read from its non-secret fields: a Salesforce org host, a service account email, an MSSQL or PostgreSQL server and database, MongoDB hosts, or a Braze REST endpoint.
 - It also shows where its tasks connect, from their configs: hosts, brokers, repositories, buckets, or an AI provider and model.
 - Values set per event show as `per event`. An MCP server called with `on_behalf_of_user: true` shows as `on behalf of user`.
 - A `{{env.…}}` value shows what it renders to, with the same parts left out as a value written in the config. When the variable is unset, it shows as written.
@@ -154,5 +155,5 @@ Tasks that receive calls, such as `http_endpoint` and `mcp_tool`, are not listed
 
 - **File permissions** should be `0600` (read-write for the flowgen user only). Flowgen does not enforce this — the operator is responsible.
 - **Hot reload** is not supported. Credentials are read once at task initialisation. To rotate, restart the worker. OAuth 2.0 access tokens are an exception — they auto-refresh transparently when they expire.
-- **Errors at startup**: if the file is missing or malformed, the task fails to initialise and the standard retry circuit breaker fires. After ~15 minutes the task gives up. Watch worker logs for `Failed to read credentials` or `Failed to parse credentials` messages.
+- **Errors at startup**: if the file is missing or malformed, the task retries its startup up to every 5 minutes until the file is fixed. Watch worker logs for `Failed to read credentials` or `Failed to parse credentials` messages.
 - **Never commit credential files to Git.** Pair with `git_sync` carefully: sync flow YAML, but mount credentials separately via a Kubernetes secret.

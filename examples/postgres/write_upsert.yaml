@@ -1,0 +1,30 @@
+# Copy recently changed orders from one PostgreSQL database into another every 5 minutes.
+#
+# Required:
+#   - Source credentials at /etc/postgres/source.json, target at /etc/postgres/target.json
+#   - A primary key on the target orders table
+flow:
+  labels:
+    display_name: "PostgreSQL Upsert"
+    description: "Reads the orders changed in the last 5 minutes and upserts them into another database with COPY."
+    tags: ["postgres", "write", "upsert", "example"]
+  require_leader_election: true
+  tasks:
+
+    # Tick every 5 minutes.
+    - generate:
+        name: tick
+        interval: 300s
+
+    # Orders changed since the last tick, as Arrow record batches.
+    - postgres_query:
+        name: changed_orders
+        credentials_path: /etc/postgres/source.json
+        query: "SELECT id, customer_id, total, status, updated_at FROM orders WHERE updated_at > now() - interval '5 minutes'"
+
+    # Insert new orders and update existing ones by primary key.
+    - postgres_write:
+        name: save_orders
+        credentials_path: /etc/postgres/target.json
+        table: public.orders
+        change_type: upsert

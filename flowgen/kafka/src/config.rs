@@ -17,8 +17,6 @@ pub enum ConfigError {
     EmptyBrokers,
     #[error("Ack timeout must be greater than zero")]
     ZeroAckTimeout,
-    #[error("Max deliver must be at least 1")]
-    ZeroMaxDeliver,
     #[error("Start offset must be `earliest`, `latest`, or an RFC 3339 timestamp from 1970 on, got `{value}`")]
     InvalidStartOffset { value: String },
 }

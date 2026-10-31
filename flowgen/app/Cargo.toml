@@ -20,6 +20,7 @@ flowgen_nats = { path = "../nats" }
 flowgen_object_store = { path = "../object-store" }
 flowgen_gcp = { path = "../gcp" }
 flowgen_mssql = { path = "../mssql" }
+flowgen_postgres = { path = "../postgres" }
 flowgen_mongodb = { path = "../mongodb" }
 flowgen_ai_agent = { path = "../ai-agent" }
 flowgen_mcp = { path = "../mcp" }
@@ -69,6 +70,7 @@ time = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 testcontainers = { workspace = true }
+async-nats = { workspace = true }
 bytes = { workspace = true }
 reqwest = { workspace = true }
 

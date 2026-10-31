@@ -32,13 +32,18 @@ async fn lock_kafka_test() -> tokio::sync::MutexGuard<'static, ()> {
 }
 
 async fn start_kafka() -> (ContainerAsync<GenericImage>, String) {
+    start_kafka_with(&[]).await
+}
+
+/// Starts the broker with `settings` added to its environment.
+async fn start_kafka_with(settings: &[(&str, &str)]) -> (ContainerAsync<GenericImage>, String) {
     // Reserve a host port and release it again; the container binds it via
     // `with_mapped_port` so the broker can advertise a reachable listener.
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind free host port");
     let host_port = listener.local_addr().expect("local addr").port();
     drop(listener);
 
-    let container = GenericImage::new("apache/kafka", "3.8.0")
+    let mut request = GenericImage::new("apache/kafka", "3.8.0")
         .with_wait_for(WaitFor::message_on_stdout("Kafka Server started"))
         .with_mapped_port(host_port, 9092.tcp())
         .with_env_var("KAFKA_NODE_ID", "1")
@@ -59,10 +64,11 @@ async fn start_kafka() -> (ContainerAsync<GenericImage>, String) {
         .with_env_var("KAFKA_INTER_BROKER_LISTENER_NAME", "PLAINTEXT")
         .with_env_var("KAFKA_CONTROLLER_QUORUM_VOTERS", "1@localhost:9093")
         .with_env_var("KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR", "1")
-        .with_startup_timeout(Duration::from_secs(120))
-        .start()
-        .await
-        .expect("start kafka container");
+        .with_startup_timeout(Duration::from_secs(120));
+    for (name, value) in settings {
+        request = request.with_env_var(*name, *value);
+    }
+    let container = request.start().await.expect("start kafka container");
 
     (container, format!("127.0.0.1:{host_port}"))
 }
@@ -557,8 +563,16 @@ fn spawn_subscriber(
     config: Subscribe,
     task_context: Arc<flowgen_core::task::context::TaskContext>,
 ) -> mpsc::Receiver<Event> {
+    spawn_running_subscriber(config, task_context).0
+}
+
+/// Spawns the subscriber and returns its task too, to wait for it to stop.
+fn spawn_running_subscriber(
+    config: Subscribe,
+    task_context: Arc<flowgen_core::task::context::TaskContext>,
+) -> (mpsc::Receiver<Event>, tokio::task::JoinHandle<()>) {
     let (tx, rx) = mpsc::channel(16);
-    tokio::spawn(async move {
+    let running = tokio::spawn(async move {
         use flowgen_core::task::runner::Runner;
         let subscriber = SubscriberBuilder::new()
             .config(Arc::new(config))
@@ -571,7 +585,7 @@ fn spawn_subscriber(
             .expect("build subscriber");
         let _ = subscriber.run().await;
     });
-    rx
+    (rx, running)
 }
 
 async fn next_event(rx: &mut mpsc::Receiver<Event>) -> Event {
@@ -716,6 +730,41 @@ async fn subscribe_resumes_from_the_stored_offset() {
 
 #[tokio::test]
 #[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
+async fn subscribe_reads_a_partition_without_a_stored_offset_from_its_earliest_record() {
+    let _lock = lock_kafka_test().await;
+    let (_kafka, brokers) = start_kafka().await;
+    create_topic(&brokers, "t", 2).await;
+    write_records(&brokers, "t", 0, &["a"]).await;
+    write_records(&brokers, "t", 1, &["b", "c"]).await;
+
+    let task_context = test_task_context();
+    task_context
+        .cache
+        .put(&offset_key(&task_context, "t", 0), "1".into(), None)
+        .await
+        .expect("store offset");
+    let mut rx = spawn_subscriber(
+        Subscribe {
+            start_offset: StartOffset::Latest,
+            ..subscribe_config(&brokers, "t")
+        },
+        Arc::clone(&task_context),
+    );
+
+    let mut positions = Vec::new();
+    for _ in 0..2 {
+        let event = next_event(&mut rx).await;
+        complete(&event);
+        let meta = record_meta(&event);
+        positions.push((meta.partition, meta.offset));
+    }
+
+    assert_eq!(positions, vec![(1, 0), (1, 1)]);
+    wait_for_offset(&task_context, "t", 1, 2).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
 async fn subscribe_restarts_from_start_offset_when_the_stored_offset_is_past_the_end() {
     let _lock = lock_kafka_test().await;
     let (_kafka, brokers) = start_kafka().await;
@@ -828,7 +877,10 @@ async fn subscribe_delivers_a_failing_record_until_the_flow_completes_it() {
     let task_context = test_task_context();
     let mut rx = spawn_subscriber(
         Subscribe {
-            backoff: vec![Duration::from_millis(1)],
+            retry: Some(flowgen_core::retry::RetryConfig {
+                max_attempts: None,
+                initial_backoff: Duration::from_millis(1),
+            }),
             ..subscribe_config(&brokers, "t")
         },
         Arc::clone(&task_context),
@@ -863,8 +915,11 @@ async fn subscribe_skips_a_record_after_max_deliver_failed_deliveries() {
     let task_context = test_task_context();
     let mut rx = spawn_subscriber(
         Subscribe {
-            max_deliver: Some(2),
-            backoff: vec![Duration::from_millis(1)],
+            max_deliver: std::num::NonZeroU32::new(2),
+            retry: Some(flowgen_core::retry::RetryConfig {
+                max_attempts: None,
+                initial_backoff: Duration::from_millis(1),
+            }),
             ..subscribe_config(&brokers, "t")
         },
         Arc::clone(&task_context),
@@ -978,3 +1033,137 @@ async fn subscribe_to_a_missing_topic_does_not_create_it() {
     assert!(!topics.iter().any(|t| t.name == "absent"));
     assert!(rx.try_recv().is_err());
 }
+
+fn context_sharing(
+    cache: &Arc<dyn flowgen_core::cache::Cache>,
+    cancellation_token: tokio_util::sync::CancellationToken,
+) -> Arc<flowgen_core::task::context::TaskContext> {
+    let task_manager = Arc::new(
+        flowgen_core::task::manager::TaskManagerBuilder::new()
+            .build()
+            .expect("build TaskManager"),
+    );
+    Arc::new(
+        flowgen_core::task::context::TaskContextBuilder::new()
+            .flow_name("test_flow".to_string())
+            .task_manager(task_manager)
+            .cache(Arc::clone(cache))
+            .cancellation_token(cancellation_token)
+            .build()
+            .expect("build TaskContext"),
+    )
+}
+
+#[tokio::test]
+#[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
+async fn a_record_in_flight_when_the_subscriber_stops_goes_to_the_next_one() {
+    let _lock = lock_kafka_test().await;
+    let (_kafka, brokers) = start_kafka().await;
+    create_topic(&brokers, "t", 1).await;
+    write_records(&brokers, "t", 0, &["a"]).await;
+    let cache: Arc<dyn flowgen_core::cache::Cache> =
+        Arc::new(flowgen_core::cache::memory::MemoryCache::new());
+    let config = Subscribe {
+        max_deliver: std::num::NonZeroU32::new(1),
+        ..subscribe_config(&brokers, "t")
+    };
+
+    let stopping = tokio_util::sync::CancellationToken::new();
+    let (mut first_rx, first) =
+        spawn_running_subscriber(config.clone(), context_sharing(&cache, stopping.clone()));
+    let in_flight = next_event(&mut first_rx).await;
+    stopping.cancel();
+    tokio::time::timeout(Duration::from_secs(10), first)
+        .await
+        .expect("the stopped subscriber returns while its record is still in the flow")
+        .expect("the stopped subscriber did not panic");
+
+    let mut second_rx = spawn_subscriber(
+        config,
+        context_sharing(&cache, tokio_util::sync::CancellationToken::new()),
+    );
+    let redelivered = next_event(&mut second_rx).await;
+    drop(in_flight);
+
+    assert_eq!(record_meta(&redelivered).offset, 0);
+}
+
+/// A record the shared source tests write and read back.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SourceRecord {
+    payload: String,
+}
+
+/// A subscriber on a one-partition topic of a broker that closes idle
+/// connections after 3 seconds, for the shared source tests.
+struct KafkaSource {
+    _lock: tokio::sync::MutexGuard<'static, ()>,
+    _server: ContainerAsync<GenericImage>,
+    brokers: String,
+    config: Arc<Subscribe>,
+}
+
+impl KafkaSource {
+    const TOPIC: &str = "conformance";
+
+    async fn start() -> Self {
+        let lock = lock_kafka_test().await;
+        let (server, brokers) =
+            start_kafka_with(&[("KAFKA_CONNECTIONS_MAX_IDLE_MS", "3000")]).await;
+        create_topic(&brokers, Self::TOPIC, 1).await;
+        let config = Arc::new(subscribe_config(&brokers, Self::TOPIC));
+        Self {
+            _lock: lock,
+            _server: server,
+            brokers,
+            config,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl flowgen_core::conformance::Source for KafkaSource {
+    async fn produce(&self, payload: &str) {
+        let record = SourceRecord {
+            payload: payload.to_string(),
+        };
+        let value = serde_json::to_string(&record).expect("serialize record");
+        write_records(&self.brokers, Self::TOPIC, 0, &[&value]).await;
+    }
+
+    async fn start(
+        &self,
+        context: Arc<flowgen_core::task::context::TaskContext>,
+        tx: mpsc::Sender<Event>,
+    ) -> tokio::task::JoinHandle<()> {
+        let subscriber = SubscriberBuilder::new()
+            .config(Arc::clone(&self.config))
+            .sender(tx)
+            .task_id(0)
+            .task_type("kafka_subscribe")
+            .task_context(context)
+            .build()
+            .await
+            .expect("build subscriber");
+        tokio::spawn(async move {
+            use flowgen_core::task::runner::Runner;
+            let _ = subscriber.run().await;
+        })
+    }
+
+    fn payload(&self, event: &Event) -> String {
+        let data = event.data_as_json().expect("JSON record");
+        let record: SourceRecord = serde_json::from_value(data).expect("record");
+        record.payload
+    }
+
+    fn idle(&self) -> Duration {
+        Duration::from_secs(8)
+    }
+
+    fn ack_deadline(&self) -> Duration {
+        Duration::from_secs(2)
+    }
+}
+
+flowgen_core::source_conformance!(KafkaSource::start().await);

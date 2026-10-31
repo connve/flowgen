@@ -143,19 +143,12 @@ async fn both_branches_of_a_reentrant_fan_out_observe_the_same_tick_data() {
         Err(e) => panic!("flow.init() returned Err: {e:?}"),
     }
 
-    let blocking_handles = match flow.start_tasks().await {
-        Ok(handles) => handles,
-        Err(e) => panic!("flow.start_tasks() returned Err: {e:?}"),
-    };
-    assert_eq!(
-        blocking_handles.len(),
-        0,
-        "this flow has no webhook/blocking tasks, so start_tasks() must return zero \
-         blocking handles; got {}",
-        blocking_handles.len()
-    );
+    let stop = flow.cancellation_token();
+    let running = flow.run();
 
     tokio::time::sleep(Duration::from_secs(2)).await;
+    stop.cancel();
+    let _ = running.await;
 
     let all_keys = match cache.list_keys("").await {
         Ok(keys) => keys,

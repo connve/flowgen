@@ -16,7 +16,6 @@ flow:
         topic: sample-events
         start_offset: earliest
         ack_timeout: 60s
-        backoff: ["1s", "10s", "1m"]
 
     - nats_jetstream_publish:
         name: publish_to_nats

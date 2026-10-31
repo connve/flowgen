@@ -60,11 +60,6 @@ flow:
         durable_name: salesforce_composite_upsert_contact
         ack_timeout: "120s"
         max_deliver: 5
-        backoff:
-          - "10s"
-          - "30s"
-          - "1m"
-          - "5m"
 
     - salesforce_restapi_composite:
         name: upsert_contacts
@@ -133,11 +128,6 @@ flow:
         durable_name: salesforce_platform_event_publisher
         ack_timeout: "60s"
         max_deliver: 5
-        backoff:
-          - "10s"
-          - "30s"
-          - "1m"
-          - "5m"
 
     - salesforce_pubsubapi_publish:
         name: publish_order_status

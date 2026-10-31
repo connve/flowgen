@@ -364,3 +364,71 @@ async fn two_buckets_from_the_same_builder_share_configuration() {
             .expect("both buckets must accept per-message TTL puts");
     }
 }
+
+async fn delete_bucket(url: &str, bucket: &str) {
+    let client = async_nats::connect(url).await.expect("nats connect");
+    async_nats::jetstream::new(client)
+        .delete_key_value(bucket)
+        .await
+        .expect("delete bucket");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
+async fn a_deleted_bucket_is_recreated_by_the_next_operation() {
+    let (_nats, url) = start_nats().await;
+
+    let cache = cache_with_bucket(&url, "flowgen_recreate").await;
+    delete_bucket(&url, "flowgen_recreate").await;
+    cache
+        .put("k", Bytes::from_static(b"v"), Some(60))
+        .await
+        .expect("put recreates the bucket");
+    assert_eq!(
+        &cache.get("k").await.expect("get").expect("present")[..],
+        b"v"
+    );
+
+    delete_bucket(&url, "flowgen_recreate").await;
+    assert!(cache
+        .get("k")
+        .await
+        .expect("get recreates the bucket")
+        .is_none());
+
+    delete_bucket(&url, "flowgen_recreate").await;
+    let revision = cache
+        .create("lease", Bytes::from_static(b"a"), Some(60))
+        .await
+        .expect("create recreates the bucket");
+    delete_bucket(&url, "flowgen_recreate").await;
+    assert!(matches!(
+        cache
+            .update("lease", Bytes::from_static(b"b"), revision, Some(60))
+            .await,
+        Err(CacheError::RevisionMismatch { .. })
+    ));
+
+    delete_bucket(&url, "flowgen_recreate").await;
+    let mut watch = cache
+        .watch("flows", false)
+        .await
+        .expect("watch recreates the bucket");
+    cache
+        .put("flows.a", Bytes::from_static(b"x"), None)
+        .await
+        .expect("put");
+    let event = tokio::time::timeout(Duration::from_secs(5), watch.next())
+        .await
+        .expect("watch event in time")
+        .expect("stream open")
+        .expect("event");
+    assert!(matches!(event, WatchEvent::Put { key, .. } if key == "flows.a"));
+
+    delete_bucket(&url, "flowgen_recreate").await;
+    assert!(cache
+        .list_keys("")
+        .await
+        .expect("list_keys recreates the bucket")
+        .is_empty());
+}
