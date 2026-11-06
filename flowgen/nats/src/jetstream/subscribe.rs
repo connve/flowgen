@@ -8,6 +8,7 @@ use flowgen_core::{
     task::TaskConfig,
 };
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::Sender;
@@ -24,7 +25,7 @@ const DEFAULT_PROGRESS_INTERVAL: Duration = Duration::from_secs(15);
 /// How long a stopping subscriber waits for NATS to take its last acks.
 const FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// `nats_jetstream_subscribe` task config.
+/// `nats_jetstream_subscribe` task config; unknown fields are rejected by the transparent inner `Config`.
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, TaskConfig)]
 #[serde(transparent)]
 pub struct Subscribe(pub super::config::Config);
@@ -125,6 +126,8 @@ pub struct EventHandler {
     client_key: flowgen_core::client_registry::ClientKey,
     config: Arc<super::config::Config>,
     delivery: Arc<Delivery>,
+    /// Set once the server answers a pull request, which starts the reconnect backoff over.
+    received: Arc<AtomicBool>,
 }
 
 /// What each message needs from its delivery to its ack.
@@ -167,7 +170,9 @@ impl EventHandler {
             None => self.delivery.task_context.max_in_flight,
         };
         let slots = Arc::new(Semaphore::new(max_in_flight.get()));
-        let cancellation = self.delivery.task_context.cancellation_token.clone();
+        let stop_reading = self.delivery.task_context.stop_reading.clone();
+        let stopped = stop_reading.cancelled();
+        tokio::pin!(stopped);
         let mut throttle = self.config.throttle.map(|period| {
             let mut interval = tokio::time::interval(period);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -178,9 +183,8 @@ impl EventHandler {
         loop {
             let first = tokio::select! {
                 biased;
-                _ = cancellation.cancelled() => {
-                    self.delivery.stopping.cancel();
-                    join_all(&mut in_flight).await;
+                _ = &mut stopped => {
+                    finish(&mut in_flight, &self.delivery).await;
                     return Ok(());
                 }
                 slot = Arc::clone(&slots).acquire_owned() => match slot {
@@ -211,12 +215,12 @@ impl EventHandler {
                 }
             };
 
-            let mut received = 0;
+            let mut delivered = 0;
             loop {
                 let next = tokio::select! {
                     biased;
-                    _ = cancellation.cancelled() => {
-                        stop(request, None, &mut in_flight, &self.delivery.stopping).await;
+                    _ = &mut stopped => {
+                        stop(request, None, &mut in_flight, &self.delivery).await;
                         return Ok(());
                     }
                     next = request.next() => next,
@@ -235,14 +239,14 @@ impl EventHandler {
                 if let Some(throttle) = throttle.as_mut() {
                     tokio::select! {
                         biased;
-                        _ = cancellation.cancelled() => {
-                            stop(request, Some(message), &mut in_flight, &self.delivery.stopping).await;
+                        _ = &mut stopped => {
+                            stop(request, Some(message), &mut in_flight, &self.delivery).await;
                             return Ok(());
                         }
                         _ = throttle.tick() => {}
                     }
                 }
-                received += 1;
+                delivered += 1;
                 let span = tracing::info_span!("task.handle", duration_ms = tracing::field::Empty);
                 in_flight.spawn(
                     Arc::clone(&self.delivery)
@@ -250,9 +254,12 @@ impl EventHandler {
                         .instrument(span),
                 );
             }
+            if request.answered {
+                self.received.store(true, Ordering::Relaxed);
+            }
             reap(&mut in_flight);
 
-            if received == 0
+            if delivered == 0
                 && self.client.connection_state() == async_nats::connection::State::Disconnected
             {
                 join_all(&mut in_flight).await;
@@ -270,6 +277,8 @@ struct PullRequest {
     pending: usize,
     /// When the request is over even if NATS never says so.
     deadline: tokio::time::Instant,
+    /// Whether NATS has answered the request.
+    answered: bool,
 }
 
 impl PullRequest {
@@ -300,6 +309,7 @@ impl PullRequest {
             jetstream: jetstream.clone(),
             pending: max_messages,
             deadline: tokio::time::Instant::now() + expires + Duration::from_secs(5),
+            answered: false,
         })
     }
 
@@ -310,6 +320,7 @@ impl PullRequest {
                 Ok(Some(message)) => message,
                 Ok(None) | Err(_) => return Ok(None),
             };
+            self.answered = true;
             match message.status {
                 None | Some(async_nats::StatusCode::OK) => {
                     self.pending -= 1;
@@ -411,6 +422,8 @@ impl Delivery {
         let downstream = self.tx.is_some();
         let send = std::future::IntoFuture::into_future(event.send_with_logging(self.tx.as_ref()));
         tokio::pin!(send);
+        let stopped = self.stopping.cancelled();
+        tokio::pin!(stopped);
         let mut sent = false;
         loop {
             tokio::select! {
@@ -423,7 +436,7 @@ impl Delivery {
                         return Outcome::Failed;
                     }
                 },
-                _ = self.stopping.cancelled() => return Outcome::Stopped,
+                _ = &mut stopped => return Outcome::Stopped,
                 result = &mut send, if !sent => match (result, downstream) {
                     (Ok(()), true) => sent = true,
                     (Ok(()), false) => return Outcome::Completed,
@@ -464,22 +477,31 @@ impl Delivery {
     }
 }
 
-/// Ends the pull request, then hands back the messages it delivered that the
-/// flow has not taken, `held`, and the messages in the flow. Handed back
-/// before the request ended, NATS would deliver them into it again.
+/// Ends the pull request first, so NATS cannot redeliver into it, then hands back what the flow has not taken.
 async fn stop(
     request: PullRequest,
     held: Option<jetstream::Message>,
     in_flight: &mut JoinSet<()>,
-    stopping: &CancellationToken,
+    delivery: &Delivery,
 ) {
     let mut unread = request.end().await;
     unread.extend(held);
     for message in &unread {
         release(message).await;
     }
-    stopping.cancel();
-    join_all(in_flight).await;
+    finish(in_flight, delivery).await;
+}
+
+/// Waits for the messages in the flow, handing them back once the task stops.
+async fn finish(in_flight: &mut JoinSet<()>, delivery: &Delivery) {
+    let stopped = tokio::select! {
+        _ = join_all(in_flight) => false,
+        _ = delivery.task_context.cancellation_token.cancelled() => true,
+    };
+    if stopped {
+        delivery.stopping.cancel();
+        join_all(in_flight).await;
+    }
 }
 
 /// Waits for every message task, logging one that panicked.
@@ -740,6 +762,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                 consumer,
                 config: Arc::clone(&self.config),
                 delivery: Arc::new(delivery),
+                received: Arc::new(AtomicBool::new(false)),
             })
         }
     }
@@ -748,14 +771,14 @@ impl flowgen_core::task::runner::Runner for Processor {
     async fn run(self) -> Result<(), Error> {
         let retry_config =
             flowgen_core::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
-        let cancellation_token = self.task_context.cancellation_token.clone();
-        let mut reconnect_backoff = retry_config.reconnect_strategy();
+        let stop_reading = self.task_context.stop_reading.clone();
+        let mut reconnect_backoff = flowgen_core::retry::ReconnectBackoff::new(&retry_config);
 
         let mut lost_connectivity = false;
 
         // Infinite retry loop: subscribers must maintain connectivity indefinitely.
         loop {
-            if cancellation_token.is_cancelled() {
+            if stop_reading.is_cancelled() {
                 return Ok(());
             }
 
@@ -781,24 +804,20 @@ impl flowgen_core::task::runner::Runner for Processor {
             );
 
             let event_handler = tokio::select! {
-                _ = cancellation_token.cancelled() => return Ok(()),
+                _ = stop_reading.cancelled() => return Ok(()),
                 result = init_future => match result {
                     Ok(handler) => {
-                        reconnect_backoff = retry_config.reconnect_strategy();
                         if lost_connectivity {
                             warn!("Subscriber reconnected successfully");
                         }
                         handler
                     }
                     Err(e) => {
-                        let delay = match reconnect_backoff.next() {
-                            Some(d) => d,
-                            None => retry_config.initial_backoff,
-                        };
+                        let delay = reconnect_backoff.next_delay(false);
                         error!(error = %e, delay_ms = %delay.as_millis(), "Subscriber initialization exhausted retry attempts, will retry after backoff");
                         tokio::select! {
                             _ = tokio::time::sleep(delay) => {}
-                            _ = cancellation_token.cancelled() => return Ok(()),
+                            _ = stop_reading.cancelled() => return Ok(()),
                         }
                         continue;
                     }
@@ -807,8 +826,9 @@ impl flowgen_core::task::runner::Runner for Processor {
 
             // Run event loop until failure, then reinitialize.
             let client_key = event_handler.client_key.clone();
+            let received = Arc::clone(&event_handler.received);
             let result = event_handler.handle().await;
-            if cancellation_token.is_cancelled() {
+            if stop_reading.is_cancelled() {
                 return Ok(());
             }
             match result {
@@ -821,14 +841,11 @@ impl flowgen_core::task::runner::Runner for Processor {
             // instead of reusing the dead one from the registry.
             self.task_context.client_registry.remove(&client_key).await;
 
-            let delay = match reconnect_backoff.next() {
-                Some(d) => d,
-                None => retry_config.initial_backoff,
-            };
+            let delay = reconnect_backoff.next_delay(received.load(Ordering::Relaxed));
             warn!(delay_ms = %delay.as_millis(), "Reconnect backoff");
             tokio::select! {
                 _ = tokio::time::sleep(delay) => {}
-                _ = cancellation_token.cancelled() => return Ok(()),
+                _ = stop_reading.cancelled() => return Ok(()),
             }
         }
     }

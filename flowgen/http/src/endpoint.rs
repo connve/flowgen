@@ -27,7 +27,7 @@ use tokio::sync::mpsc::Sender;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{error, info, Instrument};
 
-/// `http_endpoint` task config.
+/// `http_endpoint` task config; unknown fields are rejected by the transparent inner `Processor`.
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, TaskConfig)]
 #[serde(transparent)]
 pub struct Endpoint(pub super::config::Processor);
@@ -234,7 +234,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                 .clone()
                 .unwrap_or_else(|| Arc::new(ResponseRegistry::new())),
             leaf_count: self.task_context.leaf_count,
-            cancellation_token: self.task_context.cancellation_token.clone(),
+            cancellation_token: self.task_context.stop_reading.clone(),
         };
 
         self.http_server

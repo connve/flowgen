@@ -86,6 +86,7 @@ pub enum OAuth2Error {
 /// }
 /// ```
 #[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct HttpCredentials {
     /// Bearer token for `Authorization: Bearer <token>` header.
     #[serde(default)]
@@ -124,6 +125,7 @@ impl Clone for HttpCredentials {
 
 /// Basic authentication username and password.
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct BasicAuth {
     /// Username for basic authentication.
     pub username: String,
@@ -140,6 +142,7 @@ pub struct BasicAuth {
 ///
 /// [client credentials flow]: https://datatracker.ietf.org/doc/html/rfc6749#section-4.4
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct OAuth2ClientCredentials {
     /// Token endpoint URL (e.g. `https://auth.example.com/oauth2/token`).
     pub token_url: String,
@@ -354,6 +357,7 @@ impl HttpCredentials {
 /// }
 /// ```
 #[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WebCredentials {
     /// OIDC client secret, for `web.auth.client_secret`.
     #[serde(default)]
@@ -383,6 +387,7 @@ pub struct ApiCredentials {
 
 /// A named machine key; the name identifies the caller in logs and audit.
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ApiKey {
     /// Caller name recorded in logs and audit entries.
     pub name: String,
@@ -417,6 +422,24 @@ pub async fn load_credentials<T: serde::de::DeserializeOwned>(path: &Path) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_misspelled_credentials_field_is_rejected() {
+        let error = serde_json::from_str::<HttpCredentials>(r#"{"bearer_token": "t"}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown field `bearer_token`"), "{error}");
+        let error = serde_json::from_str::<HttpCredentials>(
+            r#"{"basic_auth": {"username": "u", "password": "p", "user": "x"}}"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("unknown field `user`"), "{error}");
+        let error = serde_json::from_str::<WebCredentials>(r#"{"client_secrets": "s"}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown field `client_secrets`"), "{error}");
+    }
 
     #[test]
     fn authorization_header_bearer() {

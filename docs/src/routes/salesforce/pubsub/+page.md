@@ -43,6 +43,8 @@ When a batch is done, a durable consumer stores the replay ID of its last event:
 
 A cached replay ID that Salesforce rejects as invalid is deleted, and the next subscription starts from `replay_preset`.
 
+The subscriber does not drain: when the flow stops, the batch in flight is dropped and delivered again from the stored replay ID.
+
 When the stream breaks, the subscriber reconnects with the [reconnect backoff](/docs/flowgen/concepts/retry#infinite-reconnect-subscribers). The delay resets to `initial_backoff` once the new stream delivers a response, so a subscription that fails before its first response, such as one without access to the topic, keeps backing off.
 
 ### Durable consumer options

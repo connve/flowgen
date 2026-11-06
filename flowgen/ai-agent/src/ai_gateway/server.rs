@@ -105,6 +105,10 @@ impl HasFlowName for LlmProxyRegistration {
     fn flow_name(&self) -> &str {
         &self.flow_name
     }
+
+    fn is_stopped(&self) -> bool {
+        self.cancellation_token.is_cancelled()
+    }
 }
 
 /// Default AI gateway request body limit. Sized for 1 M-token

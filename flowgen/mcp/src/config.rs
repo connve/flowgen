@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// Authentication credentials for MCP API key validation.
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Credentials {
     /// List of valid API keys for Bearer token authentication.
     pub api_keys: Vec<String>,
@@ -22,5 +23,13 @@ mod tests {
         let json = serde_json::to_string(&creds).unwrap();
         let deserialized: Credentials = serde_json::from_str(&json).unwrap();
         assert_eq!(creds, deserialized);
+    }
+
+    #[test]
+    fn a_misspelled_credentials_field_is_rejected() {
+        let error = serde_json::from_str::<Credentials>(r#"{"api_key": ["k"]}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown field `api_key`"), "{error}");
     }
 }

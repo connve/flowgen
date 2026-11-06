@@ -1,6 +1,6 @@
 //! The `postgres_query` task: PostgreSQL queries with Arrow RecordBatch output.
 
-use crate::client::{Client, Error as ClientError};
+use crate::client::{Client, Error as ClientError, Silent};
 use crate::rows::{Converter, Error as RowsError};
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
@@ -123,7 +123,7 @@ pub enum Error {
         #[source]
         source: tokio_postgres::Error,
     },
-    #[error("Query did not return rows within {timeout:?}")]
+    #[error("The server did not answer the query within {timeout:?}")]
     QueryTimeout { timeout: Duration },
     #[error(transparent)]
     Rows(#[from] RowsError),
@@ -234,7 +234,6 @@ impl EventHandler {
         completion_tx: &Option<SharedCompletionTx>,
     ) -> Result<(), Error> {
         let connection = self.client.connection().await?;
-        let timeout = self.client.query_timeout();
         let parameters: Vec<Parameter> = match &config.parameters {
             Some(parameters) => parameters.iter().map(|value| Parameter(value)).collect(),
             None => Vec::new(),
@@ -249,9 +248,9 @@ impl EventHandler {
                 .await?;
             Ok::<_, tokio_postgres::Error>((prepared, rows))
         };
-        let (prepared, rows) = match tokio::time::timeout(timeout, started).await {
+        let (prepared, rows) = match self.client.answered(started).await {
             Ok(started) => started.map_err(|source| Error::Query { source })?,
-            Err(_) => return Err(Error::QueryTimeout { timeout }),
+            Err(Silent { timeout }) => return Err(Error::QueryTimeout { timeout }),
         };
         let converter = Converter::new(prepared.columns())?;
 
@@ -261,11 +260,12 @@ impl EventHandler {
         let mut pending: Option<RecordBatch> = None;
         let mut emitted = false;
         loop {
-            let row = match rows.try_next().await {
-                Ok(Some(row)) => row,
-                Ok(None) => break,
-                Err(source) if emitted => return Err(Error::Stream { source }),
-                Err(source) => return Err(Error::Query { source }),
+            let row = match self.client.answered(rows.try_next()).await {
+                Ok(Ok(Some(row))) => row,
+                Ok(Ok(None)) => break,
+                Ok(Err(source)) if emitted => return Err(Error::Stream { source }),
+                Ok(Err(source)) => return Err(Error::Query { source }),
+                Err(Silent { timeout }) => return Err(Error::QueryTimeout { timeout }),
             };
             chunk.push(row);
             if chunk.len() == batch_size {

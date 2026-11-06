@@ -4,9 +4,11 @@
 	import { onDestroy } from 'svelte';
 	import Icon from '@iconify/svelte';
 	import { load } from 'js-yaml';
-	import Badge from '$lib/Badge.svelte';
 	import FlowInspector from '$lib/flow/FlowInspector.svelte';
+	import FlowDetails from '$lib/flow/FlowDetails.svelte';
+	import type { Activity } from '$lib/flow/ActivityDetails.svelte';
 	import CodeEditor from '$lib/CodeEditor.svelte';
+	import StatusDot from '$lib/StatusDot.svelte';
 	import { activitiesFor, releaseFlowSubscription } from '$lib/activityStore.svelte';
 	import {
 		apiUrl,
@@ -89,6 +91,8 @@
 		}
 		return `${base}/resources/${encodePath(data.file.slice('resources/'.length))}`;
 	});
+	let resource = $state<string | null>(null);
+	let activity = $state<Activity | null>(null);
 	let activities = $derived(
 		data.file?.startsWith('flows/') && !isNew
 			? activitiesFor(stripFlowExtension(data.file.slice('flows/'.length)))
@@ -261,97 +265,95 @@
 	<title>{pageTitle(label || leafName || placeholder, isFlow ? m.nav_flows() : m.nav_resources())}</title>
 </svelte:head>
 
-<section class="flex h-[calc(100vh-4rem)] flex-col p-6">
+<section class="flex h-[calc(100vh-4rem)] min-w-0">
+<div class="flex min-w-0 flex-1 flex-col p-6">
 	<div class="mb-4 shrink-0">
 		<div class="flex min-h-8 items-center justify-between gap-2">
-			<div class="flex items-center gap-1.5 text-sm">
-				{#if isFlow}
-					<a href="{base}/" class="text-primary hover:underline">{m.editor_flows_breadcrumb()}</a>
-				{:else}
-					<a href="{base}/resources" class="text-primary hover:underline">{m.resources_breadcrumb()}</a>
-				{/if}
-				{#each segments.slice(0, -1) as segment, i (i)}
-					<span class="opacity-40">/</span>
-					<span class="font-mono opacity-70">{segment}</span>
-				{/each}
-				<span class="opacity-40">/</span>
-				{#if leafName}
-					<span class="font-mono">{leafName}</span>
-				{:else}
-					<span>{placeholder}</span>
-				{/if}
+			<div class="min-w-0">
+				<div class="flex items-center gap-1 text-xs text-base-content/50">
+					{#if isFlow}
+						<a href="{base}/" class="hover:text-base-content">{m.editor_flows_breadcrumb()}</a>
+					{:else}
+						<a href="{base}/resources" class="hover:text-base-content">{m.resources_breadcrumb()}</a>
+					{/if}
+					{#each segments.slice(0, -1) as segment, i (i)}
+						<span class="opacity-60">/</span>
+						<span>{segment}</span>
+					{/each}
+				</div>
+				<h1 class="truncate text-[0.9375rem] font-semibold">
+					{#if isFlow && label}
+						{label}
+					{:else if leafName}
+						{leafName}
+					{:else}
+						<span class="font-normal text-base-content/50">{placeholder}</span>
+					{/if}
+				</h1>
 			</div>
-			<div class="flex items-center gap-1">
+			<div class="flex items-center gap-2">
 				{#if issues !== null}
-					<span class="mr-2">
-						{#if issues.length === 0}
-							<Badge variant="success">{m.editor_valid()}</Badge>
-						{:else}
-							<Badge variant="error">{m.editor_issue_count({ count: issues.length })}</Badge>
-						{/if}
+					<span class="mr-2 text-sm text-base-content/70">
+						<StatusDot
+							variant={issues.length === 0 ? 'success' : 'error'}
+							label={issues.length === 0 ? m.editor_valid() : m.editor_issue_count({ count: issues.length })}
+						/>
 					</span>
 				{/if}
-				{#if !isNew && data.file}
-					{@const file = data.file}
-					<div
-						class="tooltip tooltip-bottom"
-						data-tip={canDelete ? m.common_delete() : m.editor_delete_read_only()}
-					>
-						<button
-							type="button"
-							class="btn btn-ghost btn-sm btn-circle text-error"
-							aria-label={m.common_delete()}
-							disabled={proposing || !canDelete}
-							onclick={() => remove(file)}
-						>
-							<Icon icon="tabler:trash" class="h-5 w-5" />
-						</button>
-					</div>
-				{/if}
-				<div class="tooltip tooltip-bottom" data-tip={m.common_validate()}>
+				<button type="button" class="btn btn-ghost btn-sm" disabled={validating} onclick={validate}>
+					{#if validating}
+						<span class="loading loading-spinner loading-xs"></span>
+					{/if}
+					{m.common_validate()}
+				</button>
+				<a href={closeHref} class="btn btn-ghost btn-sm">{m.common_cancel()}</a>
+				<div class="tooltip tooltip-bottom" data-tip={unchanged ? m.editor_nothing_to_save() : undefined}>
 					<button
 						type="button"
-						class="btn btn-ghost btn-sm btn-circle"
-						aria-label={m.common_validate()}
-						disabled={validating}
-						onclick={validate}
-					>
-						{#if validating}
-							<span class="loading loading-spinner loading-sm"></span>
-						{:else}
-							<Icon icon="tabler:checklist" class="h-5 w-5" />
-						{/if}
-					</button>
-				</div>
-				<div
-					class="tooltip tooltip-bottom"
-					data-tip={unchanged ? m.editor_nothing_to_save() : m.common_save()}
-				>
-					<button
-						type="button"
-						class="btn btn-ghost btn-sm btn-circle text-primary"
-						aria-label={m.common_save()}
+						class="btn btn-primary btn-sm"
 						disabled={proposing || validating || unchanged}
 						onclick={save}
 					>
 						{#if proposing}
-							<span class="loading loading-spinner loading-sm"></span>
-						{:else}
-							<Icon icon="tabler:device-floppy" class="h-5 w-5" />
+							<span class="loading loading-spinner loading-xs"></span>
 						{/if}
+						{m.common_save()}
 					</button>
 				</div>
-				<span class="mx-2 h-5 w-px bg-base-300" aria-hidden="true"></span>
-				<div class="tooltip tooltip-bottom" data-tip={m.editor_exit()}>
-					<a href={closeHref} class="btn btn-ghost btn-sm btn-circle" aria-label={m.editor_exit()}>
-						<Icon icon="tabler:x" class="h-5 w-5" />
-					</a>
-				</div>
+				{#if !isNew && data.file}
+					{@const file = data.file}
+					<div class="dropdown dropdown-end">
+						<button
+							type="button"
+							tabindex="0"
+							class="flex h-8 w-8 items-center justify-center rounded-md text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content"
+							aria-label={m.editor_more_actions()}
+						>
+							<Icon icon="tabler:dots" class="h-5 w-5" />
+						</button>
+						<ul
+							tabindex="-1"
+							class="menu dropdown-content z-10 mt-1 w-56 rounded-md border border-base-200 bg-base-100 p-1 text-sm shadow-lg"
+						>
+							<li class={canDelete ? '' : 'menu-disabled'}>
+								<button
+									type="button"
+									class="text-error"
+									disabled={proposing || !canDelete}
+									onclick={() => remove(file)}
+								>
+									<Icon icon="tabler:trash" class="h-4 w-4" />
+									{m.common_delete()}
+								</button>
+								{#if !canDelete}
+									<span class="text-xs text-base-content/50">{m.editor_delete_read_only()}</span>
+								{/if}
+							</li>
+						</ul>
+					</div>
+				{/if}
 			</div>
 		</div>
-		{#if isFlow}
-			<h1 class="min-h-7 text-lg font-medium">{label ?? ''}</h1>
-		{/if}
 	</div>
 
 	<div class="mb-3 flex shrink-0 items-center gap-2">
@@ -384,7 +386,7 @@
 		</label>
 	</div>
 
-	<div class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-base-300 bg-base-100">
+	<div class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-base-200 bg-base-100">
 		{#if issues && issues.length > 0}
 			<ul class="max-h-32 shrink-0 space-y-0.5 overflow-auto border-b border-error/40 bg-error/5 px-4 py-2">
 				{#each issues as issue, i (i)}
@@ -396,9 +398,9 @@
 		{/if}
 		{#key data}
 			{#if isFlow}
-				<FlowInspector bind:yaml={content} {activities} editable />
+				<FlowInspector bind:yaml={content} {activities} editable bind:resource bind:activity />
 			{:else}
-				<div class="flex h-10 shrink-0 items-center border-b border-base-200 px-4 text-xs font-medium opacity-70">
+				<div class="flex h-10 shrink-0 items-center px-4 text-xs font-medium text-base-content/50">
 					{m.editor_content_heading()}
 				</div>
 				<CodeEditor
@@ -409,11 +411,13 @@
 			{/if}
 		{/key}
 	</div>
+</div>
+<FlowDetails bind:resource bind:activity />
 </section>
 
 {#if pendingUrl}
 	<div
-		class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+		class="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4"
 		role="dialog"
 		aria-modal="true"
 		aria-label={m.editor_discard_label()}
@@ -422,24 +426,26 @@
 			if (e.target === e.currentTarget) pendingUrl = null;
 		}}
 		onkeydown={(e) => {
-			if (e.key === 'Escape') pendingUrl = null;
+			if (e.key !== 'Escape') return;
+			e.stopPropagation();
+			pendingUrl = null;
 		}}
 	>
-		<div class="w-full max-w-sm overflow-hidden rounded-lg border border-base-200 bg-base-100 shadow-xl">
-			<div class="border-b border-base-200 px-4 py-3 text-sm font-medium">{m.editor_discard_title()}</div>
-			<p class="px-4 py-3 text-sm opacity-70">
+		<div class="w-full max-w-sm space-y-4 rounded-xl bg-base-100 p-5 shadow-2xl">
+			<h2 class="text-[0.9375rem] font-semibold">{m.editor_discard_title()}</h2>
+			<p class="text-sm text-base-content/70">
 				{m.editor_discard_message({ path })}
 			</p>
-			<div class="flex justify-end gap-1 border-t border-base-200 px-3 py-2">
+			<div class="flex justify-end gap-2">
 				<button
 					type="button"
-					class="btn btn-sm border-base-300 bg-base-100"
+					class="btn btn-ghost btn-sm"
 					bind:this={keepEditingButton}
 					onclick={() => (pendingUrl = null)}
 				>
 					{m.editor_keep_editing()}
 				</button>
-				<button type="button" class="btn btn-error btn-soft btn-sm" onclick={discard}>
+				<button type="button" class="btn btn-error btn-sm" onclick={discard}>
 					{m.editor_discard()}
 				</button>
 			</div>

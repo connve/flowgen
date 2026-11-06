@@ -25,12 +25,12 @@ Runs a SQL statement against PostgreSQL. Returns the rows as Arrow RecordBatch.
 | `parameters` | list | | Values for `$1`, `$2`, etc. Sent as text; the server converts them to the parameter types. |
 | `batch_size` | int | 10000 | Rows per Arrow RecordBatch. |
 | `max_connections` | int | 10 | Connection pool size. |
-| `connection_timeout` | duration | `30s` | Timeout to open a connection. |
-| `query_timeout` | duration | `2m` | Longest a statement runs on the server (`statement_timeout`), and timeout to get a connection and the first rows. |
+| `connection_timeout` | duration | `30s` | Timeout to open a connection. A pooled connection that does not answer a check within half of it is replaced. |
+| `query_timeout` | duration | `2m` | Longest a statement runs on the server (`statement_timeout`) and timeout to get a connection. A query whose server does not answer for twice as long, before or while it sends rows, fails. |
 | `depends_on` | list | | Upstream task names. |
 | `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
 
-Connection errors, serialization failures and deadlocks are retried. SQL errors such as a syntax error or a constraint violation are not, nor is a statement that ran past `query_timeout`, nor a query that failed after it sent batches.
+Connection errors, serialization failures and deadlocks are retried. SQL errors such as a syntax error or a constraint violation are not, nor is a statement that ran past `query_timeout` or whose server stopped answering, since it may have run, nor a query that failed after it sent batches.
 
 ## Output
 

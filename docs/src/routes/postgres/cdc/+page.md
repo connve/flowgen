@@ -57,6 +57,8 @@ Emits each row change of the tables in a publication, read through logical repli
 
 ## Behaviour
 
+When the flow stops, the task drains: it finishes the transaction in progress, confirms it once the flow completes its changes, and stops.
+
 Changes go through the flow one at a time, in commit order. When the flow has completed every change of a transaction, its position is confirmed to the slot. After a reconnection or restart, reading continues after the last confirmed transaction, so a change the flow did not complete is emitted again. Delivery is at least once. Between transactions, the position also moves on with the server's keepalives, so writes to tables outside the publication don't hold WAL back.
 
 An event the flow fails to complete, or does not complete within `ack_timeout`, is delivered again after the [redelivery delay](/docs/flowgen/concepts/retry#redelivery), and the next change waits for it. With `max_deliver`, the change is skipped after that many failed deliveries and logged with its event ID.

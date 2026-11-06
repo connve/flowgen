@@ -76,6 +76,10 @@ pub enum Error {
     )]
     ToolNameCollision { name: String },
     #[error(
+        "MCP tool or prompt name '{name}' must be 1 to 64 letters, digits, '_' or '-', as model APIs require"
+    )]
+    InvalidName { name: String },
+    #[error(
         "MCP resource URI collision: '{uri}' is already registered. Use distinct URIs across flows."
     )]
     ResourceUriCollision { uri: String },
@@ -158,11 +162,17 @@ pub struct ToolRegistration {
     /// Headers a caller must present, with matching values, for this tool
     /// to be listed or called. Empty means every caller can reach it.
     pub headers: std::collections::HashMap<String, String>,
+    /// Cancelled once the task that registered the tool stops reading.
+    pub cancellation_token: tokio_util::sync::CancellationToken,
 }
 
 impl HasFlowName for ToolRegistration {
     fn flow_name(&self) -> &str {
         &self.flow_name
+    }
+
+    fn is_stopped(&self) -> bool {
+        self.cancellation_token.is_cancelled()
     }
 }
 
@@ -202,11 +212,17 @@ pub struct ResourceRegistration {
     /// Headers a caller must present, with matching values, for this
     /// resource to be listed or read. Empty means every caller can reach it.
     pub headers: std::collections::HashMap<String, String>,
+    /// Cancelled once the task that registered the resource stops reading.
+    pub cancellation_token: tokio_util::sync::CancellationToken,
 }
 
 impl HasFlowName for ResourceRegistration {
     fn flow_name(&self) -> &str {
         &self.flow_name
+    }
+
+    fn is_stopped(&self) -> bool {
+        self.cancellation_token.is_cancelled()
     }
 }
 
@@ -255,11 +271,17 @@ pub struct PromptRegistration {
     pub messages: Vec<PromptMessage>,
     pub resource_loader: Option<flowgen_core::resource::ResourceLoader>,
     pub headers: std::collections::HashMap<String, String>,
+    /// Cancelled once the task that registered the prompt stops reading.
+    pub cancellation_token: tokio_util::sync::CancellationToken,
 }
 
 impl HasFlowName for PromptRegistration {
     fn flow_name(&self) -> &str {
         &self.flow_name
+    }
+
+    fn is_stopped(&self) -> bool {
+        self.cancellation_token.is_cancelled()
     }
 }
 
@@ -300,6 +322,10 @@ impl Dispatcher for McpDispatcher {
         let route = state.path.clone();
         Router::new()
             .route(&route, post(handle_mcp).get(handle_mcp_sse))
+            .route(
+                &format!("{route}/{{*folder}}"),
+                post(handle_mcp_folder).get(handle_mcp_sse),
+            )
             .with_state(state)
     }
 }
@@ -324,13 +350,56 @@ pub fn new_mcp_server(
     McpServer::new_with_extras(path, extras).with_auth_provider(auth_provider)
 }
 
-/// Registers a tool. Returns an error if the tool name collides with an
-/// already-registered tool in the same server.
+/// The folder of a flow's path, `None` for a flow outside folders.
+fn folder(flow_name: &str) -> Option<&str> {
+    flow_name.rsplit_once('/').map(|(folder, _)| folder)
+}
+
+/// Whether `name` suits model APIs as a function name: 1 to 64 letters, digits, `_` or `-`.
+pub fn is_valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_NAME_LEN
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+pub(crate) fn validate_name(name: &str) -> Result<(), Error> {
+    match is_valid_name(name) {
+        true => Ok(()),
+        false => Err(Error::InvalidName {
+            name: name.to_string(),
+        }),
+    }
+}
+
+/// Longest tool or prompt name, the limit of model APIs' function names.
+pub const MAX_NAME_LEN: usize = 64;
+
+/// What an endpoint serves: every flow's entries at `<path>`, a folder's and its subfolders' at `<path>/<folder>`.
+#[derive(Clone, Debug)]
+struct Toolset(Option<String>);
+
+impl Toolset {
+    /// Whether an entry of `flow_name` belongs to this toolset.
+    fn contains(&self, flow_name: &str) -> bool {
+        match (&self.0, folder(flow_name)) {
+            (None, _) => true,
+            (Some(scope), Some(folder)) => folder
+                .strip_prefix(scope.as_str())
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('/')),
+            (Some(_), None) => false,
+        }
+    }
+}
+
+/// Registers a tool under its name, which must suit model APIs and be unique on the server.
 pub fn register_tool(
     server: &McpServer,
     name: String,
     registration: ToolRegistration,
 ) -> Result<(), Error> {
+    validate_name(&name)?;
     server
         .try_register(name.clone(), registration)
         .map_err(|_| Error::ToolNameCollision { name })
@@ -386,13 +455,13 @@ pub fn register_resource_template(
     }
 }
 
-/// Registers a prompt keyed by name. Broadcasts
-/// `notifications/prompts/list_changed` on success.
+/// Registers a prompt in its flow's toolset and broadcasts `notifications/prompts/list_changed`.
 pub fn register_prompt(
     server: &McpServer,
     name: String,
     registration: PromptRegistration,
 ) -> Result<(), Error> {
+    validate_name(&name)?;
     let extras = server.extras();
     let inserted = match extras.prompts.entry(name.clone()) {
         dashmap::mapref::entry::Entry::Occupied(_) => false,
@@ -788,12 +857,36 @@ async fn handle_mcp_sse(
     }
 }
 
-/// Main MCP endpoint handler. Dispatches based on the JSON-RPC method field.
-#[tracing::instrument(skip_all, name = "mcp.request", fields(method = %request.method))]
+/// The endpoint of every flow's tools, prompts and resources.
 async fn handle_mcp(
     State(state): State<DispatchState<ToolRegistration, McpExtras>>,
     headers: HeaderMap,
     axum::Json(request): axum::Json<JsonRpcRequest>,
+) -> Response {
+    dispatch(&state, &headers, request, &Toolset(None)).await
+}
+
+/// The endpoint of one folder's toolset.
+async fn handle_mcp_folder(
+    State(state): State<DispatchState<ToolRegistration, McpExtras>>,
+    axum::extract::Path(folder): axum::extract::Path<String>,
+    headers: HeaderMap,
+    axum::Json(request): axum::Json<JsonRpcRequest>,
+) -> Response {
+    let toolset = match folder.trim_matches('/') {
+        "" => Toolset(None),
+        folder => Toolset(Some(folder.to_string())),
+    };
+    dispatch(&state, &headers, request, &toolset).await
+}
+
+/// Dispatches a JSON-RPC request to `toolset` by its method.
+#[tracing::instrument(skip_all, name = "mcp.request", fields(method = %request.method))]
+async fn dispatch(
+    state: &DispatchState<ToolRegistration, McpExtras>,
+    headers: &HeaderMap,
+    request: JsonRpcRequest,
+    toolset: &Toolset,
 ) -> Response {
     if let Some(ref version) = request.jsonrpc {
         if version != "2.0" {
@@ -806,14 +899,16 @@ async fn handle_mcp(
 
     match request.method.as_str() {
         "initialize" => handle_initialize(request),
-        "tools/list" => handle_tools_list(&state, &headers, request),
-        "tools/call" => handle_tools_call(&state, &headers, request).await,
-        "resources/list" => handle_resources_list(&state, &headers, request),
-        "resources/templates/list" => handle_resource_templates_list(&state, &headers, request),
-        "resources/read" => handle_resources_read(&state, &headers, request).await,
-        "prompts/list" => handle_prompts_list(&state, &headers, request),
-        "prompts/get" => handle_prompts_get(&state, &headers, request).await,
-        "completion/complete" => handle_completion_complete(&state, &headers, request),
+        "tools/list" => handle_tools_list(state, headers, request, toolset),
+        "tools/call" => handle_tools_call(state, headers, request, toolset).await,
+        "resources/list" => handle_resources_list(state, headers, request, toolset),
+        "resources/templates/list" => {
+            handle_resource_templates_list(state, headers, request, toolset)
+        }
+        "resources/read" => handle_resources_read(state, headers, request, toolset).await,
+        "prompts/list" => handle_prompts_list(state, headers, request, toolset),
+        "prompts/get" => handle_prompts_get(state, headers, request, toolset).await,
+        "completion/complete" => handle_completion_complete(state, headers, request, toolset),
         "notifications/initialized" => StatusCode::ACCEPTED.into_response(),
         _ => {
             let err = Error::MethodNotFound {
@@ -850,6 +945,7 @@ fn handle_tools_list(
     state: &DispatchState<ToolRegistration, McpExtras>,
     headers: &HeaderMap,
     request: JsonRpcRequest,
+    toolset: &Toolset,
 ) -> Response {
     if let Err(status) = validate_auth(state, headers, None) {
         return json_rpc_error_response(request.id, -32000, status.to_string());
@@ -858,7 +954,10 @@ fn handle_tools_list(
     let entries: Vec<_> = state
         .table
         .iter()
-        .filter(|entry| headers_satisfy(headers, &entry.value().headers))
+        .filter(|entry| {
+            toolset.contains(&entry.value().flow_name)
+                && headers_satisfy(headers, &entry.value().headers)
+        })
         .map(|entry| {
             let reg = entry.value();
             (
@@ -889,6 +988,7 @@ fn handle_resources_list(
     state: &DispatchState<ToolRegistration, McpExtras>,
     headers: &HeaderMap,
     request: JsonRpcRequest,
+    toolset: &Toolset,
 ) -> Response {
     if let Err(status) = validate_auth(state, headers, None) {
         return json_rpc_error_response(request.id, -32000, status.to_string());
@@ -898,7 +998,10 @@ fn handle_resources_list(
         .extras
         .resources
         .iter()
-        .filter(|entry| headers_satisfy(headers, &entry.value().headers))
+        .filter(|entry| {
+            toolset.contains(&entry.value().flow_name)
+                && headers_satisfy(headers, &entry.value().headers)
+        })
         .map(|entry| {
             let reg = entry.value();
             (
@@ -925,6 +1028,7 @@ fn handle_resource_templates_list(
     state: &DispatchState<ToolRegistration, McpExtras>,
     headers: &HeaderMap,
     request: JsonRpcRequest,
+    toolset: &Toolset,
 ) -> Response {
     if let Err(status) = validate_auth(state, headers, None) {
         return json_rpc_error_response(request.id, -32000, status.to_string());
@@ -934,7 +1038,10 @@ fn handle_resource_templates_list(
         .extras
         .resource_templates
         .iter()
-        .filter(|entry| headers_satisfy(headers, &entry.value().headers))
+        .filter(|entry| {
+            toolset.contains(&entry.value().flow_name)
+                && headers_satisfy(headers, &entry.value().headers)
+        })
         .map(|entry| {
             let reg = entry.value();
             (
@@ -966,6 +1073,7 @@ async fn handle_resources_read(
     state: &DispatchState<ToolRegistration, McpExtras>,
     headers: &HeaderMap,
     request: JsonRpcRequest,
+    toolset: &Toolset,
 ) -> Response {
     if let Err(status) = validate_auth(state, headers, None) {
         return json_rpc_error_response(request.id, -32000, status.to_string());
@@ -980,7 +1088,12 @@ async fn handle_resources_read(
     };
 
     // Fast path: exact URI match against the concrete-resource table.
-    if let Some(entry) = state.extras.resources.get(&params.uri) {
+    if let Some(entry) = state
+        .extras
+        .resources
+        .get(&params.uri)
+        .filter(|entry| toolset.contains(&entry.flow_name))
+    {
         if !headers_satisfy(headers, &entry.headers) {
             record_headers_rejected_activity(&entry.flow_name, &entry.name, 0, "mcp_resource");
             return json_rpc_error_response(
@@ -1013,7 +1126,12 @@ async fn handle_resources_read(
     // headers-only miss can still be attributed to a flow below.
     let mut matched = None;
     let mut uri_matched_but_rejected = None;
-    for entry in state.extras.resource_templates.iter() {
+    for entry in state
+        .extras
+        .resource_templates
+        .iter()
+        .filter(|entry| toolset.contains(&entry.flow_name))
+    {
         let Some(bindings) = match_uri_template(entry.key(), &params.uri) else {
             continue;
         };
@@ -1108,6 +1226,7 @@ fn handle_prompts_list(
     state: &DispatchState<ToolRegistration, McpExtras>,
     headers: &HeaderMap,
     request: JsonRpcRequest,
+    toolset: &Toolset,
 ) -> Response {
     if let Err(status) = validate_auth(state, headers, None) {
         return json_rpc_error_response(request.id, -32000, status.to_string());
@@ -1117,7 +1236,10 @@ fn handle_prompts_list(
         .extras
         .prompts
         .iter()
-        .filter(|entry| headers_satisfy(headers, &entry.value().headers))
+        .filter(|entry| {
+            toolset.contains(&entry.value().flow_name)
+                && headers_satisfy(headers, &entry.value().headers)
+        })
         .map(|entry| {
             let reg = entry.value();
             (
@@ -1149,6 +1271,7 @@ async fn handle_prompts_get(
     state: &DispatchState<ToolRegistration, McpExtras>,
     headers: &HeaderMap,
     request: JsonRpcRequest,
+    toolset: &Toolset,
 ) -> Response {
     if let Err(status) = validate_auth(state, headers, None) {
         return json_rpc_error_response(request.id, -32000, status.to_string());
@@ -1162,7 +1285,12 @@ async fn handle_prompts_get(
         }
     };
 
-    let reg = match state.extras.prompts.get(&params.name) {
+    let reg = match state
+        .extras
+        .prompts
+        .get(&params.name)
+        .filter(|entry| toolset.contains(&entry.flow_name))
+    {
         Some(entry) if !headers_satisfy(headers, &entry.headers) => {
             record_headers_rejected_activity(&entry.flow_name, &entry.name, 0, "mcp_prompt");
             return json_rpc_error_response(
@@ -1273,6 +1401,7 @@ fn handle_completion_complete(
     state: &DispatchState<ToolRegistration, McpExtras>,
     headers: &HeaderMap,
     request: JsonRpcRequest,
+    toolset: &Toolset,
 ) -> Response {
     if let Err(status) = validate_auth(state, headers, None) {
         return json_rpc_error_response(request.id, -32000, status.to_string());
@@ -1287,24 +1416,32 @@ fn handle_completion_complete(
     };
 
     let candidates: Option<Vec<String>> = match &params.reference {
-        CompletionRef::Prompt { name } => state.extras.prompts.get(name).and_then(|entry| {
-            entry
-                .value()
-                .arguments
-                .iter()
-                .find(|a| a.name == params.argument.name)
-                .and_then(|a| a.completion_values.clone())
-        }),
-        CompletionRef::Resource { uri } => {
-            state.extras.resource_templates.get(uri).and_then(|entry| {
+        CompletionRef::Prompt { name } => state
+            .extras
+            .prompts
+            .get(name)
+            .filter(|entry| toolset.contains(&entry.flow_name))
+            .and_then(|entry| {
+                entry
+                    .value()
+                    .arguments
+                    .iter()
+                    .find(|a| a.name == params.argument.name)
+                    .and_then(|a| a.completion_values.clone())
+            }),
+        CompletionRef::Resource { uri } => state
+            .extras
+            .resource_templates
+            .get(uri)
+            .filter(|entry| toolset.contains(&entry.flow_name))
+            .and_then(|entry| {
                 entry
                     .value()
                     .parameters
                     .iter()
                     .find(|p| p.name == params.argument.name)
                     .and_then(|p| p.completion_values.clone())
-            })
-        }
+            }),
     };
 
     let needle = params.argument.value.to_lowercase();
@@ -1401,8 +1538,9 @@ async fn handle_tools_call(
     state: &DispatchState<ToolRegistration, McpExtras>,
     headers: &HeaderMap,
     request: JsonRpcRequest,
+    toolset: &Toolset,
 ) -> Response {
-    match execute_tool_call(state, headers, &request).await {
+    match execute_tool_call(state, headers, &request, toolset).await {
         Ok(response) => response,
         Err(e) => {
             error!(error = %e, "Tool call failed");
@@ -1421,6 +1559,7 @@ async fn execute_tool_call(
     state: &DispatchState<ToolRegistration, McpExtras>,
     headers: &HeaderMap,
     request: &JsonRpcRequest,
+    toolset: &Toolset,
 ) -> Result<Response, Error> {
     let params: ToolCallParams = serde_json::from_value(request.params.clone())
         .map_err(|source| Error::InvalidParams { source })?;
@@ -1429,8 +1568,8 @@ async fn execute_tool_call(
         validate_auth(state, headers, Some(&params.name)).map_err(|_| Error::Unauthorized)?;
 
     let entry = match state.table.get(&params.name) {
-        Some(entry) => entry.clone(),
-        None => {
+        Some(entry) if toolset.contains(&entry.flow_name) => entry.clone(),
+        _ => {
             return Err(Error::UnknownTool {
                 name: params.name.clone(),
             })
@@ -1925,6 +2064,7 @@ mod tests {
             auth_required: false,
             leaf_count: 1,
             headers: std::collections::HashMap::new(),
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
         }
     }
 
@@ -1969,6 +2109,110 @@ mod tests {
         let response = router.oneshot(req).await.unwrap();
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// Sends `body` to the toolset at `<path><folder>` and returns the parsed response.
+    async fn send_to_toolset(
+        state: DispatchState<ToolRegistration, McpExtras>,
+        folder: &str,
+        body: serde_json::Value,
+    ) -> serde_json::Value {
+        let uri = format!("{}{folder}", state.path);
+        let req = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let response = McpDispatcher::build_router(state)
+            .oneshot(req)
+            .await
+            .unwrap();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_folder_serves_its_flows_and_subfolders_and_the_root_serves_all() {
+        let server = test_server();
+        let table = Arc::new(DashMap::new());
+        for (flow, name) in [
+            ("a/flow", "one"),
+            ("ab/flow", "five"),
+            ("b/c/flow", "two"),
+            ("b/d/flow", "three"),
+            ("top", "four"),
+        ] {
+            table.insert(name.to_string(), test_tool_registration(flow, name));
+        }
+        let state = build_test_state(&server, table);
+        let list = |folder: &'static str| {
+            let state = state.clone();
+            async move {
+                let body = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
+                let resp = send_to_toolset(state, folder, body).await;
+                resp["result"]["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|tool| tool["name"].as_str().unwrap().to_string())
+                    .collect::<std::collections::BTreeSet<_>>()
+            }
+        };
+        let call = |folder: &'static str, name: &'static str| {
+            let state = state.clone();
+            async move {
+                let body = serde_json::json!({
+                    "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                    "params": {"name": name, "arguments": {}}
+                });
+                send_to_toolset(state, folder, body).await
+            }
+        };
+
+        let root = list("").await;
+        let a = list("/a").await;
+        let b = list("/b").await;
+        let b_slash = list("/b/").await;
+        let c = list("/b/c").await;
+        let elsewhere = call("/a", "four").await;
+
+        assert_eq!(
+            root,
+            ["five", "four", "one", "three", "two"]
+                .map(String::from)
+                .into()
+        );
+        assert_eq!(a, ["one".to_string()].into());
+        assert_eq!(b, ["three", "two"].map(String::from).into());
+        assert_eq!(b_slash, b);
+        assert_eq!(c, ["two".to_string()].into());
+        assert!(elsewhere["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Unknown tool"));
+    }
+
+    #[test]
+    fn a_tool_name_is_unique_on_the_server_and_suits_model_apis() {
+        let server = test_server();
+        let register = |flow: &str, name: &str| {
+            register_tool(
+                &server,
+                name.to_string(),
+                test_tool_registration(flow, name),
+            )
+        };
+
+        let first = register("a/flow", "one");
+        let elsewhere = register("b/flow", "one");
+        let dotted = register("a/flow", "a.one");
+        let long = register("a/flow", &"a".repeat(MAX_NAME_LEN + 1));
+
+        assert!(first.is_ok());
+        assert!(matches!(elsewhere, Err(Error::ToolNameCollision { .. })));
+        assert!(matches!(dotted, Err(Error::InvalidName { .. })));
+        assert!(matches!(long, Err(Error::InvalidName { .. })));
     }
 
     #[test]
@@ -2591,6 +2835,7 @@ mod tests {
             }],
             resource_loader: None,
             headers: std::collections::HashMap::new(),
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
         }
     }
 

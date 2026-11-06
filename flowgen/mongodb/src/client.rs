@@ -107,6 +107,7 @@ impl Default for MongoHost {
 /// }
 /// ```
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
+#[serde(deny_unknown_fields)]
 pub struct MongoCredentials {
     /// Connection string scheme. Defaults to `mongodb`. Set to
     /// `mongodb+srv` for MongoDB Atlas and other DNS-seedlist deployments;
@@ -254,6 +255,14 @@ impl MongoClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_misspelled_credentials_field_is_rejected() {
+        let error = serde_json::from_str::<MongoCredentials>(r#"{"hostname": "h"}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown field `hostname`"), "{error}");
+    }
 
     #[test]
     fn test_build_connection_string_defaults() {

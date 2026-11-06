@@ -6,6 +6,7 @@
 //! time, so one `Agent` serves every provider: the agent runs the tool loop,
 //! and the erased model also answers tool-use passthrough directly.
 
+use crate::budget::Spending;
 use crate::completion::{Credentials, Provider};
 use crate::tool_runs::{RecordRuns, ToolRuns};
 use futures_util::stream::Stream;
@@ -339,8 +340,12 @@ impl ClientBuilder {
     }
 
     fn api_key(&self) -> Result<String, Error> {
-        match &self.credentials {
-            Some(credentials) => Ok(credentials.api_key.clone()),
+        match self
+            .credentials
+            .as_ref()
+            .and_then(|credentials| credentials.api_key.clone())
+        {
+            Some(api_key) => Ok(api_key),
             None => Err(Error::MissingCredentials),
         }
     }
@@ -351,10 +356,11 @@ impl ClientBuilder {
     /// local providers without auth.
     fn openai_compatible_model(&mut self) -> Result<DynModel<Completion>, Error> {
         let endpoint = self.endpoint.take().ok_or(Error::MissingEndpoint)?;
-        let api_key = match &self.credentials {
-            Some(credentials) => credentials.api_key.clone(),
-            None => String::new(),
-        };
+        let api_key = self
+            .credentials
+            .as_ref()
+            .and_then(|credentials| credentials.api_key.clone())
+            .unwrap_or_default();
 
         let mut header_map = http::HeaderMap::new();
         for (name, value) in self.headers.iter().flatten() {
@@ -508,6 +514,7 @@ impl AgentClient {
         prompt: Message,
         system_prompt: Option<&str>,
         runs: &Arc<ToolRuns>,
+        spending: Option<Spending>,
     ) -> AgentRunner {
         let runner = self
             .agent
@@ -515,6 +522,10 @@ impl AgentClient {
             .documents(self.static_context.iter().cloned())
             .add_hook(RecordRuns(Arc::clone(runs)))
             .tool_context(ToolContext::default().with_scope(Arc::clone(runs) as _));
+        let runner = match spending {
+            Some(spending) => runner.add_hook(spending),
+            None => runner,
+        };
         match system_prompt {
             Some(preamble) => runner.preamble(preamble),
             None => runner,
@@ -527,9 +538,10 @@ impl AgentClient {
         &self,
         prompt: Message,
         system_prompt: Option<&str>,
+        spending: Option<Spending>,
     ) -> Result<CompletionOutput, Error> {
         let resp = self
-            .runner(prompt, system_prompt, &ToolRuns::new())
+            .runner(prompt, system_prompt, &ToolRuns::new(), spending)
             .await
             .map_err(|source| Error::CompletionRequest {
                 source: Box::new(source),
@@ -547,9 +559,10 @@ impl AgentClient {
         &self,
         prompt: Message,
         system_prompt: Option<&str>,
+        spending: Option<Spending>,
     ) -> Pin<Box<dyn Stream<Item = CompletionChunk> + Send>> {
         let runs = ToolRuns::new();
-        let stream = self.runner(prompt, system_prompt, &runs).stream();
+        let stream = self.runner(prompt, system_prompt, &runs, spending).stream();
         Box::pin(stream.filter_map(move |item| {
             let chunk = completion_chunk(item, &runs);
             async move { chunk }

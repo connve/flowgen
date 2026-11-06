@@ -14,15 +14,18 @@ use flowgen_core::config::ConfigExt;
 use flowgen_core::event::{Event, EventBuilder, EventData, EventExt, SharedCompletionTx};
 use flowgen_core::resource::Source;
 use flowgen_core::task::TaskConfig;
+use flowgen_mcp::server::{is_valid_name, MAX_NAME_LEN};
 use futures_util::StreamExt;
 use rig_agent::tool::server::{ToolServer, ToolServerHandle};
-use rig_core::message::{Message, UserContent};
-use rig_rmcp::{McpClientHandler, McpConnection};
+use rig_core::message::{Message, ToolName, UserContent};
+use rig_core::tool::{DynamicTool, ManagedToolSink};
+use rig_rmcp::{McpClientHandler, McpConnection, McpTool};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::{Receiver, Sender};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 /// AI completion processor configuration.
 ///
@@ -327,6 +330,70 @@ pub struct McpServerConfig {
     /// must trust the same identity provider.
     #[serde(default)]
     pub on_behalf_of_user: bool,
+    /// Names of this server's tools the agent uses; every tool when unset.
+    #[serde(default)]
+    pub allowed_tools: Option<Vec<String>>,
+    /// Prepended to this server's tool names as the agent sees them.
+    #[serde(default)]
+    pub prefix: Option<String>,
+}
+
+/// Which MCP server gave the agent each tool name.
+type TakenNames = Arc<Mutex<std::collections::HashMap<String, String>>>;
+
+/// Installs the tools a server entry allows, leaving out names another server gave first.
+struct AllowedTools {
+    sink: ToolServerHandle,
+    allowed: Option<HashSet<String>>,
+    url: String,
+    taken: TakenNames,
+}
+
+impl AllowedTools {
+    fn keep(&self, tools: Vec<DynamicTool>) -> Vec<DynamicTool> {
+        let mut taken = match self.taken.lock() {
+            Ok(taken) => taken,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        tools
+            .into_iter()
+            .filter(|tool| match &self.allowed {
+                Some(allowed) => allowed.contains(&**tool.name()),
+                None => true,
+            })
+            .filter(|tool| {
+                let name = tool.name().to_string();
+                match taken.get(&name) {
+                    Some(other) if *other != self.url => {
+                        warn!(tool = %name, url = %self.url, other = %other, "Two MCP servers give the agent a tool of the same name; it keeps the first server's, set a prefix or allowed_tools on one");
+                        false
+                    }
+                    _ => {
+                        taken.insert(name, self.url.clone());
+                        true
+                    }
+                }
+            })
+            .collect()
+    }
+}
+
+impl ManagedToolSink for AllowedTools {
+    fn add_managed_tools(
+        &self,
+        tools: Vec<DynamicTool>,
+    ) -> std::collections::HashMap<String, rig_core::tool::ManagedToolToken> {
+        self.sink.add_managed_tools(self.keep(tools))
+    }
+
+    fn reconcile_managed_tools(
+        &self,
+        expected: std::collections::HashMap<String, rig_core::tool::ManagedToolToken>,
+        tools: Vec<DynamicTool>,
+    ) -> std::collections::HashMap<String, rig_core::tool::ManagedToolToken> {
+        self.sink
+            .reconcile_managed_tools(expected, self.keep(tools))
+    }
 }
 
 impl ConfigExt for Completion {}
@@ -520,6 +587,15 @@ pub enum Error {
         "Invalid max_turns {max_turns}: it counts model calls, so it must be at least 1, or 2 with mcp_servers (one call to use a tool, one to answer)"
     )]
     TooFewTurns { max_turns: usize },
+    #[error(
+        "Invalid prefix '{prefix}' for MCP server {url}: use up to 63 letters, digits, '_' or '-', which model APIs take in tool names"
+    )]
+    InvalidPrefix { url: String, prefix: String },
+    #[error(transparent)]
+    Budget {
+        #[from]
+        source: crate::budget::Error,
+    },
 }
 
 impl Error {
@@ -531,6 +607,7 @@ impl Error {
             Error::CompletionFailed { retryable, .. } => *retryable,
             Error::AgentClient { source } => source.is_retryable(),
             Error::Image { source } => source.is_retryable(),
+            Error::Budget { source } => source.is_retryable(),
             _ => true,
         }
     }
@@ -548,7 +625,22 @@ impl Completion {
                 max_turns: self.max_turns,
             });
         }
-        Ok(())
+        let invalid_prefix = self
+            .mcp_servers
+            .iter()
+            .find_map(|server| match &server.prefix {
+                Some(prefix) if !is_valid_name(prefix) || prefix.len() >= MAX_NAME_LEN => {
+                    Some((server, prefix))
+                }
+                _ => None,
+            });
+        match invalid_prefix {
+            Some((server, prefix)) => Err(Error::InvalidPrefix {
+                url: server.url.clone(),
+                prefix: prefix.clone(),
+            }),
+            None => Ok(()),
+        }
     }
 }
 
@@ -640,9 +732,11 @@ impl From<CompletionUsage> for crate::ai_gateway::config::Usage {
 
 /// API credentials for AI providers.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct Credentials {
-    /// API key for the provider (required for most providers).
-    pub api_key: String,
+    /// API key for the provider; every provider needs one except `vertexai`, `ollama` and `custom`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
     /// Optional organization ID (OpenAI, Anthropic).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub organization_id: Option<String>,
@@ -663,7 +757,17 @@ struct McpServerConnection {
     on_behalf_of_user: bool,
     /// Header value the connection was opened with, for change detection.
     active_header: Option<String>,
-    _connection: McpConnection,
+    connection: McpConnection,
+}
+
+/// Closes the connection, which the tools of a prefixed server would keep open.
+impl Drop for McpServerConnection {
+    fn drop(&mut self) {
+        let connection = self.connection.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move { connection.close().await });
+        }
+    }
 }
 
 /// Tool server handle plus the MCP connections backing it. The connections
@@ -725,6 +829,62 @@ fn build_mcp_transport(
     rmcp::transport::StreamableHttpClientTransport::from_config(transport_config)
 }
 
+/// Installs a prefixed server's tools as `prefix` + name, calling the server by the original names.
+async fn install_prefixed(
+    connection: &McpConnection,
+    prefix: &str,
+    allowed: Option<&HashSet<String>>,
+    sink: &AllowedTools,
+) -> Result<(), Error> {
+    let tools = connection
+        .peer()
+        .list_all_tools()
+        .await
+        .map_err(|e| Error::McpConnection {
+            url: sink.url.clone(),
+            reason: e.to_string(),
+        })?;
+    let tools = tools
+        .into_iter()
+        .filter(|tool| match allowed {
+            Some(allowed) => allowed.contains(tool.name.as_ref()),
+            None => true,
+        })
+        .filter_map(|tool| prefixed(tool, prefix, connection, &sink.url))
+        .collect();
+    sink.add_managed_tools(tools);
+    Ok(())
+}
+
+/// The tool offered as `prefix` + its name, or `None` with a warning when that name won't do.
+fn prefixed(
+    tool: rmcp::model::Tool,
+    prefix: &str,
+    connection: &McpConnection,
+    url: &str,
+) -> Option<DynamicTool> {
+    let name = format!("{prefix}{}", tool.name);
+    let tool_name = match is_valid_name(&name) {
+        true => ToolName::new(name.clone()).ok(),
+        false => None,
+    };
+    let Some(tool_name) = tool_name else {
+        warn!(url = %url, tool = %name, "Left out an MCP tool whose prefixed name model APIs reject");
+        return None;
+    };
+    let tool = McpTool::new(tool, connection)
+        .with_name(tool_name)
+        .with_timeout(None)
+        .with_call_meta(crate::tool_runs::ToolRuns::call_meta);
+    match DynamicTool::try_from(tool) {
+        Ok(tool) => Some(tool),
+        Err(e) => {
+            warn!(url = %url, tool = %name, error = %e, "Left out an MCP tool the agent can't offer");
+            None
+        }
+    }
+}
+
 /// Connects to the configured MCP servers and discovers their tools, calling
 /// the servers marked `on_behalf_of_user` with `user_token`.
 async fn connect_mcp_tools(
@@ -738,8 +898,24 @@ async fn connect_mcp_tools(
     );
 
     let mut connections = Vec::with_capacity(config.mcp_servers.len());
+    let mut connections_tools = 0;
+    let taken = TakenNames::default();
     for mcp_config in &config.mcp_servers {
-        let handler = McpClientHandler::new(client_info.clone(), handle.clone())
+        let allowed: Option<HashSet<String>> = mcp_config
+            .allowed_tools
+            .as_ref()
+            .map(|names| names.iter().cloned().collect());
+        let sink_for = |allowed| AllowedTools {
+            sink: handle.clone(),
+            allowed,
+            url: mcp_config.url.clone(),
+            taken: Arc::clone(&taken),
+        };
+        let (handler_sink, prefixed_allowed) = match mcp_config.prefix {
+            Some(_) => (sink_for(Some(HashSet::new())), allowed),
+            None => (sink_for(allowed), None),
+        };
+        let handler = McpClientHandler::new(client_info.clone(), handler_sink)
             .with_timeout(None)
             .with_call_meta(crate::tool_runs::ToolRuns::call_meta);
 
@@ -819,15 +995,40 @@ async fn connect_mcp_tools(
                 });
             }
         };
+        if let Some(prefix) = &mcp_config.prefix {
+            install_prefixed(
+                &connection,
+                prefix,
+                prefixed_allowed.as_ref(),
+                &sink_for(None),
+            )
+            .await?;
+        }
 
-        info!(url = %mcp_config.url, "Connected to MCP server and discovered tools");
+        match handle.tool_defs(None).await {
+            Ok(defs) => {
+                let tools = defs.len().saturating_sub(connections_tools);
+                connections_tools += tools;
+                match tools {
+                    0 => {
+                        warn!(url = %mcp_config.url, "Connected to MCP server, but it gives the agent no tools: check the URL's folder and allowed_tools")
+                    }
+                    _ => {
+                        info!(url = %mcp_config.url, tools, "Connected to MCP server and discovered tools")
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(url = %mcp_config.url, error = %e, "Connected to MCP server, but failed to count its tools")
+            }
+        }
 
         connections.push(McpServerConnection {
             url: mcp_config.url.clone(),
             creds: oauth_creds,
             on_behalf_of_user: mcp_config.on_behalf_of_user,
             active_header: header_value,
-            _connection: connection,
+            connection,
         });
     }
 
@@ -1250,7 +1451,6 @@ impl flowgen_core::task::runner::Handler for EventHandler {
         if self.task_context.cancellation_token.is_cancelled() {
             return Ok(());
         }
-
         if self.config.stream {
             self.handle_streaming(event).await
         } else {
@@ -1259,7 +1459,38 @@ impl flowgen_core::task::runner::Handler for EventHandler {
     }
 }
 
+/// The signed-in user an event comes from, if any.
+fn user_id(event: &Event) -> Option<&str> {
+    event
+        .session
+        .as_ref()
+        .map(|session| session.user.user_id.as_str())
+}
+
 impl EventHandler {
+    /// The charge of an agent run's model calls, when the app sets a budget.
+    fn spending(&self, event: &Event, model: &str) -> Option<crate::budget::Spending> {
+        self.task_context
+            .service::<crate::budget::Budget>()
+            .map(|budget| crate::budget::Spending::new(budget, user_id(event), model))
+    }
+
+    /// Counts what a passthrough completion of `model` used, when the app sets a budget.
+    async fn spend(&self, event: &Event, model: &str, usage: Option<&CompletionUsage>) {
+        let (Some(budget), Some(usage)) =
+            (self.task_context.service::<crate::budget::Budget>(), usage)
+        else {
+            return;
+        };
+        let usage = crate::budget::Usage {
+            prompt_tokens: usage.prompt_tokens,
+            completion_tokens: usage.completion_tokens,
+        };
+        if let Err(e) = budget.spend(user_id(event), model, usage).await {
+            warn!(error = %e, "Failed to count the completion against the budget");
+        }
+    }
+
     /// Builds an error message tagged with the rendered provider/model/endpoint
     /// so the caller can tell which backend failed. Returns `None` if rendering
     /// itself errors — the caller then falls back to the raw error string.
@@ -1283,6 +1514,9 @@ impl EventHandler {
             .config
             .render_for_event(event)
             .map_err(|source| Error::ConfigRender { source })?;
+        if let Some(budget) = self.task_context.service::<crate::budget::Budget>() {
+            budget.check(user_id(event), &rendered.model).await?;
+        }
 
         let images = rendered.images.clone();
         let toolset = match user_mcp_server(&self.config) {
@@ -1329,6 +1563,8 @@ impl EventHandler {
                 let response = self
                     .passthrough_response(&client, &event, rendered_system_prompt)
                     .await?;
+                self.spend(&event, &response.model, response.usage.as_ref())
+                    .await;
                 return self
                     .send_response(response, completion_tx_arc, started_at)
                     .await;
@@ -1338,6 +1574,7 @@ impl EventHandler {
                 .complete(
                     user_message(&self.image_client, &self.config, rendered_prompt, images).await?,
                     rendered_system_prompt.as_deref(),
+                    self.spending(&event, client.model()),
                 )
                 .await
                 .map_err(|source| Error::AgentClient { source })?;
@@ -1553,6 +1790,8 @@ impl EventHandler {
         };
         let payload =
             serde_json::to_value(&final_chunk).map_err(|source| Error::SerdeJson { source })?;
+        self.spend(event, client.model(), final_usage.as_ref())
+            .await;
 
         let completion_ctx = crate::meta::CompletionContext {
             provider: self.config.provider.as_str().to_string(),
@@ -1649,6 +1888,7 @@ impl EventHandler {
                 .complete_stream(
                     user_message(&self.image_client, &self.config, rendered_prompt, images).await?,
                     rendered_system_prompt.as_deref(),
+                    self.spending(&event, client.model()),
                 )
                 .await;
 
@@ -2129,8 +2369,8 @@ mod tests {
     use axum::response::IntoResponse;
     use serde_json::json;
 
-    /// An MCP server that answers the handshake and records the
-    /// `Authorization` header of every request.
+    /// An MCP server with one tool, `lookup`, that records the `Authorization`
+    /// header of every request and, as `call:<name>`, every tool call.
     async fn mcp_server() -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
         let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
         let recorded = Arc::clone(&seen);
@@ -2155,6 +2395,13 @@ mod tests {
                     Some("tools/list") => json!({
                         "tools": [{"name": "lookup", "inputSchema": {"type": "object"}}]
                     }),
+                    Some("tools/call") => {
+                        recorded
+                            .lock()
+                            .unwrap()
+                            .push(format!("call:{}", body["params"]["name"].as_str().unwrap()));
+                        json!({"content": [{"type": "text", "text": "found"}], "isError": false})
+                    }
                     _ => json!({}),
                 };
                 axum::Json(json!({"jsonrpc": "2.0", "id": id, "result": result})).into_response()
@@ -2272,9 +2519,289 @@ mod tests {
         let message = user_message(&image_client, &config, "p".to_string(), images)
             .await
             .unwrap();
-        client.complete(message, None).await.unwrap();
+        client.complete(message, None, None).await.unwrap();
         let body = seen.lock().unwrap().clone();
         body.unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_mcp_tools_reach_the_model_request() {
+        let (mcp_url, _) = mcp_server().await;
+        let (address, seen) = chat_server().await;
+        let mut config = agent(McpServerConfig {
+            on_behalf_of_user: false,
+            ..user_server(&mcp_url)
+        });
+        config.endpoint = Some(format!("http://{address}/v1"));
+        let toolset = Toolset::connect(&config, None).await.unwrap();
+        let client = toolset
+            .client(config.clone(), &task_context(), None)
+            .await
+            .unwrap();
+
+        client
+            .complete(rig_core::message::Message::user("p"), None, None)
+            .await
+            .unwrap();
+        let body = seen.lock().unwrap().clone().unwrap();
+
+        assert_eq!(body["tools"][0]["function"]["name"], "lookup", "{body}");
+    }
+
+    /// A chat model that calls `tool` once, then answers; it records each request body.
+    async fn tool_calling_chat_server(
+        tool: &'static str,
+    ) -> (
+        std::net::SocketAddr,
+        Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    ) {
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&bodies);
+        let post = move |body: axum::Json<serde_json::Value>| {
+            let recorded = Arc::clone(&recorded);
+            async move {
+                let first = {
+                    let mut bodies = recorded.lock().unwrap();
+                    bodies.push(body.0);
+                    bodies.len() == 1
+                };
+                let message = match first {
+                    true => json!({"role": "assistant", "content": null, "tool_calls": [{
+                        "id": "c1", "type": "function",
+                        "function": {"name": tool, "arguments": "{}"}
+                    }]}),
+                    false => json!({"role": "assistant", "content": "done"}),
+                };
+                axum::Json(json!({
+                    "id": "c", "object": "chat.completion", "created": 0, "model": "m",
+                    "choices": [{"index": 0, "finish_reason": "stop", "message": message}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                }))
+            }
+        };
+        let app = axum::Router::new().route("/v1/chat/completions", axum::routing::post(post));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        (address, bodies)
+    }
+
+    #[tokio::test]
+    async fn dropping_the_tools_of_a_prefixed_server_closes_its_connection() {
+        let (mcp_url, _) = mcp_server().await;
+        let config = agent(McpServerConfig {
+            on_behalf_of_user: false,
+            prefix: Some("a_".to_string()),
+            ..user_server(&mcp_url)
+        });
+        let tools = connect_mcp_tools(&config, None).await.unwrap();
+        let connection = tools.connections[0].connection.clone();
+
+        drop(tools);
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), connection.closed())
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_prefixed_server_offers_renamed_tools_and_calls_the_originals() {
+        let (mcp_url, seen) = mcp_server().await;
+        let (address, bodies) = tool_calling_chat_server("fake_lookup").await;
+        let mut config = agent(McpServerConfig {
+            on_behalf_of_user: false,
+            prefix: Some("fake_".to_string()),
+            ..user_server(&mcp_url)
+        });
+        config.endpoint = Some(format!("http://{address}/v1"));
+        let toolset = Toolset::connect(&config, None).await.unwrap();
+        let client = toolset
+            .client(config.clone(), &task_context(), None)
+            .await
+            .unwrap();
+
+        client
+            .complete(rig_core::message::Message::user("p"), None, None)
+            .await
+            .unwrap();
+        let first = bodies.lock().unwrap()[0].clone();
+
+        assert_eq!(
+            first["tools"][0]["function"]["name"], "fake_lookup",
+            "{first}"
+        );
+        assert!(seen.lock().unwrap().contains(&"call:lookup".to_string()));
+    }
+
+    #[tokio::test]
+    async fn the_first_server_keeps_a_tool_name_two_servers_give() {
+        let (first_url, first_seen) = mcp_server().await;
+        let (second_url, second_seen) = mcp_server().await;
+        let (address, _) = tool_calling_chat_server("lookup").await;
+        let server = |url: &str| McpServerConfig {
+            on_behalf_of_user: false,
+            ..user_server(url)
+        };
+        let mut config = agent(server(&first_url));
+        config.mcp_servers = vec![server(&first_url), server(&second_url)];
+        config.endpoint = Some(format!("http://{address}/v1"));
+        let toolset = Toolset::connect(&config, None).await.unwrap();
+        let client = toolset
+            .client(config.clone(), &task_context(), None)
+            .await
+            .unwrap();
+
+        client
+            .complete(rig_core::message::Message::user("p"), None, None)
+            .await
+            .unwrap();
+
+        let call = "call:lookup".to_string();
+        assert!(first_seen.lock().unwrap().contains(&call));
+        assert!(!second_seen.lock().unwrap().contains(&call));
+    }
+
+    #[tokio::test]
+    async fn a_second_server_with_the_same_tool_name_needs_a_prefix() {
+        let (first_url, _) = mcp_server().await;
+        let (second_url, _) = mcp_server().await;
+        let server = |url: &str, prefix: Option<&str>| McpServerConfig {
+            on_behalf_of_user: false,
+            prefix: prefix.map(str::to_string),
+            ..user_server(url)
+        };
+        let names = |servers: Vec<McpServerConfig>| async move {
+            let mut config = agent(servers[0].clone());
+            config.mcp_servers = servers;
+            let mcp = connect_mcp_tools(&config, None).await.unwrap();
+            let mut names: Vec<String> = mcp
+                .handle
+                .tool_defs(None)
+                .await
+                .unwrap()
+                .iter()
+                .map(|def| def.name.to_string())
+                .collect();
+            names.sort();
+            names
+        };
+
+        let clashing = names(vec![server(&first_url, None), server(&second_url, None)]).await;
+        let prefixed = names(vec![
+            server(&first_url, None),
+            server(&second_url, Some("b_")),
+        ])
+        .await;
+
+        assert_eq!(clashing, ["lookup"]);
+        assert_eq!(prefixed, ["b_lookup", "lookup"]);
+    }
+
+    #[tokio::test]
+    async fn a_spent_budget_stops_the_next_completion_before_the_model() {
+        use flowgen_core::task::runner::{Handler, Runner};
+        let (address, seen) = chat_server().await;
+        let mut config = agent(user_server("http://unused"));
+        config.mcp_servers = Vec::new();
+        config.endpoint = Some(format!("http://{address}/v1"));
+        let mut services = flowgen_core::task::context::Services::default();
+        services.insert(Arc::new(crate::budget::Budget::new(
+            crate::budget::BudgetConfig {
+                limits: vec![crate::budget::Limit {
+                    scope: crate::budget::Scope::Workspace,
+                    period: crate::budget::Period::Month,
+                    max_tokens: Some(2),
+                    max_amount: None,
+                }],
+                prices: Default::default(),
+            },
+            Arc::new(flowgen_core::cache::memory::MemoryCache::new()),
+        )));
+        let context = flowgen_core::task::context::TaskContextBuilder::new()
+            .flow_name("f".to_string())
+            .task_manager(Arc::new(
+                flowgen_core::task::manager::TaskManagerBuilder::new()
+                    .build()
+                    .unwrap(),
+            ))
+            .cache(Arc::new(flowgen_core::cache::memory::MemoryCache::new()))
+            .services(services)
+            .build()
+            .unwrap();
+        let (_tx, rx) = tokio::sync::mpsc::channel(1);
+        let processor = ProcessorBuilder::new()
+            .config(Arc::new(config))
+            .receiver(rx)
+            .task_type("ai_completion")
+            .task_context(Arc::new(context))
+            .build()
+            .await
+            .unwrap();
+        let handler = processor.init().await.unwrap();
+        let event = || {
+            EventBuilder::new()
+                .data(EventData::Json(json!({})))
+                .subject("s".to_string())
+                .task_id(0)
+                .task_type("test")
+                .build()
+                .unwrap()
+        };
+
+        let first = handler.handle(event()).await;
+        *seen.lock().unwrap() = None;
+        let second = handler.handle(event()).await;
+
+        assert!(first.is_ok(), "{first:?}");
+        assert!(matches!(
+            second,
+            Err(Error::Budget {
+                source: crate::budget::Error::Spent { .. }
+            })
+        ));
+        assert!(seen.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_run_counts_each_model_call_and_stops_once_the_budget_is_spent() {
+        let (mcp_url, _) = mcp_server().await;
+        let (address, bodies) = tool_calling_chat_server("lookup").await;
+        let mut config = agent(McpServerConfig {
+            on_behalf_of_user: false,
+            ..user_server(&mcp_url)
+        });
+        config.endpoint = Some(format!("http://{address}/v1"));
+        let toolset = Toolset::connect(&config, None).await.unwrap();
+        let client = toolset
+            .client(config.clone(), &task_context(), None)
+            .await
+            .unwrap();
+        let budget = Arc::new(crate::budget::Budget::new(
+            crate::budget::BudgetConfig {
+                limits: vec![crate::budget::Limit {
+                    scope: crate::budget::Scope::Workspace,
+                    period: crate::budget::Period::Month,
+                    max_tokens: Some(2),
+                    max_amount: None,
+                }],
+                prices: Default::default(),
+            },
+            Arc::new(flowgen_core::cache::memory::MemoryCache::new()),
+        ));
+        let spending = crate::budget::Spending::new(Arc::clone(&budget), None, "m");
+
+        let result = client
+            .complete(rig_core::message::Message::user("p"), None, Some(spending))
+            .await;
+
+        assert!(result.is_err(), "{:?}", result.map(|output| output.text));
+        assert_eq!(bodies.lock().unwrap().len(), 1);
+        assert!(matches!(
+            budget.check(None, "m").await,
+            Err(crate::budget::Error::Spent { .. })
+        ));
     }
 
     #[tokio::test]
@@ -2369,6 +2896,25 @@ mod tests {
     }
 
     #[test]
+    fn a_tool_name_prefix_suits_model_apis() {
+        let prefixed = |prefix: &str| {
+            agent(McpServerConfig {
+                prefix: Some(prefix.to_string()),
+                ..user_server("http://127.0.0.1:9/mcp")
+            })
+            .validate()
+        };
+
+        assert!(prefixed("a_").is_ok());
+        assert!(matches!(prefixed("a."), Err(Error::InvalidPrefix { .. })));
+        assert!(matches!(prefixed(""), Err(Error::InvalidPrefix { .. })));
+        assert!(matches!(
+            prefixed(&"a".repeat(64)),
+            Err(Error::InvalidPrefix { .. })
+        ));
+    }
+
+    #[test]
     fn max_turns_is_at_least_one_and_at_least_two_with_mcp_servers() {
         let mut config = agent(user_server("http://127.0.0.1:9/mcp"));
         config.max_turns = 2;
@@ -2393,6 +2939,8 @@ mod tests {
             credentials_path: None,
             headers: None,
             on_behalf_of_user: true,
+            allowed_tools: None,
+            prefix: None,
         }
     }
 
@@ -2554,6 +3102,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_agent_gets_only_the_tools_it_allows() {
+        let (url, _) = mcp_server().await;
+        let tools = |allowed: Option<&[&str]>| {
+            let url = url.clone();
+            let allowed = allowed.map(|names| names.iter().map(|n| n.to_string()).collect());
+            async move {
+                let server = McpServerConfig {
+                    on_behalf_of_user: false,
+                    allowed_tools: allowed,
+                    ..user_server(&url)
+                };
+                let mcp = connect_mcp_tools(&agent(server), None).await.unwrap();
+                mcp.handle.tool_defs(None).await.unwrap().len()
+            }
+        };
+
+        let every = tools(None).await;
+        let lookup = tools(Some(&["lookup"])).await;
+        let other = tools(Some(&["other"])).await;
+
+        assert_eq!((every, lookup, other), (1, 1, 0));
+    }
+
+    #[tokio::test]
     async fn a_rejected_token_is_told_apart_from_other_connect_errors() {
         let connect = |status: axum::http::StatusCode| async move {
             let app = axum::Router::new()
@@ -2634,7 +3206,7 @@ mod tests {
     #[test]
     fn test_credentials_serialization() {
         let creds = Credentials {
-            api_key: "sk-test123".to_string(),
+            api_key: Some("sk-test123".to_string()),
             organization_id: Some("org-123".to_string()),
             project_id: None,
             region: None,
@@ -2809,7 +3381,7 @@ mod tests {
     fn credentials_minimal_deser() {
         let json = r#"{"api_key": "sk-abc"}"#;
         let creds: Credentials = serde_json::from_str(json).unwrap();
-        assert_eq!(creds.api_key, "sk-abc");
+        assert_eq!(creds.api_key.as_deref(), Some("sk-abc"));
         assert_eq!(creds.organization_id, None);
         assert_eq!(creds.project_id, None);
         assert_eq!(creds.region, None);
@@ -2824,7 +3396,7 @@ mod tests {
             "region": "us-east-1"
         }"#;
         let creds: Credentials = serde_json::from_str(json).unwrap();
-        assert_eq!(creds.api_key, "sk-123");
+        assert_eq!(creds.api_key.as_deref(), Some("sk-123"));
         assert_eq!(creds.organization_id, Some("org-456".to_string()));
         assert_eq!(creds.project_id, Some("proj-789".to_string()));
         assert_eq!(creds.region, Some("us-east-1".to_string()));
@@ -2833,7 +3405,7 @@ mod tests {
     #[test]
     fn credentials_skip_serializing_none() {
         let creds = Credentials {
-            api_key: "sk-x".to_string(),
+            api_key: Some("sk-x".to_string()),
             organization_id: None,
             project_id: None,
             region: None,
@@ -2847,10 +3419,18 @@ mod tests {
     }
 
     #[test]
-    fn credentials_missing_api_key_rejected() {
-        let json = r#"{"organization_id": "org-1"}"#;
-        let result = serde_json::from_str::<Credentials>(json);
-        assert!(result.is_err());
+    fn a_vertex_ai_file_without_a_key_loads_and_a_keyed_provider_needs_one() {
+        let vertex: Credentials =
+            serde_json::from_str(r#"{"project_id": "p", "region": "r"}"#).unwrap();
+        let keyless = crate::agent::ClientBuilder::new(Provider::OpenAi, "m".to_string())
+            .credentials(vertex.clone())
+            .build();
+
+        assert_eq!(vertex.api_key, None);
+        assert!(matches!(
+            keyless,
+            Err(crate::agent::Error::MissingCredentials)
+        ));
     }
 
     #[test]
@@ -3159,6 +3739,14 @@ mod tests {
         let groq = cfg.to_additional_params(&Provider::Groq).unwrap();
         assert!(cohere.is_none());
         assert!(groq.is_none());
+    }
+
+    #[test]
+    fn a_misspelled_credentials_field_is_rejected() {
+        let error = serde_json::from_str::<Credentials>(r#"{"api_key": "k", "org_id": "o"}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown field `org_id`"), "{error}");
     }
 
     #[test]

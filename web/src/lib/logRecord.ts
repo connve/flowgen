@@ -139,18 +139,13 @@ export function levelChipClass(level: ActivityLevel, active: boolean): string {
 			return 'chip-error';
 		case 'warn':
 			return 'chip-warn';
-		case 'info':
-			return 'chip-info';
 		default:
 			return 'chip-neutral';
 	}
 }
 
-// Badge variant for a level, matching the status colors of the flow list.
-export function levelVariant(level: ActivityLevel): 'neutral' | 'success' | 'warning' | 'error' {
+export function levelVariant(level: ActivityLevel): 'neutral' | 'warning' | 'error' {
 	switch (level) {
-		case 'info':
-			return 'success';
 		case 'warn':
 			return 'warning';
 		case 'error':

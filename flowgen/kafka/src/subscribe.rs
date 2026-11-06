@@ -10,7 +10,7 @@ use flowgen_core::client::Client;
 use flowgen_core::config::ConfigExt;
 use flowgen_core::delivery::{Delivered, Delivery};
 use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
-use flowgen_core::retry::RetryConfig;
+use flowgen_core::retry::{ReconnectBackoff, RetryConfig};
 use flowgen_core::task::TaskConfig;
 use futures_util::{future, StreamExt};
 use rskafka::client::consumer::{StartOffset as ConsumerStart, StreamConsumerBuilder};
@@ -20,6 +20,7 @@ use rskafka::record::RecordAndOffset;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::Sender;
@@ -388,6 +389,8 @@ pub struct EventHandler {
     retry_config: RetryConfig,
     task_type: &'static str,
     task_context: Arc<flowgen_core::task::context::TaskContext>,
+    /// Whether a broker answered a fetch or a metadata refresh, which starts the reconnect backoff over.
+    received: AtomicBool,
 }
 
 fn build_event(
@@ -491,7 +494,10 @@ impl EventHandler {
     ) -> Result<(), Error> {
         let client = &partition.client;
         let mut next_offset = partition.next_offset;
-        let mut backoff = self.retry_config.reconnect_strategy();
+        let mut backoff = ReconnectBackoff::new(&self.retry_config);
+        let mut consumed = false;
+        let stopped = cancellation.cancelled();
+        tokio::pin!(stopped);
         loop {
             let mut stream =
                 StreamConsumerBuilder::new(Arc::clone(client), ConsumerStart::At(next_offset))
@@ -499,11 +505,12 @@ impl EventHandler {
             let failure = loop {
                 let next = tokio::select! {
                     biased;
-                    _ = cancellation.cancelled() => return Ok(()),
+                    _ = &mut stopped => return Ok(()),
                     next = stream.next() => next,
                 };
                 match next {
                     Some(Ok((record, _high_watermark))) => {
+                        self.received.store(true, Ordering::Relaxed);
                         let delivered = self
                             .process_record(client.partition(), &record, &partition.key)
                             .await?;
@@ -511,7 +518,7 @@ impl EventHandler {
                             return Ok(());
                         }
                         next_offset = record.offset + 1;
-                        backoff = self.retry_config.reconnect_strategy();
+                        consumed = true;
                     }
                     Some(Err(source)) => break Some(source),
                     None => break None,
@@ -524,7 +531,7 @@ impl EventHandler {
                     ..
                 }) => tokio::select! {
                     biased;
-                    _ = cancellation.cancelled() => return Ok(()),
+                    _ = &mut stopped => return Ok(()),
                     recovered = self.recover_offset(client, next_offset) => recovered,
                 },
                 Some(source) => Err(Error::Consume {
@@ -540,13 +547,10 @@ impl EventHandler {
             match recovered {
                 Ok(offset) => next_offset = offset,
                 Err(e) => {
-                    let delay = match backoff.next() {
-                        Some(delay) => delay,
-                        None => self.retry_config.initial_backoff,
-                    };
+                    let delay = backoff.next_delay(std::mem::take(&mut consumed));
                     warn!(partition = client.partition(), error = %e, delay_ms = %delay.as_millis(), "Consuming partition failed, resuming");
                     tokio::select! {
-                        _ = cancellation.cancelled() => return Ok(()),
+                        _ = &mut stopped => return Ok(()),
                         _ = tokio::time::sleep(delay) => {}
                     }
                 }
@@ -567,6 +571,7 @@ impl EventHandler {
                     continue;
                 }
             };
+            self.received.store(true, Ordering::Relaxed);
             let Some(metadata) = topics.into_iter().find(|t| &t.name == topic) else {
                 continue;
             };
@@ -590,10 +595,9 @@ impl EventHandler {
         }
     }
 
-    /// Consumes all partitions concurrently until the task stops, the flow
-    /// stops taking events or the topic gains partitions.
+    /// Consumes all partitions until the flow stops reading or the topic gains partitions.
     async fn handle(&self) -> Result<(), Error> {
-        let partitions = self.task_context.cancellation_token.child_token();
+        let partitions = self.task_context.stop_reading.child_token();
         let consume = future::try_join_all(
             self.partitions
                 .iter()
@@ -721,18 +725,19 @@ impl flowgen_core::task::runner::Runner for Subscriber {
             retry_config: RetryConfig::merge(&self.task_context.retry, &self.config.retry),
             task_type: self.task_type,
             task_context: Arc::clone(&self.task_context),
+            received: AtomicBool::new(false),
         })
     }
 
     #[tracing::instrument(skip(self), name = "task.run", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn run(self) -> Result<(), Error> {
         let retry_config = RetryConfig::merge(&self.task_context.retry, &self.config.retry);
-        let cancellation_token = self.task_context.cancellation_token.clone();
-        let mut reconnect_backoff = retry_config.reconnect_strategy();
+        let stop_reading = self.task_context.stop_reading.clone();
+        let mut reconnect_backoff = ReconnectBackoff::new(&retry_config);
         let mut lost_connectivity = false;
 
         loop {
-            if cancellation_token.is_cancelled() {
+            if stop_reading.is_cancelled() {
                 return Ok(());
             }
 
@@ -754,24 +759,20 @@ impl flowgen_core::task::runner::Runner for Subscriber {
             );
 
             let event_handler = tokio::select! {
-                _ = cancellation_token.cancelled() => return Ok(()),
+                _ = stop_reading.cancelled() => return Ok(()),
                 result = init_future => match result {
                     Ok(handler) => {
-                        reconnect_backoff = retry_config.reconnect_strategy();
                         if lost_connectivity {
                             warn!("Subscriber reconnected successfully");
                         }
                         handler
                     }
                     Err(e) => {
-                        let delay = match reconnect_backoff.next() {
-                            Some(d) => d,
-                            None => retry_config.initial_backoff,
-                        };
+                        let delay = reconnect_backoff.next_delay(false);
                         error!(error = %e, delay_ms = %delay.as_millis(), "Subscriber initialization exhausted retry attempts, will retry after backoff");
                         tokio::select! {
                             _ = tokio::time::sleep(delay) => {}
-                            _ = cancellation_token.cancelled() => return Ok(()),
+                            _ = stop_reading.cancelled() => return Ok(()),
                         }
                         continue;
                     }
@@ -779,7 +780,7 @@ impl flowgen_core::task::runner::Runner for Subscriber {
             };
 
             match event_handler.handle().await {
-                _ if cancellation_token.is_cancelled() => return Ok(()),
+                _ if stop_reading.is_cancelled() => return Ok(()),
                 Ok(()) => warn!("Subscriber lost connectivity, reinitializing"),
                 Err(e) => error!(error = %e, "Subscriber lost connectivity, reinitializing"),
             }
@@ -790,14 +791,12 @@ impl flowgen_core::task::runner::Runner for Subscriber {
                 .remove(&event_handler.client_key)
                 .await;
 
-            let delay = match reconnect_backoff.next() {
-                Some(d) => d,
-                None => retry_config.initial_backoff,
-            };
+            let delay =
+                reconnect_backoff.next_delay(event_handler.received.load(Ordering::Relaxed));
             warn!(delay_ms = %delay.as_millis(), "Reconnect backoff");
             tokio::select! {
                 _ = tokio::time::sleep(delay) => {}
-                _ = cancellation_token.cancelled() => return Ok(()),
+                _ = stop_reading.cancelled() => return Ok(()),
             }
         }
     }

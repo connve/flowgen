@@ -189,6 +189,25 @@ Each entry also accepts `headers`, sent with every request to that MCP server. U
           X-Flowgen-Client: your-agent-name
 ```
 
+`allowed_tools` names the tools of that server the agent uses; the others stay out of the model's tool list. Without it the agent gets every tool the server lists:
+
+```yaml
+    mcp_servers:
+      - url: "http://localhost:3001/mcp"
+        allowed_tools: [web_search, read_page]
+```
+
+When two servers give the agent a tool of the same name, the agent keeps the first server's and logs a warning. `prefix` tells the servers' tools apart: the agent sees each of that server's tools as the prefix followed by its name, and calls reach the server under the original name. A prefix is letters, digits, `_` or `-`; `allowed_tools` still names the original tools.
+
+```yaml
+    mcp_servers:
+      - url: "http://localhost:3001/mcp/v1/notes"
+      - url: "https://mcp.example.com/mcp"
+        prefix: notes_
+```
+
+A server with a `prefix` keeps the tools it listed when the agent connected; tools it adds later reach the agent when the agent reconnects.
+
 ### Calling tools as the signed-in user
 
 With `on_behalf_of_user: true`, the agent calls the server as the user who sent the request, with their token as the bearer:

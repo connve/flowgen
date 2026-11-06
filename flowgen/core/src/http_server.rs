@@ -62,6 +62,11 @@ pub enum Error {
 pub trait HasFlowName {
     /// Name of the flow that owns this registration.
     fn flow_name(&self) -> &str;
+
+    /// Whether the task that registered has stopped reading.
+    fn is_stopped(&self) -> bool {
+        false
+    }
 }
 
 /// Checks a registration's required `headers` (empty = reachable by
@@ -259,12 +264,15 @@ impl<D: Dispatcher> HttpServer<D> {
     /// Inserts a registration under `key`. Replaces any prior entry; callers
     /// should use [`Self::deregister_flow`] first when reloading a flow.
     pub fn register(&self, key: String, registration: D::Registration) {
-        info!(
-            key = %key,
-            flow = %registration.flow_name(),
-            "Registering HTTP server entry"
-        );
-        self.table.insert(key, registration);
+        let entry = self.table.entry(key);
+        if !registration.is_stopped() {
+            info!(
+                key = %entry.key(),
+                flow = %registration.flow_name(),
+                "Registering HTTP server entry"
+            );
+            entry.insert(registration);
+        }
     }
 
     /// Inserts a registration only if `key` is not already present.
@@ -286,7 +294,9 @@ impl<D: Dispatcher> HttpServer<D> {
                     flow = %registration.flow_name(),
                     "Registering HTTP server entry"
                 );
-                entry.insert(registration);
+                if !registration.is_stopped() {
+                    entry.insert(registration);
+                }
                 Ok(())
             }
         }
@@ -313,20 +323,24 @@ impl<D: Dispatcher> HttpServer<D> {
         }
     }
 
-    /// Starts the server. The router is built once via the dispatcher and the
+    /// Starts the server on `port`. The router is built once via the dispatcher and the
     /// listener serves requests until the future is dropped or returns.
     pub async fn start_server(&self, port: u16) -> Result<(), Error> {
+        let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
+            .await
+            .map_err(|source| Error::BindListener { port, source })?;
+        self.serve(listener).await
+    }
+
+    /// Serves requests on `listener`, already bound, until the future is dropped or returns.
+    pub async fn serve(&self, listener: tokio::net::TcpListener) -> Result<(), Error> {
         let mut started = self.server_started.lock().await;
         if *started {
-            warn!(port, "HTTP server already started");
+            warn!("HTTP server already started");
             return Ok(());
         }
         *started = true;
         drop(started);
-
-        let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
-            .await
-            .map_err(|source| Error::BindListener { port, source })?;
 
         let state = DispatchState {
             table: Arc::clone(&self.table),
@@ -467,6 +481,59 @@ mod tests {
         assert!(server.is_registered_by("key1", "flow_a"));
         assert!(!server.is_registered_by("key1", "flow_b"));
         assert!(!server.is_registered_by("key2", "flow_a"));
+    }
+
+    #[derive(Clone, Debug)]
+    struct StoppableReg {
+        flow: String,
+        stopped: bool,
+    }
+
+    impl HasFlowName for StoppableReg {
+        fn flow_name(&self) -> &str {
+            &self.flow
+        }
+
+        fn is_stopped(&self) -> bool {
+            self.stopped
+        }
+    }
+
+    struct StoppableDispatcher;
+
+    impl Dispatcher for StoppableDispatcher {
+        type Registration = StoppableReg;
+        type Extras = ();
+
+        fn build_router(_state: DispatchState<Self::Registration, Self::Extras>) -> Router {
+            Router::new()
+        }
+    }
+
+    #[test]
+    fn a_registration_from_a_stopped_task_does_not_stay() {
+        let server = HttpServer::<StoppableDispatcher>::new("/hook".to_string());
+        let stopped = |flow: &str| StoppableReg {
+            flow: flow.to_string(),
+            stopped: true,
+        };
+
+        let running = |flow: &str| StoppableReg {
+            flow: flow.to_string(),
+            stopped: false,
+        };
+
+        server.register("a".to_string(), stopped("flow_a"));
+        let tried = server.try_register("b".to_string(), stopped("flow_a"));
+        server.register("c".to_string(), running("flow_a"));
+        server.register("d".to_string(), running("flow_b"));
+        server.register("d".to_string(), stopped("flow_a"));
+
+        assert!(tried.is_ok());
+        assert!(!server.is_registered_by("a", "flow_a"));
+        assert!(!server.is_registered_by("b", "flow_a"));
+        assert!(server.is_registered_by("c", "flow_a"));
+        assert!(server.is_registered_by("d", "flow_b"));
     }
 
     #[test]

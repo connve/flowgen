@@ -32,7 +32,7 @@ static START_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// transfer occasionally dies mid-stream — surfacing as
 /// `PullImage("bytes remaining on stream")`. testcontainers treats it as
 /// terminal and does not retry, so one flaky download fails the test.
-async fn start_mongo_container() -> ContainerAsync<GenericImage> {
+async fn start_mongo_container(cmd: &[&str]) -> ContainerAsync<GenericImage> {
     let mut last_error = None;
     for attempt in 1..=3 {
         if attempt > 1 {
@@ -41,7 +41,7 @@ async fn start_mongo_container() -> ContainerAsync<GenericImage> {
         let result = GenericImage::new("mongo", "7.0")
             .with_exposed_port(27017.tcp())
             .with_wait_for(WaitFor::message_on_stdout("Waiting for connections"))
-            .with_cmd(["--replSet", "rs0", "--bind_ip_all"])
+            .with_cmd(cmd.iter().copied())
             .start()
             .await;
         match result {
@@ -64,7 +64,7 @@ fn is_pull_failure(error: &TestcontainersError) -> bool {
 
 async fn start_mongo() -> (ContainerAsync<GenericImage>, std::path::PathBuf) {
     let guard = START_LOCK.lock().await;
-    let container = start_mongo_container().await;
+    let container = start_mongo_container(&["--replSet", "rs0", "--bind_ip_all"]).await;
     drop(guard);
     let port = container
         .get_host_port_ipv4(27017)
@@ -1227,6 +1227,96 @@ async fn an_idle_cdc_stores_its_position_for_a_restart() {
     );
 }
 
+/// The server's count of failed `aggregate` commands, one per change stream that cannot open.
+async fn failed_aggregates(client: &mongodb::Client) -> i64 {
+    let status = client
+        .database("admin")
+        .run_command(mongodb::bson::doc! { "serverStatus": 1 })
+        .await
+        .expect("server status");
+    let failed = status
+        .get_document("metrics")
+        .and_then(|metrics| metrics.get_document("commands"))
+        .and_then(|commands| commands.get_document("aggregate"))
+        .map(|aggregate| aggregate.get("failed").cloned());
+    match failed {
+        Ok(Some(mongodb::bson::Bson::Int64(failed))) => failed,
+        Ok(Some(mongodb::bson::Bson::Int32(failed))) => failed.into(),
+        Ok(None) | Err(_) => 0,
+        Ok(Some(other)) => panic!("unexpected failed aggregate count {other:?}"),
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
+async fn a_change_stream_that_fails_on_every_connect_backs_off_with_growing_delays() {
+    let mongo = {
+        let _guard = START_LOCK.lock().await;
+        start_mongo_container(&["--bind_ip_all"]).await
+    };
+    let port = mongo
+        .get_host_port_ipv4(27017)
+        .await
+        .expect("map mongo port");
+    let observer =
+        mongodb::Client::with_uri_str(format!("mongodb://127.0.0.1:{port}/?directConnection=true"))
+            .await
+            .expect("connect");
+    let baseline = failed_aggregates(&observer).await;
+
+    let stopping = tokio_util::sync::CancellationToken::new();
+    let cache: Arc<dyn flowgen_core::cache::Cache> =
+        Arc::new(flowgen_core::cache::memory::MemoryCache::new());
+    let config = Cdc {
+        retry: Some(flowgen_core::retry::RetryConfig {
+            max_attempts: None,
+            initial_backoff: Duration::from_millis(100),
+        }),
+        ..change_config(write_credentials(port))
+    };
+    let (change_tx, _change_rx) = mpsc::channel::<Event>(4);
+    let reader = cdc::ProcessorBuilder::new()
+        .config(Arc::new(config))
+        .sender(change_tx)
+        .task_id(0)
+        .task_type("mongodb_cdc")
+        .task_context(context_sharing(&cache, stopping.clone()))
+        .build()
+        .await
+        .expect("build change stream reader");
+    let running = tokio::spawn(async move {
+        use flowgen_core::task::runner::Runner;
+        let _ = reader.run().await;
+    });
+
+    let started = tokio::time::Instant::now();
+    let mut seen = baseline;
+    let mut attempts = Vec::new();
+    while started.elapsed() < Duration::from_secs(8) {
+        let failed = failed_aggregates(&observer).await;
+        if failed > seen {
+            attempts.push(started.elapsed());
+            seen = failed;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    stopping.cancel();
+    tokio::time::timeout(Duration::from_secs(10), running)
+        .await
+        .expect("the stopped reader returns")
+        .expect("the stopped reader did not panic");
+
+    let gaps: Vec<Duration> = attempts.windows(2).map(|w| w[1] - w[0]).collect();
+    assert!(
+        (6..=10).contains(&attempts.len()),
+        "a standalone server fails every change stream, so the reader must reconnect with growing delays; attempts at {attempts:?}"
+    );
+    assert!(
+        gaps[4] >= Duration::from_millis(700),
+        "the fifth delay must have grown well past initial_backoff; gaps {gaps:?}"
+    );
+}
+
 /// A record the shared source tests write and read back.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Record {
@@ -1318,3 +1408,115 @@ impl flowgen_core::conformance::Source for MongoSource {
 }
 
 flowgen_core::source_conformance!(MongoSource::start().await);
+
+/// `mongodb_collection` writing to a `records` collection, for the shared sink tests.
+struct MongoSink {
+    records: mongodb::Collection<Record>,
+    credentials_path: std::path::PathBuf,
+    server: ContainerAsync<GenericImage>,
+}
+
+impl MongoSink {
+    async fn start() -> Self {
+        let (server, _) = start_mongo().await;
+        let port = server
+            .get_host_port_ipv4(27017)
+            .await
+            .expect("map mongo port");
+        let records = mongodb::Client::with_uri_str(format!(
+            "mongodb://127.0.0.1:{port}/?directConnection=true"
+        ))
+        .await
+        .expect("connect")
+        .database(MongoSource::DATABASE)
+        .collection(MongoSource::COLLECTION);
+        let credentials = flowgen_mongodb::client::MongoCredentials {
+            host: flowgen_mongodb::client::MongoHost::One("127.0.0.1".to_string()),
+            port: Some(port),
+            options: [
+                ("directConnection", "true"),
+                ("connectTimeoutMS", "3000"),
+                ("serverSelectionTimeoutMS", "3000"),
+            ]
+            .into_iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect(),
+            ..Default::default()
+        };
+        let credentials_path = std::env::temp_dir().join(format!("flowgen_mongo_sink_{port}.json"));
+        std::fs::write(
+            &credentials_path,
+            serde_json::to_string(&credentials).expect("serialize credentials"),
+        )
+        .expect("write credentials file");
+        Self {
+            records,
+            credentials_path,
+            server,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl flowgen_core::conformance::Sink for MongoSink {
+    async fn start(
+        &self,
+        context: Arc<flowgen_core::task::context::TaskContext>,
+        rx: mpsc::Receiver<Event>,
+    ) -> tokio::task::JoinHandle<()> {
+        let config = Collection {
+            name: "save".to_string(),
+            operation: Operation::Write,
+            credentials_path: Some(self.credentials_path.clone()),
+            db_name: MongoSource::DATABASE.to_string(),
+            collection_name: MongoSource::COLLECTION.to_string(),
+            filter: Default::default(),
+            depends_on: None,
+            retry: None,
+            max_in_flight: None,
+        };
+        let processor = ProcessorBuilder::new()
+            .config(Arc::new(config))
+            .receiver(rx)
+            .task_id(1)
+            .task_type("mongodb_collection")
+            .task_context(context)
+            .build()
+            .expect("build processor");
+        tokio::spawn(async move {
+            use flowgen_core::task::runner::Runner;
+            let _ = processor.run().await;
+        })
+    }
+
+    fn event(&self, payload: &str) -> Event {
+        let record = Record {
+            payload: payload.to_string(),
+        };
+        drive_event(serde_json::to_value(record).expect("serialize record"))
+    }
+
+    async fn written(&self) -> Vec<String> {
+        use futures::TryStreamExt;
+        self.records
+            .find(mongodb::bson::doc! {})
+            .await
+            .expect("find records")
+            .try_collect::<Vec<Record>>()
+            .await
+            .expect("read records")
+            .into_iter()
+            .map(|record| record.payload)
+            .collect()
+    }
+
+    async fn take_down(&self) {
+        self.server.pause().await.expect("pause server");
+    }
+
+    async fn bring_back(&self) {
+        self.server.unpause().await.expect("unpause server");
+    }
+}
+
+flowgen_core::sink_conformance!(MongoSink::start().await);

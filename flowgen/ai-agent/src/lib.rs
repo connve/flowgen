@@ -11,6 +11,7 @@ use flowgen_core::task::{Task, TaskError, TaskIo, TaskMeta};
 use std::sync::Arc;
 
 pub mod agent;
+pub mod budget;
 pub mod meta;
 pub mod tool_runs;
 

@@ -35,6 +35,21 @@ mcp_server:
 
 The server exposes a single endpoint at `path` that speaks the MCP Streamable HTTP transport: `POST <path>` accepts JSON-RPC requests, `GET <path>` opens a long-lived SSE stream for [notifications](#notifications).
 
+## Toolsets
+
+`path` serves every tool, resource and prompt of the workspace. Each folder of flows is also served on its own, as a toolset, at `path` followed by the folder within `flows.path` (the flow's [identity](/docs/flowgen/concepts/flows#flow-identity) without its name): `/mcp/v1/sales` serves the flows of `sales/` and its subfolders, and `/mcp/v1/teams/hr` those of `teams/hr/`.
+
+Tool and prompt names are unique on the server, so a tool has the same name on `path` and on every toolset that holds it, and moving its flow to another folder keeps its name. A second flow registering a taken name fails to start the tool; [`flowgen validate`](/docs/flowgen/concepts/configuration#validating-a-workspace) reports it before deployment.
+
+An agent connects to `path` or to the toolsets it needs, and takes only some tools with `allowed_tools`. A server that gives the agent no tools, such as a URL whose folder holds none, logs a warning:
+
+```yaml
+mcp_servers:
+  - url: "http://localhost:3001/mcp/v1/sales"
+  - url: "http://localhost:3001/mcp/v1/shared"
+    allowed_tools: [web_search]
+```
+
 ## `mcp_tool`
 
 Registers a flow as an LLM-callable tool. Inbound `tools/call` requests are injected as events at the head of the flow's pipeline; downstream tasks process the arguments and the final result is returned to the client.
@@ -56,7 +71,7 @@ Registers a flow as an LLM-callable tool. Inbound `tools/call` requests are inje
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `name` | string | required | Tool name. Combined with the flow name as `{flow_name}.{name}` to form the full tool identifier. |
+| `name` | string | required | Tool name, as clients list and call it: 1 to 64 letters, digits, `_` or `-`, which model APIs take as a function name. Unique on the server: a second flow registering the same name fails to start the tool. |
 | `description` | string | required | Human-readable description shown to LLMs for tool selection. |
 | `input_schema` | object | | JSON Schema for the tool's input parameters. A call whose arguments do not match it gets a tool error naming the first problem, such as `Invalid arguments: "project_id" is a required property`, and the flow does not run. The error leaves out argument values. A call without arguments is checked as `{}`. An invalid schema fails the task at startup, and a `$ref` to another file or URL is not fetched. |
 | `credentials_path` | string | | Overrides `mcp_server.credentials_path` for this tool. |
@@ -211,7 +226,7 @@ arguments:
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `name` | string | required | Prompt identifier. Becomes the slash command in MCP clients. |
+| `name` | string | required | Prompt identifier. Becomes the slash command in MCP clients. 1 to 64 letters, digits, `_` or `-`, unique on the server. |
 | `description` | string | required | Description shown in the prompt palette. |
 | `arguments` | list | | Argument definitions (see above). |
 | `template` | string/resource | | Single-message shorthand. Mutually exclusive with `messages`. |

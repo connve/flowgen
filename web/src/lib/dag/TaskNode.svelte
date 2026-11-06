@@ -2,6 +2,8 @@
 	import Icon from '@iconify/svelte';
 	import { Handle, Position, type NodeProps } from '@xyflow/svelte';
 	import { connectorFor } from '$lib/connectors';
+	import { formatDuration } from '$lib/toolRuns.svelte';
+	import { getNodeStates } from './nodeStates';
 
 	interface TaskNodeData extends Record<string, unknown> {
 		name: string;
@@ -10,7 +12,15 @@
 
 	let { data }: NodeProps & { data: TaskNodeData } = $props();
 
+	const nodeStates = getNodeStates();
 	let connector = $derived(connectorFor(data.taskType));
+	let latest = $derived(nodeStates().get(data.name));
+
+	const MARK = {
+		info: { icon: 'tabler:check', bg: 'bg-primary' },
+		warn: { icon: 'tabler:exclamation-mark', bg: 'bg-warning' },
+		error: { icon: 'tabler:x', bg: 'bg-error' }
+	};
 </script>
 
 <div
@@ -23,62 +33,28 @@
 		<div class="truncate text-[10px] leading-tight opacity-60">{data.taskType}</div>
 	</div>
 
-	<!-- Always in normal flow (not position:absolute) so dagre's initial
-	     measurement of the node already includes this width. The status/
-	     duration set later by FlowInspector (data-level/data-duration,
-	     after activity arrives) only toggles visibility of the CONTENTS
-	     here — it never changes the node's box size, so no re-layout is
-	     needed and neighbors never get overlapped. Fixed width (not
-	     shrink-0 alone) keeps the level-mark circle clear of the node's
-	     right border regardless of how long the name/task_type truncate to. -->
-	<div class="side-panel pointer-events-none flex w-10 shrink-0 flex-col items-center gap-1">
+	<!-- Fixed width so the node keeps its measured size when a status arrives. -->
+	<div class="pointer-events-none flex w-10 shrink-0 flex-col items-center gap-1">
 		<span
-			class="level-mark invisible inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-white"
+			class="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-white {latest
+				? MARK[latest.level].bg
+				: 'invisible'}"
 		>
-			<Icon icon="tabler:check" class="level-icon-info h-3 w-3" />
-			<Icon icon="tabler:exclamation-mark" class="level-icon-warn h-3 w-3" />
-			<Icon icon="tabler:x" class="level-icon-error h-3 w-3" />
+			{#if latest}
+				<Icon icon={MARK[latest.level].icon} class="h-3 w-3" />
+			{/if}
 		</span>
-		<span
-			class="duration-badge w-full overflow-hidden text-center font-mono text-[10px] leading-none opacity-70"
-			>&nbsp;</span
-		>
+		<span class="w-full overflow-hidden text-center font-mono text-[10px] leading-none opacity-70">
+			{#if latest?.duration_ms !== undefined}
+				{formatDuration(latest.duration_ms)}
+			{:else if latest}
+				—
+			{:else}
+				&nbsp;
+			{/if}
+		</span>
 	</div>
 
 	<Handle type="target" position={Position.Top} />
 	<Handle type="source" position={Position.Bottom} />
 </div>
-
-<style>
-	:global([data-task][data-level]) .level-mark,
-	:global([data-task][data-duration]) .level-mark {
-		visibility: visible;
-	}
-
-	:global(.level-icon-info),
-	:global(.level-icon-warn),
-	:global(.level-icon-error) {
-		display: none;
-	}
-
-	:global([data-task][data-level='info']) .level-mark {
-		background-color: var(--color-primary);
-	}
-	:global([data-task][data-level='info']) :global(.level-icon-info) {
-		display: inline-block;
-	}
-
-	:global([data-task][data-level='warn']) .level-mark {
-		background-color: var(--color-warning);
-	}
-	:global([data-task][data-level='warn']) :global(.level-icon-warn) {
-		display: inline-block;
-	}
-
-	:global([data-task][data-level='error']) .level-mark {
-		background-color: var(--color-error);
-	}
-	:global([data-task][data-level='error']) :global(.level-icon-error) {
-		display: inline-block;
-	}
-</style>

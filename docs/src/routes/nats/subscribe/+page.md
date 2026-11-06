@@ -58,7 +58,7 @@ Consumes messages from a NATS JetStream stream. Source task — typically first 
 
 A message is acked when every last task of the flow has finished with it. From receipt, also while it waits for a busy next task, the subscriber tells NATS the message is still in progress, so NATS doesn't redeliver it. A message the flow holds for more than 5 minutes is logged as a warning every 5 minutes. A flow without a next task acks the message once it is read. A failed or timed-out flow asks NATS to redeliver the message after the [redelivery delay](/docs/flowgen/concepts/retry#redelivery). Delivery is at least once: a message can still arrive twice, for example after a pod stops mid-flow, so tasks with side effects should check an idempotency key.
 
-When the flow stops or reloads, the messages it holds go back to NATS for immediate redelivery, and progress acks stop. If the subscriber ever stops reading while the flow runs, the flow fails and restarts.
+When the flow stops or reloads, the subscriber drains: it stops pulling and acks the messages the flow completes. Messages the flow still holds when the drain ends go back to NATS for immediate redelivery, and progress acks stop. If the subscriber ever stops reading while the flow runs, the flow fails and restarts.
 
 ## Durable consumer
 

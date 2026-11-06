@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 /// Session provider configuration.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SessionConfig {
     /// External validation endpoint URL.
     /// The token is sent as a Bearer token in the Authorization header.

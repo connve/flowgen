@@ -2323,6 +2323,8 @@ pub(crate) mod tests {
             health: Default::default(),
             retry: None,
             telemetry: None,
+            shutdown_timeout: crate::config::default_shutdown_timeout(),
+            ai_budget: None,
         });
         let flow_registry = Arc::new(RwLock::new(HashMap::new()));
         WebState {
@@ -2705,6 +2707,7 @@ pub(crate) mod tests {
                 leaf_count: 1,
                 ack_timeout: None,
                 callers: vec!["system/".to_string()],
+                cancellation_token: tokio_util::sync::CancellationToken::new(),
             },
         );
         let published = tokio::spawn(async move {
@@ -3057,6 +3060,7 @@ pub(crate) mod tests {
                 leaf_count: 1,
                 ack_timeout: None,
                 callers: vec!["system/".to_string()],
+                cancellation_token: tokio_util::sync::CancellationToken::new(),
             },
         );
         let mut state = test_state();
@@ -4111,6 +4115,7 @@ pub(crate) mod tests {
                 flow_yaml: String::new(),
                 cancellation_token: tokio_util::sync::CancellationToken::new(),
                 join_handle: tokio::spawn(std::future::pending()),
+                shutdown_timeout: crate::config::default_shutdown_timeout(),
                 from_filesystem: true,
                 task_manager: None,
             },

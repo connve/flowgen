@@ -6,6 +6,7 @@ pub const DEFAULT_NATS_URL: &str = "localhost:4222";
 
 /// Authentication credentials for NATS connections.
 #[derive(serde::Deserialize, Debug, Clone, PartialEq, Default)]
+#[serde(deny_unknown_fields)]
 pub struct Credentials {
     /// NKey authentication credentials.
     pub nkey: Option<NKeyCredentials>,
@@ -13,6 +14,7 @@ pub struct Credentials {
 
 /// NKey authentication using seed (private key).
 #[derive(serde::Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct NKeyCredentials {
     /// Seed (private key) starting with 'S'.
     /// Used to sign authentication challenges.
@@ -156,6 +158,14 @@ impl ClientBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_misspelled_credentials_field_is_rejected() {
+        let error = serde_json::from_str::<Credentials>(r#"{"nkey": {"seed": "S", "sed": "x"}}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown field `sed`"), "{error}");
+    }
 
     #[test]
     fn test_constants() {

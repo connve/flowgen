@@ -30,12 +30,8 @@
 </svelte:head>
 
 <section class="flex h-[calc(100vh-4rem)] min-w-0 flex-col overflow-hidden">
-	<div class="shrink-0 border-b border-base-200 bg-base-100 px-6 pb-4 pt-6">
-		<div class="flex items-center gap-1.5 text-sm">
-			<span>{m.system_breadcrumb()}</span>
-			<span class="opacity-40">/</span>
-			<span class="font-mono">config</span>
-		</div>
+	<div class="shrink-0 bg-base-100 px-6 pb-4 pt-6">
+		<h1 class="flex min-h-8 items-center text-[0.9375rem] font-semibold">{m.system_breadcrumb()}</h1>
 	</div>
 
 	{#if loading}
@@ -45,12 +41,12 @@
 	{:else if error}
 		<StateMessage tone="oops" title={m.system_config_load_failed_title()} message={error} />
 	{:else}
-		<div class="flex min-h-0 flex-1 flex-col p-6">
+		<div class="flex min-h-0 flex-1 flex-col px-6 pb-6">
 			<div
-				class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-base-300 bg-base-100"
+				class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-base-200 bg-base-100"
 			>
-				<div class="flex h-10 shrink-0 items-center justify-between border-b border-base-200 bg-base-100 px-4">
-					<span class="text-xs font-medium uppercase opacity-70">YAML</span>
+				<div class="flex h-10 shrink-0 items-center justify-between bg-base-100 px-4">
+					<span class="text-xs font-medium text-base-content/50">{m.system_config_heading()}</span>
 					<CopyButton text={yaml} label={m.common_copy()} />
 				</div>
 				<div class="min-h-0 flex-1 overflow-auto bg-base-200">

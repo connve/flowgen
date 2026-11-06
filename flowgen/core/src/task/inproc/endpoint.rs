@@ -78,6 +78,7 @@ impl crate::task::runner::Runner for Processor {
                 leaf_count: self.task_context.leaf_count,
                 ack_timeout: Some(self.config.ack_timeout),
                 callers,
+                cancellation_token: self.task_context.stop_reading.clone(),
             },
         );
         Ok(())

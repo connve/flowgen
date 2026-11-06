@@ -17,7 +17,7 @@ pub mod client;
 pub mod client_registry;
 /// Configuration structures and serialization support.
 pub mod config;
-/// Tests every source task passes against its real server.
+/// Tests every source and sink task passes against its real server.
 #[cfg(feature = "test-util")]
 pub mod conformance;
 /// Shared credential types for authenticating with external services.

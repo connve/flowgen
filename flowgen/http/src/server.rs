@@ -128,6 +128,10 @@ impl HasFlowName for EndpointRegistration {
     fn flow_name(&self) -> &str {
         &self.flow_name
     }
+
+    fn is_stopped(&self) -> bool {
+        self.cancellation_token.is_cancelled()
+    }
 }
 
 #[cfg(test)]

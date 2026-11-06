@@ -10,7 +10,7 @@ use crate::config::{FlowConfig, FlowConfigRaw};
 use flowgen_core::cache::{Cache, WatchEvent};
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, RwLock},
+    sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -52,23 +52,21 @@ pub enum Error {
     },
 }
 
-/// How long a stopped flow's tasks get to finish what they hold before they
-/// are aborted.
-pub const FLOW_STOP_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// How long the tasks of a flow that lost its leader get to hand back what
-/// they hold, and how long a stopped flow may take beyond `FLOW_STOP_TIMEOUT`
-/// before the flow itself is aborted. Fits in the last quarter of the lease,
-/// which a pod that stops leading keeps for its tasks to stop.
+/// How long stopped tasks get to hand back what they hold before they are aborted.
 pub(crate) const FLOW_ABORT_GRACE: Duration = Duration::from_secs(5);
 
+/// How long a stopping flow may take: its drain, the hand-back, and a margin for the flow itself.
+pub fn stop_time(shutdown_timeout: Duration) -> Duration {
+    shutdown_timeout.saturating_add(FLOW_ABORT_GRACE * 2)
+}
+
 /// Waits for a stopped flow to finish and aborts it, which aborts its tasks,
-/// when it takes longer than `FLOW_STOP_TIMEOUT` and `FLOW_ABORT_GRACE`.
-/// `None` when it had to be aborted.
+/// when it takes longer than `stop_time`. `None` when it had to be aborted.
 pub async fn join_stopped_flow(
     mut join_handle: tokio::task::JoinHandle<()>,
+    shutdown_timeout: Duration,
 ) -> Option<Result<(), tokio::task::JoinError>> {
-    let timeout = FLOW_STOP_TIMEOUT + FLOW_ABORT_GRACE;
+    let timeout = stop_time(shutdown_timeout);
     match tokio::time::timeout(timeout, &mut join_handle).await {
         Ok(result) => Some(result),
         Err(_) => {
@@ -79,6 +77,18 @@ pub async fn join_stopped_flow(
     }
 }
 
+/// The token budget of every `ai_completion`, counted in the system cache, when the app sets one.
+pub fn ai_budget(
+    app_config: &crate::config::AppConfig,
+    system_cache: &Arc<dyn Cache>,
+) -> Option<Arc<flowgen_ai_agent::budget::Budget>> {
+    let config = app_config.ai_budget.clone()?;
+    Some(Arc::new(flowgen_ai_agent::budget::Budget::new(
+        config,
+        Arc::clone(system_cache),
+    )))
+}
+
 /// Shared servers that flows register their endpoints with.
 #[derive(Clone, Default)]
 pub struct FlowServers {
@@ -86,6 +96,7 @@ pub struct FlowServers {
     pub mcp_server: Option<Arc<flowgen_mcp::server::McpServer>>,
     pub ai_gateway_server: Option<Arc<flowgen_ai_agent::ai_gateway::server::AiGatewayServer>>,
     pub inproc: Arc<flowgen_core::task::inproc::registry::InprocRegistry>,
+    pub ai_budget: Option<Arc<flowgen_ai_agent::budget::Budget>>,
 }
 
 impl FlowServers {
@@ -135,6 +146,8 @@ pub struct ReconcilerContext {
     /// Cancelled when the app shuts down. A reload in progress then releases
     /// the old flow's lease instead of starting the new flow.
     pub shutdown: CancellationToken,
+    /// The `shutdown_timeout` of each flow a reload is stopping, which a shutdown waits for.
+    pub stopping: Arc<RwLock<HashMap<String, Duration>>>,
 }
 
 /// Runs the reconciler loop until `ctx.shutdown` is cancelled.
@@ -243,8 +256,9 @@ async fn collect_batch(
 /// Applies a batch of watch events to the running flow registry.
 ///
 /// Deduplicates events by key (last write wins within a batch), then processes
-/// each key: replacing existing flows or starting new ones for `Put` events,
-/// and stopping flows for `Delete` events. Filesystem flows are never overwritten.
+/// the keys concurrently: replacing existing flows or starting new ones for
+/// `Put` events, and stopping flows for `Delete` events. Filesystem flows are
+/// never overwritten.
 async fn reconcile_batch(batch: Vec<WatchEvent>, ctx: &ReconcilerContext) {
     // Deduplicate: last event per key wins.
     let mut by_key: HashMap<String, WatchEvent> = HashMap::new();
@@ -255,7 +269,16 @@ async fn reconcile_batch(batch: Vec<WatchEvent>, ctx: &ReconcilerContext) {
         by_key.insert(key, event);
     }
 
-    for (key, event) in by_key {
+    let (deletes, puts): (Vec<_>, Vec<_>) = by_key
+        .into_iter()
+        .partition(|(_, event)| matches!(event, WatchEvent::Delete { .. }));
+    reconcile_together(deletes, ctx).await;
+    reconcile_together(puts, ctx).await;
+}
+
+/// Reconciles `events` concurrently; a batch's deletions run first, so a renamed flow frees its source.
+async fn reconcile_together(events: Vec<(String, WatchEvent)>, ctx: &ReconcilerContext) {
+    let reconciles = events.into_iter().map(|(key, event)| async move {
         if ctx.shutdown.is_cancelled() {
             return;
         }
@@ -263,7 +286,8 @@ async fn reconcile_batch(batch: Vec<WatchEvent>, ctx: &ReconcilerContext) {
             WatchEvent::Put { value, .. } => reconcile_put(&key, value, ctx).await,
             WatchEvent::Delete { .. } => reconcile_delete(&key, ctx).await,
         }
-    }
+    });
+    futures::future::join_all(reconciles).await;
 }
 
 /// Handles a `Put` event: parses the config, builds and starts the new flow,
@@ -397,6 +421,7 @@ async fn reconcile_put(key: &str, value: bytes::Bytes, ctx: &ReconcilerContext) 
     let cancellation_token = new_flow.cancellation_token();
 
     let task_manager = new_flow.task_manager();
+    let shutdown_timeout = new_flow.shutdown_timeout();
 
     let started = {
         let mut registry = match ctx.flow_registry.write() {
@@ -420,6 +445,7 @@ async fn reconcile_put(key: &str, value: bytes::Bytes, ctx: &ReconcilerContext) 
                         flow_yaml,
                         cancellation_token,
                         join_handle: new_flow.run(),
+                        shutdown_timeout,
                         from_filesystem: false,
                         task_manager,
                     },
@@ -480,17 +506,19 @@ async fn reconcile_delete(key: &str, ctx: &ReconcilerContext) {
 /// or releases.
 #[must_use]
 async fn stop_and_deregister(flow_name: &str, ctx: &ReconcilerContext) -> Option<StoppedFlow> {
-    let old_handle = match ctx.flow_registry.write() {
-        Ok(mut registry) => registry.remove(flow_name),
-        Err(poisoned) => poisoned.into_inner().remove(flow_name),
+    let old = {
+        let mut registry = write_lock(&ctx.flow_registry);
+        let old = registry.remove(flow_name)?;
+        write_lock(&ctx.stopping).insert(flow_name.to_string(), old.shutdown_timeout);
+        old
     };
-
-    let old = old_handle?;
 
     old.cancellation_token.cancel();
     ctx.servers.deregister_flow(flow_name);
 
-    match join_stopped_flow(old.join_handle).await {
+    let stopped = join_stopped_flow(old.join_handle, old.shutdown_timeout).await;
+    write_lock(&ctx.stopping).remove(flow_name);
+    match stopped {
         Some(Ok(())) => info!(flow = %flow_name, "Old flow stopped"),
         Some(Err(e)) => {
             warn!(flow = %flow_name, error = %e, "Old flow task panicked or was aborted")
@@ -502,6 +530,21 @@ async fn stop_and_deregister(flow_name: &str, ctx: &ReconcilerContext) -> Option
         identity: flowgen_core::identity::FlowIdentity::new(flow_name),
         task_manager,
     })
+}
+
+/// Locks `lock` for writing, also after a panic poisoned it.
+pub(crate) fn write_lock<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+    match lock.write() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+pub(crate) fn read_lock<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    match lock.read() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
 }
 
 /// A stopped flow whose lease this pod may still hold.
@@ -588,6 +631,8 @@ fn test_context(prefix: &str) -> ReconcilerContext {
         health: Default::default(),
         retry: None,
         telemetry: None,
+        shutdown_timeout: crate::config::default_shutdown_timeout(),
+        ai_budget: None,
     };
 
     let shared: Arc<dyn Cache> = Arc::new(MemoryCache::new());
@@ -608,6 +653,7 @@ fn test_context(prefix: &str) -> ReconcilerContext {
         )),
         holder_identity,
         shutdown: CancellationToken::new(),
+        stopping: Default::default(),
     }
 }
 
@@ -636,6 +682,10 @@ fn build_flow(
     if let Some(server) = &ctx.servers.ai_gateway_server {
         builder = builder.service(Arc::clone(server));
     }
+    if let Some(budget) = &ctx.servers.ai_budget {
+        builder = builder.service(Arc::clone(budget));
+    }
+    builder = builder.shutdown_timeout(ctx.app_config.shutdown_timeout);
     if let Some(retry) = ctx.app_config.retry.as_ref() {
         builder = builder.retry(retry.clone());
     }
@@ -692,6 +742,8 @@ mod tests {
             health: Default::default(),
             retry: None,
             telemetry: None,
+            shutdown_timeout: crate::config::default_shutdown_timeout(),
+            ai_budget: None,
         };
 
         let shared: Arc<dyn Cache> = Arc::new(flowgen_core::cache::memory::MemoryCache::new());
@@ -712,6 +764,7 @@ mod tests {
             )),
             holder_identity,
             shutdown: CancellationToken::new(),
+            stopping: Default::default(),
         };
 
         let name = derive_flow_name("flows.default-test", &ctx);
@@ -824,6 +877,8 @@ flow:
             health: Default::default(),
             retry: None,
             telemetry: None,
+            shutdown_timeout: crate::config::default_shutdown_timeout(),
+            ai_budget: None,
         };
 
         let shared: Arc<dyn Cache> = Arc::new(MemoryCache::new());
@@ -844,6 +899,7 @@ flow:
             )),
             holder_identity,
             shutdown: CancellationToken::new(),
+            stopping: Default::default(),
         }
     }
 
@@ -1092,6 +1148,62 @@ flow:
             !seq[first_v2..].contains('1'),
             "old flow still ticking after reload: {seq}"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_renamed_flow_stops_before_its_new_name_starts() {
+        let ctx = test_context("flows");
+        let cancellation_token = CancellationToken::new();
+        let stopping = cancellation_token.clone();
+        let registry = Arc::clone(&ctx.flow_registry);
+        let overlapped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = Arc::clone(&overlapped);
+        let join_handle = tokio::spawn(async move {
+            stopping.cancelled().await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            seen.store(
+                read_lock(&registry).contains_key("new"),
+                std::sync::atomic::Ordering::SeqCst,
+            );
+        });
+        write_lock(&ctx.flow_registry).insert(
+            "old".to_string(),
+            FlowHandle {
+                identity: "old".to_string(),
+                flow_display_name: None,
+                flow_description: None,
+                flow_tags: Vec::new(),
+                require_leader_election: false,
+                task_count: 1,
+                connections: Vec::new(),
+                started_at: std::time::SystemTime::now(),
+                flow_yaml: String::new(),
+                cancellation_token,
+                join_handle,
+                shutdown_timeout: crate::config::default_shutdown_timeout(),
+                from_filesystem: false,
+                task_manager: None,
+            },
+        );
+
+        reconcile_batch(
+            vec![
+                WatchEvent::Put {
+                    key: "flows.new".to_string(),
+                    value: versioned_flow_yaml(1),
+                },
+                WatchEvent::Delete {
+                    key: "flows.old".to_string(),
+                },
+            ],
+            &ctx,
+        )
+        .await;
+        let started = read_lock(&ctx.flow_registry).contains_key("new");
+        stop("new", &ctx).await;
+
+        assert!(started);
+        assert!(!overlapped.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1361,7 +1473,7 @@ flow:
         reconcile_put("flows.batched", bytes::Bytes::from(yaml), &ctx).await;
         let started = std::time::Instant::now();
         let mut runs = 0;
-        while runs < 2 && started.elapsed() < FLOW_STOP_TIMEOUT {
+        while runs < 2 && started.elapsed() < stop_time(crate::config::default_shutdown_timeout()) {
             runs = read_seq(&ctx, "batched").await.len();
             tokio::time::sleep(Duration::from_millis(20)).await;
         }

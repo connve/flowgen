@@ -209,6 +209,7 @@ pub enum RetentionPolicy {
     /// Retains messages based on consumer interest.
     Interest,
     /// Retains messages until explicitly deleted.
+    #[serde(rename = "work_queue", alias = "workqueue")]
     WorkQueue,
 }
 
@@ -543,5 +544,18 @@ mod tests {
             "backoff": ["1s", "5s"]
         }"#;
         assert!(serde_json::from_str::<Config>(json).is_err());
+    }
+
+    #[test]
+    fn a_misspelled_stream_field_is_rejected() {
+        let json = r#"{
+            "name": "test_pub",
+            "subject": "test.subject",
+            "stream": {"name": "s", "max_age_secs": 3600}
+        }"#;
+        let error = serde_json::from_str::<Config>(json)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown field `max_age_secs`"), "{error}");
     }
 }

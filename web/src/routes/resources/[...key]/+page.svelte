@@ -26,14 +26,15 @@
 <section class="flex h-[calc(100vh-4rem)] flex-col p-6">
 	<div class="mb-4 shrink-0">
 		<div class="flex min-h-8 items-center justify-between gap-2">
-			<div class="flex items-center gap-1.5 text-sm">
-				<a href="{base}/resources" class="text-primary hover:underline">{m.resources_breadcrumb()}</a>
-				{#each folderSegments as segment, i (i)}
-					<span class="opacity-40">/</span>
-					<span class="font-mono opacity-70">{segment}</span>
-				{/each}
-				<span class="opacity-40">/</span>
-				<span class="font-mono">{leafName}</span>
+			<div class="min-w-0">
+				<div class="flex items-center gap-1 text-xs text-base-content/50">
+					<a href="{base}/resources" class="hover:text-base-content">{m.resources_breadcrumb()}</a>
+					{#each folderSegments as segment, i (i)}
+						<span class="opacity-60">/</span>
+						<span>{segment}</span>
+					{/each}
+				</div>
+				<h1 class="truncate text-[0.9375rem] font-semibold">{leafName}</h1>
 			</div>
 			<div class="flex items-center gap-1">
 				{#if data.targets.length > 0}
@@ -48,8 +49,8 @@
 	<div
 		class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-base-200 bg-base-100"
 	>
-		<div class="flex h-10 shrink-0 items-center justify-between border-b border-base-200 bg-base-100 px-4">
-			<span class="text-xs font-medium uppercase opacity-70">
+		<div class="flex h-10 shrink-0 items-center justify-between bg-base-100 px-4">
+			<span class="text-xs font-medium text-base-content/50">
 				{data.resource.extension ?? m.resource_file_type_fallback()}
 			</span>
 			<CopyButton text={data.resource.content} label={m.common_copy()} />

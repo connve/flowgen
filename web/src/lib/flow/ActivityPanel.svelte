@@ -1,7 +1,8 @@
 <script lang="ts">
 	import Icon from '@iconify/svelte';
-	import CopyButton from '$lib/CopyButton.svelte';
-	import Badge from '$lib/Badge.svelte';
+	import StatusDot from '$lib/StatusDot.svelte';
+	import PaneResizer from '$lib/PaneResizer.svelte';
+	import { activityHeight } from '$lib/paneSize.svelte';
 	import {
 		activityLevels,
 		getFlowActivityLimit,
@@ -12,19 +13,9 @@
 	import type { ActivityLevel } from '$lib/logRecord';
 	import { LOGS_LIMIT_MAX, clampLogsLimit } from '$lib/logsLimit';
 	import { formatAbsolute, formatRelative } from '$lib/time';
+	import { formatDuration } from '$lib/toolRuns.svelte';
 	import { m } from '$lib/paraglide/messages.js';
-
-	interface Activity {
-		flow: string;
-		task: string | null;
-		task_type: string | null;
-		level: ActivityLevel;
-		ts_ms: number;
-		message: string;
-		duration_ms?: number;
-		event_id?: string;
-		extra?: Array<[string, string]>;
-	}
+	import type { Activity } from '$lib/flow/ActivityDetails.svelte';
 
 	// Some upstream sites emit a generic message (e.g. rig-core's "SSE error")
 	// and stash the useful cause in an `error` / `err` attribute. Surface a
@@ -37,31 +28,29 @@
 		return `${a.message} — ${snippet}`;
 	}
 
-	function formatDuration(ms: number | undefined): string {
-		if (ms === undefined) return '—';
-		if (ms < 1000) return `${ms}ms`;
-		if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
-		return `${Math.floor(ms / 60_000)}m`;
-	}
 
 	interface Props {
 		activities: Activity[];
 		expanded: boolean;
 		onToggle: () => void;
 		onRowClick: (taskName: string) => void;
+		/** The row shown in the flow's inspector. */
+		selected?: Activity | null;
 	}
 
-	let { activities, expanded, onToggle, onRowClick }: Props = $props();
+	let { activities, expanded, onToggle, onRowClick, selected = $bindable(null) }: Props = $props();
 
 	// Fixed row height keeps virtualization math trivial; content is single-line
-	// truncated so no row varies. Details for wrapped/full view live in the drawer.
+	// truncated so no row varies.
 	const ROW_HEIGHT = 32;
+	/** Timestamp, processor and event fold away when the panel is narrow. */
+	const COLUMNS =
+		'grid gap-3 grid-cols-[5.5rem_5rem_9rem_5rem_minmax(0,1fr)] @6xl:grid-cols-[5.5rem_5rem_11rem_9rem_9rem_5rem_9rem_minmax(0,1fr)]';
 	const OVERSCAN = 6;
 
 	let scroller = $state<HTMLElement | null>(null);
 	let scrollTop = $state(0);
 	let viewportHeight = $state(256);
-	let selected = $state<Activity | null>(null);
 	let flowActivityLimit = $derived(getFlowActivityLimit());
 	let countWidth = $derived(`${String(flowActivityLimit).length}ch`);
 
@@ -69,6 +58,7 @@
 	// to one node.
 	const levelFilter = activityLevels;
 	let search = $state('');
+	let searchOpen = $state(false);
 	let taskFilter = $state<string | null>(null);
 
 	// Debounce the search input so typing at 10-events-per-frame doesn't
@@ -153,27 +143,6 @@
 		setFlowActivityLimit(clampLogsLimit(next));
 	}
 
-	// Serialize the selected activity to a JSON payload. Copies the full
-	// record — timestamp, level, flow/task/processor, message, event id,
-	// and every extra attribute — so ops can paste one blob into
-	// tickets, chat, or grep without stitching fields together by hand.
-	function buildClipboard(a: Activity): string {
-		const payload: Record<string, unknown> = {
-			timestamp: new Date(a.ts_ms).toISOString(),
-			level: a.level,
-			flow: a.flow,
-			task: a.task,
-			processor: a.task_type,
-			message: a.message,
-		};
-		if (a.duration_ms !== undefined) payload.duration_ms = a.duration_ms;
-		if (a.event_id) payload.event_id = a.event_id;
-		if (a.extra && a.extra.length > 0) {
-			payload.attributes = Object.fromEntries(a.extra);
-		}
-		return JSON.stringify(payload, null, 2);
-	}
-
 	// Search-and-scroll used by DAG node clicks; falls back to top when the
 	// requested task hasn't emitted anything yet. Also locks the task filter
 	// so subsequent rows narrow to just the clicked node.
@@ -182,81 +151,125 @@
 		if (!scroller) return;
 		queueMicrotask(() => scroller?.scrollTo({ top: 0, behavior: 'smooth' }));
 	}
-
-	// Esc closes the drawer first, then bubbles on the next press. Capture
-	// phase + stopPropagation so parent modal's Esc handler doesn't fire on
-	// the same keypress and close both at once.
-	function onWindowKeydown(e: KeyboardEvent) {
-		if (e.key === 'Escape' && selected) {
-			selected = null;
-			e.stopPropagation();
-		}
-	}
 </script>
 
-<svelte:window onkeydowncapture={onWindowKeydown} />
-
-<div class="flex shrink-0 flex-col border-t border-base-200 bg-base-100">
-	<button
-		type="button"
-		class="flex h-10 items-center gap-4 border-b border-base-200 bg-base-200/50 px-4 text-left transition-colors hover:bg-base-200 {expanded
-			? ''
-			: 'border-b-transparent'}"
-		onclick={onToggle}
-		aria-expanded={expanded}
-	>
-		<span class="flex items-center gap-2">
+<div class="@container relative flex shrink-0 flex-col border-t border-base-200 bg-base-100">
+	{#if expanded}
+		<PaneResizer pane={activityHeight} />
+	{/if}
+	<div class="flex h-12 items-center gap-2 pl-2 pr-3">
+		<button
+			type="button"
+			class="flex min-w-0 flex-1 items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors outline-none hover:bg-base-200/60 focus-visible:bg-base-200/60"
+			onclick={onToggle}
+			aria-expanded={expanded}
+		>
 			<Icon
 				icon={expanded ? 'tabler:chevron-down' : 'tabler:chevron-up'}
-				class="h-4 w-4 opacity-60"
+				class="h-4 w-4 shrink-0 opacity-60"
 			/>
-			<span class="text-xs font-semibold uppercase tracking-wide opacity-70">{m.activity_heading()}</span>
-		</span>
-		{#if !expanded}
-			<span class="h-4 w-px bg-base-300"></span>
-			<span class="flex items-center gap-1">
-				<span class="chip-sm chip-info">
-					<span>{levelLabel('info')}</span>
-					<span class="inline-block tabular-nums opacity-60" style="min-width: {countWidth}"
-						>{counts.info}</span
-					>
-				</span>
-				<span class="chip-sm chip-warn">
-					<span>{levelLabel('warn')}</span>
-					<span class="inline-block tabular-nums opacity-60" style="min-width: {countWidth}"
-						>{counts.warn}</span
-					>
-				</span>
-				<span class="chip-sm chip-error">
-					<span>{levelLabel('error')}</span>
-					<span class="inline-block tabular-nums opacity-60" style="min-width: {countWidth}"
-						>{counts.error}</span
-					>
-				</span>
+			<span class="flex items-baseline gap-1.5 text-[0.9375rem] font-semibold">
+				<span>{m.activity_heading()}</span>
+				<span class="text-xs font-normal opacity-50">· {m.logs_count({ count: ordered.length })}</span>
 			</span>
+			{#if !expanded}
+				<span class="ml-2 flex items-center gap-3 text-xs">
+					{#if counts.warn > 0}
+						<StatusDot variant="warning" label={String(counts.warn)} />
+					{/if}
+					{#if counts.error > 0}
+						<StatusDot variant="error" label={String(counts.error)} />
+					{/if}
+				</span>
+				<span class="ml-auto truncate text-xs text-base-content/50">
+					{#if latest}
+						{formatRelative(latest.ts_ms)} · {latest.task ?? m.activity_flow_task()}
+					{:else}
+						{m.activity_empty_collapsed()}
+					{/if}
+				</span>
+			{/if}
+		</button>
+		{#if expanded}
+			{#if searchOpen || search}
+				<label
+					class="input input-sm flex w-64 items-center gap-2 border border-base-300 bg-base-100 outline-none focus-within:border-primary"
+				>
+					<Icon icon="tabler:search" class="h-4 w-4 shrink-0 opacity-50" />
+					<input
+						type="text"
+						placeholder={m.activity_search_placeholder()}
+						aria-label={m.activity_search_placeholder()}
+						bind:value={search}
+						{@attach (node: HTMLInputElement) => node.focus()}
+						onblur={() => (searchOpen = false)}
+						onkeydown={(e) => {
+							if (e.key !== 'Escape') return;
+							e.preventDefault();
+							search = '';
+							searchOpen = false;
+						}}
+					/>
+					{#if search}
+						<button
+							type="button"
+							class="opacity-50 hover:opacity-100"
+							aria-label={m.common_clear_search()}
+							onclick={() => (search = '')}
+						>
+							<Icon icon="tabler:x" class="h-4 w-4" />
+						</button>
+					{/if}
+				</label>
+			{:else}
+				<div class="tooltip tooltip-left" data-tip={m.activity_search_placeholder()}>
+					<button
+						type="button"
+						class="flex h-8 w-8 items-center justify-center rounded-md text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content"
+						aria-label={m.activity_search_placeholder()}
+						onclick={() => (searchOpen = true)}
+					>
+						<Icon icon="tabler:search" class="h-5 w-5" />
+					</button>
+				</div>
+			{/if}
+			<div class="dropdown dropdown-end dropdown-top">
+				<button
+					type="button"
+					tabindex="0"
+					class="flex h-8 w-8 items-center justify-center rounded-md text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content"
+					aria-label={m.logs_more_actions()}
+				>
+					<Icon icon="tabler:dots" class="h-5 w-5" />
+				</button>
+				<div
+					tabindex="-1"
+					class="dropdown-content z-10 mb-1 w-60 rounded-md border border-base-200 bg-base-100 p-1 text-sm shadow-lg"
+				>
+					<label class="flex h-9 items-center gap-2 rounded-md px-3">
+						<span class="flex-1">{m.logs_limit_label()}</span>
+						<input
+							type="number"
+							min="1"
+							max={LOGS_LIMIT_MAX}
+							step="1000"
+							value={flowActivityLimit}
+							onchange={(e) => applyLimit(e.currentTarget.valueAsNumber)}
+							class="no-spinner w-16 rounded border border-base-300 bg-base-100 px-1.5 py-0.5 text-right tabular-nums outline-none focus:border-primary"
+						/>
+					</label>
+				</div>
+			</div>
 		{/if}
-		{#if latest}
-			<span class="ml-auto flex items-center gap-2 text-xs opacity-60">
-				<span>{formatRelative(latest.ts_ms)}</span>
-				<span class="opacity-40">•</span>
-				<span class="font-mono">{latest.task_type ?? '—'}</span>
-				<span class="opacity-40">•</span>
-				<span class="font-mono">{latest.task ?? m.activity_flow_task()}</span>
-			</span>
-		{:else}
-			<span class="ml-auto text-xs opacity-40">{m.activity_empty_collapsed()}</span>
-		{/if}
-	</button>
+	</div>
 
 	{#if expanded}
-		<!-- Filter row: level toggles, search, task-lock chip. Sits between the
-		     header and the column head so filters visually own the list below. -->
-		<div class="flex h-10 items-center gap-3 border-b border-base-200 bg-base-100 px-4">
+		<div class="flex flex-wrap items-center gap-2 px-4 pb-3">
 			<span class="flex items-center gap-1">
 				{#each ['info', 'warn', 'error', 'debug', 'trace'] as const as level (level)}
 					<button
 						type="button"
-						class="chip-sm {levelChipClass(level, levelFilter[level])}"
+						class="chip {levelChipClass(level, levelFilter[level])}"
 						aria-pressed={levelFilter[level]}
 						onclick={(e) => toggleLevel(level, e)}
 					>
@@ -271,28 +284,9 @@
 				{/each}
 			</span>
 
-			<div class="tooltip tooltip-bottom" data-tip={m.activity_limit_tooltip()}>
-				<label
-					class="input input-xs flex items-center gap-1.5 border border-base-300 bg-base-100 outline-none focus-within:border-primary"
-				>
-					<Icon icon="tabler:stack-2" class="h-3.5 w-3.5 opacity-70" />
-					<span class="opacity-70">{m.activity_limit()}</span>
-					<input
-						type="number"
-						min="1"
-						max={LOGS_LIMIT_MAX}
-						step="1000"
-						value={flowActivityLimit}
-						onchange={(e) => applyLimit(e.currentTarget.valueAsNumber)}
-						class="no-spinner w-12 bg-transparent tabular-nums outline-none"
-						aria-label={m.activity_limit_label()}
-					/>
-				</label>
-			</div>
-
 			{#if taskFilter}
 				<span
-					class="flex h-6 items-center gap-1 rounded-full border border-primary/50 bg-primary/10 px-2 text-xs"
+					class="chip chip-neutral"
 				>
 					<span class="opacity-60">{m.activity_task_filter_prefix()}</span>
 					<span class="font-mono">{taskFilter}</span>
@@ -310,33 +304,12 @@
 			{#if anyFilterActive}
 				<button
 					type="button"
-					class="text-xs opacity-60 hover:opacity-100"
+					class="btn btn-ghost btn-xs font-normal text-base-content/60"
 					onclick={clearFilters}
 				>
 					{m.activity_filters_clear()}
 				</button>
 			{/if}
-
-			<div class="flex-1"></div>
-
-			<label
-				class="input input-xs flex items-center gap-2 border border-base-300 bg-base-100 outline-none focus-within:border-primary"
-			>
-				<Icon icon="tabler:search" class="h-4 w-4 opacity-50" />
-				<input type="text" placeholder={m.activity_search_placeholder()} bind:value={search} />
-				{#if search}
-					<div class="tooltip tooltip-left" data-tip={m.common_clear_search()}>
-						<button
-							type="button"
-							class="opacity-50 hover:opacity-100"
-							aria-label={m.common_clear_search()}
-							onclick={() => (search = '')}
-						>
-							<Icon icon="tabler:x" class="h-5 w-5" />
-						</button>
-					</div>
-				{/if}
-			</label>
 		</div>
 
 		{#if ordered.length === 0}
@@ -351,21 +324,21 @@
 			<!-- Column headers rendered outside the virtualized list so they stay
 			     visible without an intra-list sticky header (which fights virtualization). -->
 			<div
-				class="grid h-8 items-center border-b border-base-200 bg-base-100 px-3 text-xs font-semibold uppercase tracking-wide opacity-60"
-				style="grid-template-columns: 5.5rem 5rem 11rem 9rem 9rem 5rem 9rem 1fr; gap: 0.75rem"
+				class="h-8 items-center border-b border-base-200 bg-base-100 px-3 text-xs font-medium text-base-content/50 {COLUMNS}"
 			>
 				<span>{m.activity_field_status()}</span>
 				<span>{m.activity_field_when()}</span>
-				<span>{m.activity_field_timestamp()}</span>
-				<span>{m.activity_field_processor()}</span>
+				<span class="@max-6xl:hidden">{m.activity_field_timestamp()}</span>
+				<span class="@max-6xl:hidden">{m.activity_field_processor()}</span>
 				<span>{m.activity_field_task()}</span>
 				<span>{m.activity_field_duration()}</span>
-				<span>{m.activity_field_event()}</span>
+				<span class="@max-6xl:hidden">{m.activity_field_event()}</span>
 				<span>{m.activity_field_message()}</span>
 			</div>
 			<div
 				bind:this={scroller}
-				class="max-h-64 overflow-auto bg-base-100"
+				class="overflow-auto bg-base-100"
+				style:height="min({activityHeight.size}px, 60vh)"
 				onscroll={onScroll}
 				bind:clientHeight={viewportHeight}
 			>
@@ -374,29 +347,26 @@
 				{#each visible as event, i (event.ts_ms + '-' + (event.task ?? '_') + '-' + (startIdx + i))}
 					<button
 						type="button"
-						class="grid w-full cursor-pointer items-center border-b border-base-200 px-3 text-left text-xs transition-colors hover:bg-base-200"
-						style="grid-template-columns: 5.5rem 5rem 11rem 9rem 9rem 5rem 9rem 1fr; gap: 0.75rem; height: {ROW_HEIGHT}px"
+						class="{COLUMNS} w-full cursor-pointer items-center border-b border-base-200 px-3 text-left text-xs transition-colors {selected ===
+						event
+							? 'bg-base-200'
+							: 'hover:bg-base-200/60'}"
+						style:height="{ROW_HEIGHT}px"
 						onclick={() => {
 							selected = event;
 							if (event.task) onRowClick(event.task);
 						}}
 					>
-						<span><Badge variant={levelVariant(event.level)}>{levelLabel(event.level)}</Badge></span>
-						<span class="whitespace-nowrap opacity-60" title={formatAbsolute(event.ts_ms)}>
-							{formatRelative(event.ts_ms)}
-						</span>
-						<span class="whitespace-nowrap font-mono opacity-60">{formatAbsolute(event.ts_ms)}</span>
-						<span class="truncate font-mono opacity-70">{event.task_type ?? '—'}</span>
+						<span><StatusDot variant={levelVariant(event.level)} label={levelLabel(event.level)} /></span>
+						<span class="whitespace-nowrap opacity-60">{formatRelative(event.ts_ms)}</span>
+						<span class="whitespace-nowrap font-mono opacity-60 @max-6xl:hidden">{formatAbsolute(event.ts_ms)}</span>
+						<span class="truncate font-mono opacity-70 @max-6xl:hidden">{event.task_type ?? '—'}</span>
 						<span class="truncate font-mono opacity-80">{event.task ?? m.activity_flow_task()}</span>
 						<span class="whitespace-nowrap font-mono tabular-nums opacity-60">
-							{formatDuration(event.duration_ms)}
+							{event.duration_ms === undefined ? '—' : formatDuration(event.duration_ms)}
 						</span>
-						<span class="truncate font-mono opacity-60" title={event.event_id ?? ''}>
-							{event.event_id ?? '—'}
-						</span>
-						<span class="truncate font-mono opacity-70" title={enrichedMessage(event)}
-							>{enrichedMessage(event)}</span
-						>
+						<span class="truncate font-mono opacity-60 @max-6xl:hidden">{event.event_id ?? '—'}</span>
+						<span class="truncate font-mono opacity-70">{enrichedMessage(event)}</span>
 					</button>
 				{/each}
 				<div style="height: {bottomPad}px"></div>
@@ -405,64 +375,3 @@
 	{/if}
 </div>
 
-{#if selected}
-	<div
-		class="fixed inset-y-0 right-0 z-40 flex w-full max-w-2xl flex-col border-l border-base-200 bg-base-100 shadow-xl"
-		role="dialog"
-		aria-modal="true"
-		aria-label={m.activity_detail_label()}
-	>
-		<div class="flex items-center justify-between border-b border-base-200 px-4 py-2">
-			<div class="flex items-center gap-2 text-xs">
-				<Badge variant={levelVariant(selected.level)}>{levelLabel(selected.level)}</Badge>
-				<span class="opacity-40">•</span>
-				<span class="font-mono opacity-70">{selected.task_type ?? '—'}</span>
-				<span class="opacity-40">•</span>
-				<span class="font-mono opacity-80">{selected.task ?? m.activity_flow_task()}</span>
-			</div>
-			<div class="flex items-center gap-1">
-				<CopyButton text={buildClipboard(selected)} label={m.activity_copy_log()} />
-				<div class="tooltip tooltip-left" data-tip={m.common_close()}>
-					<button
-						type="button"
-						class="btn btn-ghost btn-sm btn-circle"
-						aria-label={m.common_close()}
-						onclick={() => (selected = null)}
-					>
-						<Icon icon="tabler:x" class="h-5 w-5" />
-					</button>
-				</div>
-			</div>
-		</div>
-		<dl class="grid grid-cols-[6rem_1fr] gap-x-4 gap-y-1 px-4 py-2 text-xs">
-			<dt class="opacity-50">{m.activity_field_timestamp()}</dt>
-			<dd class="font-mono">{formatAbsolute(selected.ts_ms)}</dd>
-			<dt class="opacity-50">{m.activity_field_when()}</dt>
-			<dd>{formatRelative(selected.ts_ms)}</dd>
-			<dt class="opacity-50">{m.activity_field_duration()}</dt>
-			<dd class="font-mono tabular-nums">{formatDuration(selected.duration_ms)}</dd>
-			<dt class="opacity-50">{m.activity_field_event()}</dt>
-			<dd class="font-mono">{selected.event_id ?? '—'}</dd>
-		</dl>
-		<div class="border-t border-base-200 px-4 py-2">
-			<div class="pb-1 text-xs opacity-50">{m.activity_field_message()}</div>
-			<pre class="max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono text-xs {selected.message
-					? 'opacity-80'
-					: 'opacity-40'}">{selected.message || '—'}</pre>
-		</div>
-		{#if selected.extra && selected.extra.length > 0}
-			<div class="border-t border-base-200 px-4 py-2">
-				<div class="pb-1 text-xs opacity-50">{m.activity_field_attributes()}</div>
-				<dl class="grid grid-cols-[10rem_minmax(0,1fr)] gap-x-4 gap-y-1 text-xs">
-					{#each selected.extra as [key, value] (key)}
-						<dt class="truncate font-mono opacity-70" title={key}>{key}</dt>
-						<dd class="min-w-0">
-							<pre
-								class="max-h-64 overflow-auto whitespace-pre-wrap break-all font-mono opacity-80">{value}</pre>
-						</dd>
-					{/each}
-				</dl>
-			</div>
-		{/if}
-	</div>
-{/if}

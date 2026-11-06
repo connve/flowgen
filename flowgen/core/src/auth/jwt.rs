@@ -21,6 +21,7 @@ use tracing::info;
 /// serialized form, so the redacted value is only ever seen by the
 /// config viewer, never re-parsed.
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct JwtConfig {
     /// HMAC secret for HS256 validation (mutually exclusive with `jwks_url`).
     #[serde(default, serialize_with = "serialize_redacted")]

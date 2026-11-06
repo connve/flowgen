@@ -11,17 +11,19 @@
 	let { href, tooltip = 'bottom' }: Props = $props();
 </script>
 
-<div
-	class="tooltip {tooltip === 'left' ? 'tooltip-left' : 'tooltip-bottom'}"
-	data-tip={href ? m.common_edit() : m.edit_button_read_only()}
->
-	{#if href}
-		<a {href} class="btn btn-ghost btn-sm btn-circle" aria-label={m.common_edit()}>
-			<Icon icon="tabler:pencil" class="h-5 w-5" />
-		</a>
-	{:else}
-		<button type="button" class="btn btn-ghost btn-sm btn-circle" aria-label={m.common_edit()} disabled>
-			<Icon icon="tabler:pencil" class="h-5 w-5" />
+{#if href}
+	<a {href} class="btn btn-ghost btn-sm gap-1.5">
+		<Icon icon="tabler:pencil" class="h-4 w-4" />
+		{m.common_edit()}
+	</a>
+{:else}
+	<div
+		class="tooltip {tooltip === 'left' ? 'tooltip-left' : 'tooltip-bottom'}"
+		data-tip={m.edit_button_read_only()}
+	>
+		<button type="button" class="btn btn-ghost btn-sm gap-1.5" disabled>
+			<Icon icon="tabler:pencil" class="h-4 w-4" />
+			{m.common_edit()}
 		</button>
-	{/if}
-</div>
+	</div>
+{/if}

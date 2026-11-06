@@ -47,7 +47,7 @@ flowgen:
     fsGroup: 65534
 
   # Termination grace period must be >= preStop sleep duration
-  terminationGracePeriodSeconds: 45
+  terminationGracePeriodSeconds: 65
 
   # Optional merge/patch hooks for the Deployment's pod template.
   # Use these to inject arbitrary pod spec fields (e.g. hostNetwork,

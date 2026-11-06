@@ -1,11 +1,13 @@
-//! Tests every source task passes against its real server.
+//! Tests every source and sink task passes against its real server.
 //!
-//! A connector implements [`Source`] for its task and server, and
-//! [`source_conformance!`](crate::source_conformance) turns it into one test
-//! per case.
+//! A connector implements [`Source`] or [`Sink`] for its task and server, and
+//! [`source_conformance!`](crate::source_conformance) or
+//! [`sink_conformance!`](crate::sink_conformance) turns it into one test per
+//! case.
 
 use crate::cache::{memory::MemoryCache, Cache};
-use crate::event::Event;
+use crate::delivery::{wait_for_completion, CompletionFailure};
+use crate::event::{new_completion_channel, CompletionRx, Event};
 use crate::retry::RetryConfig;
 use crate::task::context::{TaskContext, TaskContextBuilder};
 use crate::task::manager::TaskManagerBuilder;
@@ -150,6 +152,25 @@ pub async fn delivers_once_to_a_busy_next_task(source: &impl Source) {
     assert_eq!(emitted, written);
 }
 
+/// A record in flight when the flow stops reading is finished and not emitted again.
+pub async fn finishes_a_record_in_flight_when_it_stops_reading(source: &impl Source) {
+    let cache = new_cache();
+    let mut running = Running::start(source, &cache, 16).await;
+    running.ready().await;
+    source.produce("draining").await;
+    let held = running.next_record("the record").await;
+    running.drain(&held).await;
+
+    let mut restarted = Running::start(source, &cache, 16).await;
+    source.produce("after-drain").await;
+    let emitted = restarted.receive(1).await;
+    restarted.quiet().await;
+    restarted.stop().await;
+
+    assert_eq!(source.payload(&held), "draining");
+    assert_eq!(emitted, ["after-drain"]);
+}
+
 /// Records the flow completed are not emitted again after a restart.
 pub async fn completed_records_stay_done_after_a_restart(source: &impl Source) {
     let cache = new_cache();
@@ -215,6 +236,14 @@ macro_rules! source_conformance {
 
             #[tokio::test(flavor = "multi_thread")]
             #[ignore = "requires Docker"]
+            async fn finishes_a_record_in_flight_when_it_stops_reading() {
+                let _serial = $crate::conformance::serial().await;
+                $crate::conformance::finishes_a_record_in_flight_when_it_stops_reading(&$source)
+                    .await;
+            }
+
+            #[tokio::test(flavor = "multi_thread")]
+            #[ignore = "requires Docker"]
             async fn completed_records_stay_done_after_a_restart() {
                 let _serial = $crate::conformance::serial().await;
                 $crate::conformance::completed_records_stay_done_after_a_restart(&$source).await;
@@ -228,7 +257,11 @@ fn new_cache() -> Arc<dyn Cache> {
 }
 
 /// The context of a one-task flow whose single leaf is the suite.
-fn context(cache: &Arc<dyn Cache>, stop: &CancellationToken) -> Arc<TaskContext> {
+fn context(
+    cache: &Arc<dyn Cache>,
+    stop: &CancellationToken,
+    retry: RetryConfig,
+) -> Arc<TaskContext> {
     let task_manager = TaskManagerBuilder::new()
         .build()
         .expect("build the task manager");
@@ -237,10 +270,7 @@ fn context(cache: &Arc<dyn Cache>, stop: &CancellationToken) -> Arc<TaskContext>
         .task_manager(Arc::new(task_manager))
         .cache(Arc::clone(cache))
         .cancellation_token(stop.clone())
-        .retry(RetryConfig {
-            max_attempts: Some(3),
-            initial_backoff: Duration::from_millis(100),
-        })
+        .retry(retry)
         .build()
         .expect("build the task context");
     Arc::new(context)
@@ -263,6 +293,7 @@ struct Running<'a, S: Source> {
     source: &'a S,
     rx: Receiver<Event>,
     stop: CancellationToken,
+    stop_reading: CancellationToken,
     handle: JoinHandle<()>,
 }
 
@@ -272,11 +303,18 @@ impl<'a, S: Source> Running<'a, S> {
     async fn start(source: &'a S, cache: &Arc<dyn Cache>, capacity: usize) -> Self {
         let stop = CancellationToken::new();
         let (tx, rx) = mpsc::channel(capacity);
-        let handle = source.start(context(cache, &stop), tx).await;
+        let retry = RetryConfig {
+            max_attempts: Some(3),
+            initial_backoff: Duration::from_millis(100),
+        };
+        let context = context(cache, &stop, retry);
+        let stop_reading = context.stop_reading.clone();
+        let handle = source.start(context, tx).await;
         Self {
             source,
             rx,
             stop,
+            stop_reading,
             handle,
         }
     }
@@ -345,13 +383,237 @@ impl<'a, S: Source> Running<'a, S> {
         }
     }
 
+    /// Stops the source reading, completes `held`, and asserts the source then returns.
+    async fn drain(self, held: &Event) {
+        self.stop_reading.cancel();
+        tokio::time::sleep(PROBE_INTERVAL).await;
+        complete(held);
+        let drained = tokio::time::timeout(STOP_TIMEOUT, self.handle).await;
+        self.stop.cancel();
+        assert!(
+            drained.is_ok(),
+            "the source did not return within {STOP_TIMEOUT:?} of finishing its record"
+        );
+    }
+
     /// Stops the source and asserts it returns at once.
     async fn stop(self) {
         self.stop.cancel();
-        let stopped = tokio::time::timeout(STOP_TIMEOUT, self.handle).await;
+        assert_returns(self.handle, "source").await;
+    }
+}
+
+/// How long a sink may take to fail an event it cannot write.
+const FAIL_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// How long the server stays down in the case the sink recovers from.
+const OUTAGE: Duration = Duration::from_secs(3);
+
+/// A sink task, the last task of its flow, and the server it writes to.
+#[async_trait::async_trait]
+pub trait Sink: Send + Sync {
+    /// Starts the sink task with `context` on `rx`, with each write bounded to a few seconds.
+    async fn start(&self, context: Arc<TaskContext>, rx: Receiver<Event>) -> JoinHandle<()>;
+
+    /// An event the sink writes as a record carrying `payload`.
+    fn event(&self, payload: &str) -> Event;
+
+    /// The payloads of the records the server holds.
+    async fn written(&self) -> Vec<String>;
+
+    /// Takes the server down, as an outage would.
+    async fn take_down(&self);
+
+    /// Brings the server back.
+    async fn bring_back(&self);
+}
+
+/// Every event is written once, and its completion reaches the source.
+pub async fn writes_each_event_once(sink: &impl Sink) {
+    let writing = Writing::start(sink).await;
+    let written = ["a", "b", "c", "d", "e"];
+    let mut completions = Vec::new();
+    for payload in written {
+        completions.push(writing.send(payload).await);
+    }
+    for completion in completions {
+        assert_completed(completion, "the event").await;
+    }
+    writing.stop().await;
+
+    assert_eq!(stored(sink).await, written);
+}
+
+/// An event sent while the server is down fails within `FAIL_TIMEOUT`; a late write may still land.
+pub async fn fails_an_event_while_the_server_is_down(sink: &impl Sink) {
+    let writing = Writing::start(sink).await;
+    sink.take_down().await;
+    let refused = writing.send("refused").await;
+    let failed = wait_for_completion(Some(FAIL_TIMEOUT), refused).await;
+    sink.bring_back().await;
+    let accepted = writing.send("accepted").await;
+    assert_completed(accepted, "the event after the server came back").await;
+    writing.stop().await;
+
+    match failed {
+        Ok(()) => panic!("the sink completed an event its server never took"),
+        Err(CompletionFailure::Timeout { .. }) => {
+            panic!("the sink neither wrote nor failed the event within {FAIL_TIMEOUT:?}")
+        }
+        Err(_) => {}
+    }
+    let stored = stored(sink).await;
+    assert!(
+        stored
+            .iter()
+            .all(|payload| payload == "accepted" || payload == "refused")
+            && stored.iter().any(|payload| payload == "accepted"),
+        "the server holds {stored:?}"
+    );
+}
+
+/// An event sent during a brief outage is written and completed once the server is back.
+pub async fn writes_an_event_once_the_server_is_back(sink: &impl Sink) {
+    let writing = Writing::start(sink).await;
+    sink.take_down().await;
+    let delayed = writing.send("delayed").await;
+    tokio::time::sleep(OUTAGE).await;
+    sink.bring_back().await;
+    assert_completed(delayed, "the event sent during the outage").await;
+    writing.stop().await;
+
+    let stored = stored(sink).await;
+    assert!(
+        !stored.is_empty() && stored.iter().all(|payload| payload == "delayed"),
+        "the server holds {stored:?}"
+    );
+}
+
+/// A sink stopped while it writes returns at once, with an outcome for every event it took.
+pub async fn stops_while_writing(sink: &impl Sink) {
+    let writing = Writing::start(sink).await;
+    let mut completions = Vec::new();
+    for n in 0..20 {
+        completions.push(writing.send(&format!("stopping-{n}")).await);
+    }
+    writing.stop().await;
+
+    for completion in completions {
+        let outcome = wait_for_completion(Some(STOP_TIMEOUT), completion).await;
         assert!(
-            stopped.is_ok(),
-            "the source did not stop within {STOP_TIMEOUT:?}"
+            !matches!(outcome, Err(CompletionFailure::Timeout { .. })),
+            "an event the stopped sink took got no outcome within {STOP_TIMEOUT:?}"
         );
+    }
+}
+
+/// Defines one test per sink case, each with its own server from `$sink`.
+#[macro_export]
+macro_rules! sink_conformance {
+    ($sink:expr) => {
+        mod sink_conformance {
+            use super::*;
+
+            #[tokio::test(flavor = "multi_thread")]
+            #[ignore = "requires Docker"]
+            async fn writes_each_event_once() {
+                let _serial = $crate::conformance::serial().await;
+                $crate::conformance::writes_each_event_once(&$sink).await;
+            }
+
+            #[tokio::test(flavor = "multi_thread")]
+            #[ignore = "requires Docker"]
+            async fn fails_an_event_while_the_server_is_down() {
+                let _serial = $crate::conformance::serial().await;
+                $crate::conformance::fails_an_event_while_the_server_is_down(&$sink).await;
+            }
+
+            #[tokio::test(flavor = "multi_thread")]
+            #[ignore = "requires Docker"]
+            async fn writes_an_event_once_the_server_is_back() {
+                let _serial = $crate::conformance::serial().await;
+                $crate::conformance::writes_an_event_once_the_server_is_back(&$sink).await;
+            }
+
+            #[tokio::test(flavor = "multi_thread")]
+            #[ignore = "requires Docker"]
+            async fn stops_while_writing() {
+                let _serial = $crate::conformance::serial().await;
+                $crate::conformance::stops_while_writing(&$sink).await;
+            }
+        }
+    };
+}
+
+/// The payloads `sink`'s server holds, without the probes.
+async fn stored(sink: &impl Sink) -> Vec<String> {
+    let mut stored: Vec<String> = sink
+        .written()
+        .await
+        .into_iter()
+        .filter(|payload| !payload.starts_with(PROBE))
+        .collect();
+    stored.sort();
+    stored
+}
+
+/// Waits for `completion` and asserts the flow completed `what`.
+async fn assert_completed(completion: CompletionRx, what: &str) {
+    if let Err(failure) = wait_for_completion(Some(ARRIVAL_TIMEOUT), completion).await {
+        panic!("the sink did not complete {what}: {failure}");
+    }
+}
+
+/// Asserts the task behind `handle` returns within `STOP_TIMEOUT`.
+async fn assert_returns(handle: JoinHandle<()>, what: &str) {
+    let returned = tokio::time::timeout(STOP_TIMEOUT, handle).await;
+    assert!(
+        returned.is_ok(),
+        "the {what} did not stop within {STOP_TIMEOUT:?}"
+    );
+}
+
+/// A started sink and the channel the flow hands it events on.
+struct Writing<'a, S: Sink> {
+    sink: &'a S,
+    tx: Sender<Event>,
+    stop: CancellationToken,
+    handle: JoinHandle<()>,
+}
+
+impl<'a, S: Sink> Writing<'a, S> {
+    /// Starts the sink and waits until it has written a probe.
+    async fn start(sink: &'a S) -> Self {
+        let stop = CancellationToken::new();
+        let (tx, rx) = mpsc::channel(32);
+        let retry = RetryConfig {
+            max_attempts: Some(6),
+            initial_backoff: Duration::from_secs(1),
+        };
+        let handle = sink.start(context(&new_cache(), &stop, retry), rx).await;
+        let writing = Self {
+            sink,
+            tx,
+            stop,
+            handle,
+        };
+        let probe = writing.send(&format!("{PROBE}0")).await;
+        assert_completed(probe, "the probe").await;
+        writing
+    }
+
+    /// Hands the sink an event carrying `payload`, returning its completion.
+    async fn send(&self, payload: &str) -> CompletionRx {
+        let (completion, completed) = new_completion_channel(1);
+        let mut event = self.sink.event(payload);
+        event.completion_tx = Some(completion);
+        self.tx.send(event).await.expect("the sink takes events");
+        completed
+    }
+
+    /// Stops the sink and asserts it returns at once.
+    async fn stop(self) {
+        self.stop.cancel();
+        assert_returns(self.handle, "sink").await;
     }
 }

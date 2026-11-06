@@ -249,5 +249,7 @@ fn app_config_with_cache(url: String) -> flowgen::config::AppConfig {
         health: Default::default(),
         retry: None,
         telemetry: None,
+        shutdown_timeout: flowgen::config::default_shutdown_timeout(),
+        ai_budget: None,
     }
 }

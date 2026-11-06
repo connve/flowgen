@@ -6,7 +6,8 @@
 #   - ai_gateway, mcp_server and web.agents enabled in the app config
 #   - web.headers with `X-Flowgen-Client: flowgen-ui`, so the Agents chat can reach the proxy
 #   - FLOWGEN_UI_URL env var, the web UI address users open, e.g. https://example.com/flowgen
-#   - the tool flows in examples/authoring/tools/
+#   - the tool flows in examples/authoring/tools/, deployed under authoring/tools/,
+#     whose MCP toolset is /mcp/v1/authoring/tools
 #   - examples/resources/scripts/ai-gateway/route_provider.rhai as a resource
 flow:
   labels:
@@ -55,5 +56,5 @@ flow:
           path (credentials_path). Ask when a requirement is unclear instead
           of guessing.
         mcp_servers:
-          - url: "http://localhost:3001/mcp/v1"
+          - url: "http://localhost:3001/mcp/v1/authoring/tools"
         stream: true

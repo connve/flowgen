@@ -8,6 +8,7 @@
 	"common_delete": "Delete",
 	"common_new": "New",
 	"common_close": "Close",
+	"common_back": "Back",
 	"common_clear_search": "Clear search",
 	"common_review": "Review",
 	"common_retry": "Retry",
@@ -92,12 +93,12 @@
 		}
 	],
 	"flows_status_idle": "Idle",
-	"flows_status_ok": "Ok",
+	"flows_status_ok": "OK",
 	"flows_status_warn": "Warn",
 	"flows_status_error": "Error",
 	"flows_tag_filter": "Filter by tag",
 	"flows_tag_filter_remove": "Remove {tag} filter",
-	"flows_tag_filters_clear": "Clear tag filters",
+	"flows_tag_filters_clear": "Clear",
 	"flows_connection_filter_remove": "Remove {connection} filter",
 	"flows_connection_load_failed": "Failed to load the connection",
 	"flows_pending_changes": [
@@ -129,12 +130,13 @@
 	"flows_sort_by_status": "Sort by status",
 	"flows_sort_by_last_event": "Sort by last event",
 	"flow_breadcrumb_flows": "Flows",
-	"flow_preview_label": "Flow YAML viewer",
+	"flow_preview_label": "Flow graph",
 	"flow_open_full_page": "Open full page",
 	"flow_load_failed": "Failed to load flow '{path}'",
 	"flow_load_failed_title": "Failed to load flow",
 	"flow_not_found": "Flow '{path}' not found.",
 	"flow_graph_heading": "Graph",
+	"flow_view_label": "View",
 	"flow_config_heading": "Config",
 	"flow_copy_yaml": "Copy YAML",
 	"flow_config_collapse": "Collapse config",
@@ -145,9 +147,6 @@
 	"flow_resource_load_failed_title": "Failed to load resource",
 	"activity_heading": "Activity",
 	"activity_empty_collapsed": "No events yet",
-	"activity_limit": "Limit",
-	"activity_limit_tooltip": "Max number of results per log level",
-	"activity_limit_label": "Activity history limit",
 	"activity_task_filter_prefix": "task:",
 	"activity_task_filter_clear": "Clear task filter",
 	"activity_filters_clear": "Clear",
@@ -243,7 +242,8 @@
 			}
 		}
 	],
-	"editor_valid": "valid",
+	"editor_valid": "Valid",
+	"editor_more_actions": "More actions",
 	"editor_issue_count": [
 		{
 			"declarations": [
@@ -261,7 +261,6 @@
 	],
 	"editor_delete_read_only": "Read-only, managed in the repository",
 	"editor_nothing_to_save": "No changes to save",
-	"editor_exit": "Exit editor",
 	"editor_target_label": "Authoring target",
 	"editor_path_label": "Path",
 	"editor_content_heading": "Content",
@@ -317,8 +316,8 @@
 	"change_description_label": "Description",
 	"change_publish_failed": "Publishing failed: {error}",
 	"change_validation_issues": "Validation issues",
-	"change_file_deleted": "deleted",
-	"change_file_new": "new",
+	"change_file_deleted": "Deleted",
+	"change_file_new": "New",
 	"change_status_pending": "Pending",
 	"change_status_rejected": "Rejected",
 	"change_status_publishing": "Publishing",
@@ -328,7 +327,9 @@
 	"change_deployment_deployed": "Deployed",
 	"change_deployment_slow": "Not deployed yet. Check the logs.",
 	"change_open_logs": "Open logs",
-	"agents_breadcrumb": "Agents",
+	"change_details": "Change details",
+	"change_open": "Open change",
+	"change_field_target": "Target",
 	"agents_not_enabled": "Agents are disabled. Set web.agents.enabled to turn them on.",
 	"agents_new_conversation": "New conversation",
 	"agents_conversation_fallback_title": "Conversation",
@@ -366,12 +367,28 @@
 	"agents_stop_tooltip": "Stop (Esc)",
 	"agents_working": "Working…",
 	"agents_tool_step_fallback": "tool",
-	"agents_tool_more_connectors": "+{count} more",
-	"agents_tool_open_flow": "Open the flow",
+	"agents_tools_count": [
+		{
+			"declarations": [
+				"input count",
+				"local countPlural = count: plural"
+			],
+			"selectors": [
+				"countPlural"
+			],
+			"match": {
+				"countPlural=one": "{count} tool",
+				"countPlural=other": "{count} tools"
+			}
+		}
+	],
+	"agents_tools_failed": "{count} failed",
+	"agents_tools_using": "Using {name}…",
+	"agents_tool_open_flow": "Open flow",
+	"agents_tool_details": "Tool details",
 	"agents_tool_input": "Input",
-	"agents_tool_steps": "Flow steps",
-	"agents_tool_more_steps": "{count} more steps",
-	"agents_tool_failed_at": "failed at {task}",
+	"agents_tool_steps": "Steps",
+	"agents_tool_failed_at": "Failed at {task}",
 	"agents_tool_succeeded": "Succeeded",
 	"agents_tool_failed": "Failed",
 	"agents_reply_empty": "(no content returned)",
@@ -379,6 +396,8 @@
 	"agents_chat_failed": "The chat request failed",
 	"agents_reply_in_progress": "A reply is already in progress. Send again once it finishes.",
 	"monitor_tabs_label": "Monitor",
+	"monitor_expand": "Expand monitor",
+	"monitor_collapse": "Collapse monitor",
 	"monitor_tab_logs": "Logs",
 	"monitor_tab_pods": "Pods",
 	"monitor_pods_reachable": [
@@ -397,6 +416,22 @@
 			}
 		}
 	],
+	"connections_all": "All connections",
+	"connections_count": [
+		{
+			"declarations": [
+				"input count",
+				"local countPlural = count: plural"
+			],
+			"selectors": [
+				"countPlural"
+			],
+			"match": {
+				"countPlural=one": "{count} connection",
+				"countPlural=other": "{count} connections"
+			}
+		}
+	],
 	"connections_load_failed": "Failed to load connections",
 	"connections_empty_title": "No connections yet",
 	"connections_empty_message": "Add a flow with a task that connects to another system.",
@@ -405,21 +440,62 @@
 	"connections_column_flows": "Flows",
 	"connections_per_event": "per event",
 	"connections_on_behalf_of_user": "on behalf of user",
+	"connections_details": "Connection details",
+	"connections_show_flows": "Show flows",
+	"connections_field_account": "Account",
+	"connections_field_target": "Target",
+	"connections_field_credentials": "Credentials",
+	"pods_all": "All pods",
+	"pods_details": "Pod details",
+	"pods_field_address": "Address",
+	"pods_field_reason": "Reason",
+	"pods_count": [
+		{
+			"declarations": [
+				"input count",
+				"local countPlural = count: plural"
+			],
+			"selectors": [
+				"countPlural"
+			],
+			"match": {
+				"countPlural=one": "{count} pod",
+				"countPlural=other": "{count} pods"
+			}
+		}
+	],
 	"pods_load_failed_title": "Failed to load pods",
 	"pods_load_failed_message": "Failed to load the cluster status. Retrying…",
 	"pods_column_pod": "Pod",
 	"pods_column_status": "Status",
 	"pods_column_flows": "Flows",
 	"pods_column_flows_tooltip": "Flows running on this pod",
-	"pods_status_ok": "ok",
-	"pods_status_unreachable": "unreachable",
-	"logs_limit": "Limit",
-	"logs_limit_label": "Line limit",
-	"logs_limit_tooltip": "Max number of results per log level",
+	"pods_status_ok": "OK",
+	"pods_status_unreachable": "Unreachable",
+	"logs_limit_label": "Lines per level",
+	"logs_live": "Live",
+	"logs_paused": "Paused",
+	"logs_more_actions": "More actions",
 	"logs_jump_to_latest": "Jump to latest",
 	"logs_tail_pause": "Pause live tail",
 	"logs_tail_resume": "Resume live tail",
 	"logs_clear_view": "Clear view",
+	"logs_all": "All logs",
+	"logs_count": [
+		{
+			"declarations": [
+				"input count",
+				"local countPlural = count: plural"
+			],
+			"selectors": [
+				"countPlural"
+			],
+			"match": {
+				"countPlural=one": "{count} log",
+				"countPlural=other": "{count} logs"
+			}
+		}
+	],
 	"logs_search_placeholder": "Search logs...",
 	"logs_empty_title": "No log records yet",
 	"logs_empty_message": "Try turning on more log levels.",
@@ -432,7 +508,6 @@
 	"logs_column_target": "Target",
 	"logs_column_message": "Message",
 	"logs_detail_label": "Log record detail",
-	"logs_detail_duration": "Duration",
 	"logs_detail_event": "Event",
 	"logs_detail_flow": "Flow",
 	"logs_detail_spans": "Spans",
@@ -444,5 +519,6 @@
 	"level_debug": "Debug",
 	"level_trace": "Trace",
 	"system_breadcrumb": "System",
+	"system_config_heading": "App config",
 	"system_config_load_failed_title": "Failed to load config"
 }

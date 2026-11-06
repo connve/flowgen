@@ -50,6 +50,8 @@ Bytes that are not valid UTF-8 in a key or header value are replaced with `U+FFF
 
 ## Behaviour
 
+When the flow stops, the subscriber drains: each partition finishes its record in flight, stores the next offset once the flow completes it, and stops.
+
 Each partition is consumed in order, one record at a time; partitions are consumed concurrently. A record is emitted with a completion channel, and the next record of that partition is read once every leaf of the flow has completed it.
 
 The next offset of each partition is stored in the [cache](/docs/flowgen/concepts/caching) under `flow.<flow id>.kafka_offset.<topic>.<partition>`, where `<flow id>` is the base64url-encoded flow identity. A partition's starting offset is stored when the subscriber first reads the partition, and the stored offset advances after the flow completes each record. On restart, a partition resumes from its stored offset, so changing `start_offset` does not move a partition that already has one; delete its cache key to start it over. A partition without a stored offset while other partitions of the topic have one, such as a partition added while the flow was stopped, starts at its earliest record.

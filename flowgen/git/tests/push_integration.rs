@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 /// How long the server holds back a stalled fetch.
-const STALL: Duration = Duration::from_secs(3);
+const STALL: Duration = Duration::from_secs(60);
 
 fn git(dir: &Path, args: &[&str]) -> String {
     let out = Command::new("git")

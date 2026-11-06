@@ -208,7 +208,7 @@
 </script>
 
 {#if open}
-	<div class="fixed inset-0 z-50 bg-black/50" aria-hidden="true" onclick={close}></div>
+	<div class="fixed inset-0 z-50 bg-black/30" aria-hidden="true" onclick={close}></div>
 	<div
 		class="fixed left-1/2 top-4 z-50 w-[calc(100%-2rem)] max-w-xl -translate-x-1/2 overflow-hidden rounded-lg border border-base-200 bg-base-100 shadow-xl md:top-24"
 		role="dialog"
@@ -238,7 +238,7 @@
 		</div>
 		<ul id="search-results" class="max-h-96 overflow-y-auto p-1" role="listbox">
 			{#each results as [group, groupResults] (group)}
-				<li role="presentation" class="px-3 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wide text-base-content/40">
+				<li role="presentation" class="px-3 pb-1 pt-2 text-xs font-medium text-base-content/50">
 					{group}
 				</li>
 				{#each groupResults as result (result.href + result.label)}
@@ -251,7 +251,7 @@
 							aria-selected={index === active}
 							tabindex="-1"
 							class="flex items-center gap-2.5 rounded-md px-3 py-2 text-sm {index === active
-								? 'bg-base-200 text-primary'
+								? 'bg-base-200'
 								: ''}"
 							onmousemove={() => (active = index)}
 							onclick={close}

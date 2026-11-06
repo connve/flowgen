@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.154.0
+
+### Breaking
+
+- A flow, the app config or a flowgen credentials file with an unknown field
+  fails to load, naming the field. So does an unknown key in an `APP_*`
+  section variable, such as `APP_WEB__PROT`.
+- MCP tool and prompt names are 1 to 64 letters, digits, `_` or `-`.
+
+### Added
+
+- `flowgen validate [workspace]` checks flows and resources without running
+  them and exits with `1` on any issue; `--json` prints JSON.
+- The MCP server serves each folder of flows as a toolset at `path` followed
+  by the folder.
+- `ai_completion` `mcp_servers` entries take `allowed_tools` and `prefix`.
+- `ai_budget` in the app config limits `ai_completion` usage per day, week or
+  month, in tokens or cost, for the workspace or each user. Every model call
+  counts, including those of failed runs.
+
+### Fixed
+
+- `http_request` `payload.send_as` defaults to `json`.
+- `nats_jetstream_subscribe` and `nats_jetstream_publish` take
+  `retention: work_queue`.
+- The quickstart flow loads.
+- An `ai_completion` credentials file without `api_key`, such as `vertexai`,
+  loads.
+- `http_request` sends numbers in `queryparams` and `urlencoded` payloads.
+- `http_request` fails at once on a request it cannot build.
+- `to_json()` in a `script` writes valid JSON for every character.
+
+### Changed
+
+- A flow stops in stages: sources first, then events in flight finish and
+  `buffer` flushes. Tasks still running after `shutdown_timeout` (`20s`, set
+  for the app or per flow) are aborted.
+- `nats_jetstream_subscribe`, `kafka_subscribe`, `postgres_cdc` and
+  `mongodb_cdc` ack the events completed while the flow stops.
+- Flows called through `inproc_endpoint` stop last. The Helm chart's
+  `terminationGracePeriodSeconds` is 65.
+- A stopping flow leaves another flow's webhook, MCP tool or LLM proxy route
+  in place.
+- `kafka_subscribe` and `mongodb_cdc` reset their reconnect backoff after
+  reconnecting.
+- `postgres_query` and `postgres_write` fail and retry when the server stops
+  answering for twice `query_timeout`.
+- `buffer` checks `partition_key` when the flow starts.
+- The web UI has a new design.
+
 ## 0.153.0
 
 ### Breaking

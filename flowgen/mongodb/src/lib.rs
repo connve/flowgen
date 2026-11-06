@@ -54,6 +54,7 @@ impl TaskMeta for collection::Collection {
 impl TaskMeta for cdc::Cdc {
     const CONNECTOR: Connector = CONNECTOR;
     const RUNS_UNTIL_STOPPED: bool = true;
+    const DRAINS: bool = true;
 
     fn connections(&self) -> Vec<Connection> {
         connections(&self.credentials_path)

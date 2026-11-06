@@ -1088,7 +1088,7 @@ async fn a_record_in_flight_when_the_subscriber_stops_goes_to_the_next_one() {
     assert_eq!(record_meta(&redelivered).offset, 0);
 }
 
-/// A record the shared source tests write and read back.
+/// A record the shared source and sink tests write and read back.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct SourceRecord {
     payload: String,
@@ -1167,3 +1167,84 @@ impl flowgen_core::conformance::Source for KafkaSource {
 }
 
 flowgen_core::source_conformance!(KafkaSource::start().await);
+
+/// A producer to a one-partition topic, for the shared sink tests.
+struct KafkaSink {
+    _lock: tokio::sync::MutexGuard<'static, ()>,
+    server: ContainerAsync<GenericImage>,
+    brokers: String,
+}
+
+impl KafkaSink {
+    const TOPIC: &str = "conformance";
+
+    async fn start() -> Self {
+        let lock = lock_kafka_test().await;
+        let (server, brokers) = start_kafka().await;
+        create_topic(&brokers, Self::TOPIC, 1).await;
+        Self {
+            _lock: lock,
+            server,
+            brokers,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl flowgen_core::conformance::Sink for KafkaSink {
+    async fn start(
+        &self,
+        context: Arc<flowgen_core::task::context::TaskContext>,
+        rx: mpsc::Receiver<Event>,
+    ) -> tokio::task::JoinHandle<()> {
+        let config = Produce {
+            name: "produce".to_string(),
+            brokers: self.brokers.clone(),
+            topic: Self::TOPIC.to_string(),
+            ack_timeout: Duration::from_secs(3),
+            ..Default::default()
+        };
+        let producer = ProducerBuilder::new()
+            .config(Arc::new(config))
+            .receiver(rx)
+            .task_id(1)
+            .task_type("kafka_produce")
+            .task_context(context)
+            .build()
+            .await
+            .expect("build producer");
+        tokio::spawn(async move {
+            use flowgen_core::task::runner::Runner;
+            let _ = producer.run().await;
+        })
+    }
+
+    fn event(&self, payload: &str) -> Event {
+        let record = SourceRecord {
+            payload: payload.to_string(),
+        };
+        drive_event(serde_json::to_value(record).expect("serialize record"))
+    }
+
+    async fn written(&self) -> Vec<String> {
+        read_partition(&self.brokers, Self::TOPIC, 0)
+            .await
+            .into_iter()
+            .map(|written| {
+                let value = written.record.value.expect("record value");
+                let record: SourceRecord = serde_json::from_slice(&value).expect("record");
+                record.payload
+            })
+            .collect()
+    }
+
+    async fn take_down(&self) {
+        self.server.pause().await.expect("pause server");
+    }
+
+    async fn bring_back(&self) {
+        self.server.unpause().await.expect("unpause server");
+    }
+}
+
+flowgen_core::sink_conformance!(KafkaSink::start().await);

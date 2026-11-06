@@ -34,7 +34,6 @@ async fn boot_server() -> (Arc<McpServer>, String, tokio::task::JoinHandle<()>) 
         .await
         .expect("bind ephemeral port");
     let addr = listener.local_addr().expect("read local addr");
-    drop(listener);
 
     let server = Arc::new(new_mcp_server(
         "/mcp/v1".to_string(),
@@ -45,7 +44,7 @@ async fn boot_server() -> (Arc<McpServer>, String, tokio::task::JoinHandle<()>) 
 
     let server_clone = Arc::clone(&server);
     let handle = tokio::spawn(async move {
-        let _ = server_clone.start_server(addr.port()).await;
+        let _ = server_clone.serve(listener).await;
     });
 
     // Poll until the listener is accepting.

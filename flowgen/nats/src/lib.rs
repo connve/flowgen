@@ -59,6 +59,7 @@ impl TaskMeta for jetstream::publish::Publish {
 impl TaskMeta for jetstream::subscribe::Subscribe {
     const CONNECTOR: Connector = CONNECTOR;
     const RUNS_UNTIL_STOPPED: bool = true;
+    const DRAINS: bool = true;
 
     fn connections(&self) -> Vec<Connection> {
         self.0.connections()

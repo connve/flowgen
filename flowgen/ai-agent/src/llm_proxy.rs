@@ -203,7 +203,7 @@ impl flowgen_core::task::runner::Runner for Processor {
             task_type: self.task_type,
             response_registry,
             leaf_count: self.task_context.leaf_count,
-            cancellation_token: self.task_context.cancellation_token.clone(),
+            cancellation_token: self.task_context.stop_reading.clone(),
         };
 
         self.ai_gateway_server
@@ -318,6 +318,7 @@ mod tests {
             resource_loader: None,
             retry: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
+            stop_reading: tokio_util::sync::CancellationToken::new(),
             leaf_count: 1,
             max_in_flight: std::num::NonZeroUsize::MIN,
             handles_failed: false,

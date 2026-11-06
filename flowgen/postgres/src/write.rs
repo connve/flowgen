@@ -1,6 +1,6 @@
 //! The `postgres_write` task: writes rows into a PostgreSQL table with COPY.
 
-use crate::client::{Client, Error as ClientError};
+use crate::client::{Client, Error as ClientError, Silent};
 use crate::query::{default_connection_timeout, default_max_connections, default_query_timeout};
 use async_trait::async_trait;
 use bytes::{BufMut, BytesMut};
@@ -51,8 +51,7 @@ pub struct Write {
     /// Maximum time to open a connection.
     #[serde(default = "default_connection_timeout", with = "humantime_serde")]
     pub connection_timeout: Duration,
-    /// Maximum time a statement runs on the server, and to wait for a
-    /// connection from the pool.
+    /// Maximum time a statement runs on the server and to wait for a connection.
     #[serde(default = "default_query_timeout", with = "humantime_serde")]
     pub query_timeout: Duration,
     /// Optional list of upstream task names this task depends on.
@@ -117,6 +116,8 @@ pub enum Error {
         #[source]
         source: tokio_postgres::Error,
     },
+    #[error("The server did not answer a write to '{table}' within {timeout:?}")]
+    WriteTimeout { table: String, timeout: Duration },
     #[error("Table '{table}' has no primary key to match rows by")]
     NoPrimaryKey { table: String },
     #[error("The rows for '{table}' have no value for its primary key column '{column}'")]
@@ -130,12 +131,10 @@ pub enum Error {
 }
 
 impl Error {
-    /// Whether retrying might help: no connection, or a transient server
-    /// error. The rows are written in one transaction, so a retry writes
-    /// them once.
+    /// Whether retrying might help: no connection, a silent server, or a transient server error.
     fn is_retryable(&self) -> bool {
         match self {
-            Self::Client(_) => true,
+            Self::Client(_) | Self::WriteTimeout { .. } => true,
             Self::Write { source, .. } => crate::client::is_transient(source),
             _ => false,
         }
@@ -429,34 +428,32 @@ impl flowgen_core::task::runner::Handler for EventHandler {
 impl EventHandler {
     /// Writes the rows in one transaction and returns how many rows changed.
     async fn write(&self, config: &Write, batch: &Batch) -> Result<u64, Error> {
-        let failed = |source| Error::Write {
-            table: config.table.clone(),
-            source,
-        };
-        let table = quote_table(&config.table);
+        let name = &config.table;
+        let table = quote_table(name);
         let mut connection = self.client.connection().await?;
-        let transaction = connection.transaction().await.map_err(failed)?;
+        let transaction = self.answered(name, connection.transaction()).await?;
         let written = match config.change_type {
-            None => copy(
-                &transaction,
-                &format!(
+            None => {
+                let statement = format!(
                     "COPY {table} ({}) FROM STDIN (FORMAT csv)",
                     column_list(&batch.columns)
-                ),
-                csv(&batch.rows, &batch.columns),
-            )
-            .await
-            .map_err(failed)?,
+                );
+                let rows = csv(&batch.rows, &batch.columns);
+                self.answered(name, copy(&transaction, &statement, rows))
+                    .await?
+            }
             Some(change_type) => {
-                let key = primary_key(&transaction, &table).await.map_err(failed)?;
+                let key = self
+                    .answered(name, primary_key(&transaction, &table))
+                    .await?;
                 if key.is_empty() {
                     return Err(Error::NoPrimaryKey {
-                        table: config.table.clone(),
+                        table: name.clone(),
                     });
                 }
                 if let Some(column) = key.iter().find(|key| !batch.columns.contains(key)) {
                     return Err(Error::MissingKey {
-                        table: config.table.clone(),
+                        table: name.clone(),
                         column: column.clone(),
                     });
                 }
@@ -465,29 +462,44 @@ impl EventHandler {
                     ChangeType::Delete => &key,
                 };
                 let list = column_list(staged);
-                transaction
-                    .batch_execute(&format!(
-                        "CREATE TEMP TABLE {STAGING_TABLE} ON COMMIT DROP AS \
-                         SELECT {list} FROM {table} WITH NO DATA"
-                    ))
-                    .await
-                    .map_err(failed)?;
-                copy(
-                    &transaction,
-                    &format!("COPY {STAGING_TABLE} ({list}) FROM STDIN (FORMAT csv)"),
-                    csv(last_per_key(&batch.rows, &key), staged),
-                )
-                .await
-                .map_err(failed)?;
+                let create = format!(
+                    "CREATE TEMP TABLE {STAGING_TABLE} ON COMMIT DROP AS \
+                     SELECT {list} FROM {table} WITH NO DATA"
+                );
+                self.answered(name, transaction.batch_execute(&create))
+                    .await?;
+                let stage = format!("COPY {STAGING_TABLE} ({list}) FROM STDIN (FORMAT csv)");
+                let rows = csv(last_per_key(&batch.rows, &key), staged);
+                self.answered(name, copy(&transaction, &stage, rows))
+                    .await?;
                 let statement = match change_type {
                     ChangeType::Upsert => upsert_statement(&table, staged, &key),
                     ChangeType::Delete => delete_statement(&table, &key),
                 };
-                transaction.execute(&statement, &[]).await.map_err(failed)?
+                self.answered(name, transaction.execute(&statement, &[]))
+                    .await?
             }
         };
-        transaction.commit().await.map_err(failed)?;
+        self.answered(name, transaction.commit()).await?;
         Ok(written)
+    }
+
+    /// Awaits a write step, failing it when the server stays silent for twice `query_timeout`.
+    async fn answered<T>(
+        &self,
+        table: &str,
+        step: impl std::future::Future<Output = Result<T, tokio_postgres::Error>>,
+    ) -> Result<T, Error> {
+        match self.client.answered(step).await {
+            Ok(result) => result.map_err(|source| Error::Write {
+                table: table.to_string(),
+                source,
+            }),
+            Err(Silent { timeout }) => Err(Error::WriteTimeout {
+                table: table.to_string(),
+                timeout,
+            }),
+        }
     }
 }
 

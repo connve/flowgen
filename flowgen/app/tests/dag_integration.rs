@@ -115,6 +115,7 @@ async fn both_branches_of_a_reentrant_fan_out_observe_the_same_tick_data() {
                 ],
                 require_leader_election: None,
                 parallel_instances: 1,
+                shutdown_timeout: None,
             },
         },
         "reentrant_fan_out_repro".to_string(),

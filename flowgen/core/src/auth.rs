@@ -206,4 +206,28 @@ mod tests {
             .to_string();
         assert!(error.contains("unknown field `require`"), "{error}");
     }
+
+    #[test]
+    fn a_misspelled_auth_provider_field_is_rejected_after_the_tag() {
+        let cases = [
+            (r#"{"type": "jwt", "jwks": "https://a"}"#, "jwks"),
+            (r#"{"type": "oidc", "issuer": "https://a"}"#, "issuer"),
+            (
+                r#"{"type": "session", "validation_url": "https://a", "user_field": "u"}"#,
+                "user_field",
+            ),
+        ];
+        for (json, field) in cases {
+            let error = serde_json::from_str::<AuthConfig>(json)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(&format!("unknown field `{field}`")),
+                "{error}"
+            );
+        }
+        let config: AuthConfig =
+            serde_json::from_str(r#"{"type": "oidc", "issuer_url": "https://a"}"#).unwrap();
+        assert!(matches!(config, AuthConfig::Oidc(_)));
+    }
 }
