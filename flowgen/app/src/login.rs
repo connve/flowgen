@@ -174,6 +174,7 @@ struct Discovery {
 /// claim name); this needs OAuth2 client credentials and a redirect URI to
 /// obtain one in the first place.
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct LoginConfig {
     /// OIDC issuer URL. Discovery fetched from
     /// `{issuer_url}/.well-known/openid-configuration`. Works with any

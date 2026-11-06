@@ -26,6 +26,7 @@ const DEFAULT_TOKEN_USERNAME: &str = "x-access-token";
 /// username (GitLab OAuth tokens expect `oauth2`, Bitbucket Cloud
 /// token-auth expects `x-token-auth`).
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Credentials {
     /// HTTPS token, e.g. a GitHub Personal Access Token, a GitLab deploy
     /// token, or a Bitbucket app password.
@@ -306,6 +307,14 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_misspelled_credentials_field_is_rejected() {
+        let error = serde_json::from_str::<Credentials>(r#"{"token": "t", "user": "u"}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown field `user`"), "{error}");
+    }
 
     fn credentials(json: &str) -> Credentials {
         serde_json::from_str(json).unwrap()

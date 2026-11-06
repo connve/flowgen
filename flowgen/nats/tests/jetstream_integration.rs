@@ -1632,3 +1632,104 @@ impl flowgen_core::conformance::Source for NatsSource {
 }
 
 flowgen_core::source_conformance!(NatsSource::start().await);
+
+/// A publisher whose acks time out after 3 seconds, for the shared sink tests.
+struct NatsSink {
+    _lock: tokio::sync::MutexGuard<'static, ()>,
+    server: ContainerAsync<GenericImage>,
+    jetstream: async_nats::jetstream::Context,
+    config: Arc<JsConfig>,
+}
+
+impl NatsSink {
+    const STREAM: &str = "conformance_sink";
+    const SUBJECT: &str = "conformance.sink";
+
+    async fn start() -> Self {
+        let lock = lock_nats_test().await;
+        let (server, url) = start_nats().await;
+        let jetstream =
+            async_nats::jetstream::new(async_nats::connect(&url).await.expect("connect"));
+        let config = Arc::new(JsConfig {
+            name: "publisher".to_string(),
+            url,
+            subject: Self::SUBJECT.to_string(),
+            stream: Some(StreamOptions {
+                retention: Some(RetentionPolicy::Limits),
+                ..stream_options(Self::STREAM, Self::SUBJECT)
+            }),
+            ack_timeout: Some(Duration::from_secs(3)),
+            ..Default::default()
+        });
+        Self {
+            _lock: lock,
+            server,
+            jetstream,
+            config,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl flowgen_core::conformance::Sink for NatsSink {
+    async fn start(
+        &self,
+        context: Arc<flowgen_core::task::context::TaskContext>,
+        rx: mpsc::Receiver<flowgen_core::event::Event>,
+    ) -> tokio::task::JoinHandle<()> {
+        let publisher = publish::ProcessorBuilder::new()
+            .config(Arc::clone(&self.config))
+            .receiver(rx)
+            .task_id(1)
+            .task_type("nats_jetstream_publish")
+            .task_context(context)
+            .build()
+            .await
+            .expect("build publisher");
+        tokio::spawn(async move {
+            use flowgen_core::task::runner::Runner;
+            let _ = publisher.run().await;
+        })
+    }
+
+    fn event(&self, payload: &str) -> flowgen_core::event::Event {
+        let record = Record {
+            payload: payload.to_string(),
+        };
+        EventBuilder::new()
+            .subject(Self::SUBJECT.to_string())
+            .data(EventData::Json(
+                serde_json::to_value(record).expect("serialize record"),
+            ))
+            .task_id(0)
+            .task_type("test")
+            .build()
+            .expect("build event")
+    }
+
+    async fn written(&self) -> Vec<String> {
+        let mut stream = self
+            .jetstream
+            .get_stream(Self::STREAM)
+            .await
+            .expect("get stream");
+        let state = stream.info().await.expect("stream info").state.clone();
+        let mut payloads = Vec::new();
+        for sequence in state.first_sequence..=state.last_sequence {
+            let message = stream.get_raw_message(sequence).await.expect("read record");
+            let record: Record = serde_json::from_slice(&message.payload).expect("record");
+            payloads.push(record.payload);
+        }
+        payloads
+    }
+
+    async fn take_down(&self) {
+        self.server.pause().await.expect("pause server");
+    }
+
+    async fn bring_back(&self) {
+        self.server.unpause().await.expect("unpause server");
+    }
+}
+
+flowgen_core::sink_conformance!(NatsSink::start().await);

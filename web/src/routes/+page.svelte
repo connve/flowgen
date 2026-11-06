@@ -1,20 +1,22 @@
 <script lang="ts">
 	import { base } from '$app/paths';
-	import { goto, pushState } from '$app/navigation';
+	import { goto, pushState, replaceState } from '$app/navigation';
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
 	import { SvelteSet } from 'svelte/reactivity';
-	import FlowInspector from '$lib/flow/FlowInspector.svelte';
-	import Badge from '$lib/Badge.svelte';
+	import FlowDag from '$lib/dag/FlowDag.svelte';
+	import Inspector from '$lib/Inspector.svelte';
+	import StatusDot from '$lib/StatusDot.svelte';
 	import StateMessage from '$lib/StateMessage.svelte';
 	import { apiUrl, encodePath, errorMessage, failure } from '$lib/api';
 	import { formatRelative as fmtRelativeMs } from '$lib/time';
 	import { activitiesFor, allMetrics, releaseFlowSubscription } from '$lib/activityStore.svelte';
 	import Icon from '@iconify/svelte';
 	import { m } from '$lib/paraglide/messages.js';
-	import PaneResizer from '$lib/PaneResizer.svelte';
-	import { PaneWidth } from '$lib/paneWidth.svelte';
-	import { isMobile, PANE_OVER_PAGE } from '$lib/mobile';
+	import FolderTree from '$lib/FolderTree.svelte';
+	import ListHeader from '$lib/ListHeader.svelte';
+	import SidePane from '$lib/SidePane.svelte';
+	import { isMobile } from '$lib/mobile';
 	import { pageTitle } from '$lib/pageTitle';
 	import { connectorByName } from '$lib/connectors';
 	import type {
@@ -25,8 +27,8 @@
 		FlowSummary as Flow,
 		FlowDetail
 	} from '$lib/api';
-	import { buildTree, type TreeNode } from '$lib/tree';
-	import EditButton from '$lib/EditButton.svelte';
+	import { buildTree } from '$lib/tree';
+	import IconButton from '$lib/IconButton.svelte';
 	import {
 		authoringEnabled,
 		authoringTargets,
@@ -101,10 +103,6 @@
 	let selectedDetail = $state<FlowDetail | null>(null);
 	let selectedLoading = $state(false);
 	let selectedError = $state<string | null>(null);
-	// Modal activities come straight from the shared store so opening the
-	// modal after the detail page has already primed the buffer doesn't
-	// re-fetch history (which the old per-page EventSource used to do).
-	let modalActivities = $derived(selected ? activitiesFor(selected) : []);
 
 	let tickerId: ReturnType<typeof setInterval> | null = null;
 
@@ -218,9 +216,7 @@
 		goto(`${base}/`, { replaceState: true, noScroll: true, keepFocus: true });
 	}
 
-	// Cache lets repeat clicks paint instantly and lets the modal open only
-	// when the payload is ready, so the user never sees the empty-then-loading
-	// flash the DAG + Prism pipeline was doing on first paint.
+	// Cache lets repeat clicks paint instantly.
 	const flowCache = new Map<string, FlowDetail>();
 	// Tracks the most recent open request so late responses from a
 	// previously-clicked flow don't overwrite the current one.
@@ -228,7 +224,8 @@
 
 	async function openFlow(path: string) {
 		pendingFlow = path;
-		pushState(`${base}/flows/${encodePath(path)}`, { flow: path });
+		const show = page.state.flow ? replaceState : pushState;
+		show(`${base}/flows/${encodePath(path)}`, { flow: path });
 		const cached = flowCache.get(path);
 		if (cached) {
 			selected = path;
@@ -326,13 +323,10 @@
 	let expandedFolders = $state(new SvelteSet<string>());
 	let selectedFolder = $state<string | null>(null);
 	let foldersPaneOpen = $state(true);
-	const paneWidth = new PaneWidth('flows');
 
 	// Modal breadcrumb parts derived from `selected` (the currently open flow path).
 	let selectedSegments = $derived(selected ? selected.split('/') : []);
-	let selectedFolders = $derived(selectedSegments.slice(0, -1));
-	let selectedLeaf = $derived(selectedSegments[selectedSegments.length - 1] ?? '');
-	let sidebarTree = $derived(buildTree<Flow>(scopedFlows, (f) => f.path));
+	let selectedLeaf = $derived(selectedSegments[selectedSegments.length - 1] ?? '');	let sidebarTree = $derived(buildTree<Flow>(scopedFlows, (f) => f.path));
 
 	// Table rows: `filtered` (already respects status and tags) further
 	// narrowed to `selectedFolder` when set.
@@ -366,12 +360,6 @@
 		localStorage.setItem('flowgen-folders-pane', foldersPaneOpen ? '1' : '0');
 	}
 
-	// True for folders that contain at least one nested folder — used to
-	// hide the chevron on leaf folders where nothing would show up.
-	function hasSubfolders(node: TreeNode<Flow>): boolean {
-		return (node.children ?? []).some((c) => c.isFolder);
-	}
-
 	function formatRelative(ts: string | null, tick: number): string {
 		if (!ts) return '—';
 		const ms = new Date(ts).getTime();
@@ -387,177 +375,41 @@
 <svelte:window on:keydown={onKeydown} />
 
 <section class="relative flex h-[calc(100vh-4rem)]">
-	{#if foldersPaneOpen}
-		<div class="absolute inset-0 z-20 bg-black/30 md:hidden" aria-hidden="true" onclick={closePaneOnMobile}></div>
-	{/if}
-	<aside
-		class="relative flex shrink-0 flex-col border-r border-base-300 bg-base-100 {paneWidth.dragging
-			? ''
-			: 'transition-[width] duration-200 ease-out'} {foldersPaneOpen ? PANE_OVER_PAGE : 'w-16'}"
-		style:width={foldersPaneOpen ? `${paneWidth.width}px` : undefined}
+	<SidePane
+		open={foldersPaneOpen}
+		title={m.flows_folders()}
+		collapseLabel={m.flows_folders_collapse()}
+		expandLabel={m.flows_folders_expand()}
+		ontoggle={toggleFoldersPane}
+		onclose={closePaneOnMobile}
 	>
-		{#if foldersPaneOpen}
-			<PaneResizer pane={paneWidth} />
-		{/if}
-		{#if !foldersPaneOpen}
-			<div class="flex flex-1 flex-col items-center py-2">
-				<div class="tooltip tooltip-right" data-tip={m.flows_folders()}>
-					<button
-						type="button"
-						aria-label={m.flows_folders_expand()}
-						class="relative flex h-10 w-10 items-center justify-center rounded-md bg-base-200 text-primary transition-colors hover:bg-base-200"
-						onclick={toggleFoldersPane}
-					>
-						<span class="absolute -left-1 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r bg-primary"></span>
-						<Icon icon="tabler:layout-list" class="h-5 w-5 shrink-0" />
-					</button>
-				</div>
-			</div>
-		{:else}
-			<div class="flex-1 overflow-y-auto px-3 py-2">
-			<ul class="space-y-0.5 text-sm">
-				<li>
-					<button
-						type="button"
-						class="relative flex w-full items-center gap-1.5 h-10 rounded-md px-2 text-left transition-colors {selectedFolder === null
-							? 'bg-base-200 font-medium text-primary'
-							: 'hover:bg-base-200'}"
-						onclick={() => selectFolder(null)}
-					>
-						{#if selectedFolder === null}
-							<span class="absolute -left-1 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r bg-primary"></span>
-						{/if}
-						<Icon icon="tabler:layout-list" class="h-5 w-5 shrink-0 opacity-70" />
-						<span>{m.flows_all()}</span>
-						<span class="ml-auto text-xs opacity-50">{scopedFlows.length}</span>
-					</button>
-				</li>
-				{#snippet sidebarNodes(nodes: TreeNode<Flow>[])}
-					{#each nodes as node (node.fullPath)}
-						{#if node.isFolder}
-							{@const isOpen = expandedFolders.has(node.fullPath)}
-							{@const isSelected = selectedFolder === node.fullPath}
-							{@const canExpand = hasSubfolders(node)}
-							<li>
-								<div class="flex items-center gap-0.5">
-									{#if canExpand}
-										<button
-											type="button"
-											class="flex h-6 w-6 shrink-0 items-center justify-center rounded hover:bg-base-200"
-											aria-label={isOpen
-												? m.flows_folder_collapse({ folder: node.name })
-												: m.flows_folder_expand({ folder: node.name })}
-											onclick={() => toggleFolder(node.fullPath)}
-										>
-											<Icon
-												icon={isOpen ? 'tabler:chevron-down' : 'tabler:chevron-right'}
-												class="h-3.5 w-3.5 opacity-70"
-											/>
-										</button>
-									{:else}
-										<span class="h-6 w-6 shrink-0"></span>
-									{/if}
-									<button
-										type="button"
-										class="relative flex min-w-0 flex-1 items-center gap-1.5 h-10 rounded-md px-2 text-left transition-colors {isSelected
-											? 'bg-base-200 font-medium text-primary'
-											: 'hover:bg-base-200'}"
-										style="padding-left: {node.depth * 0.75 + 0.375}rem"
-										onclick={() => selectFolder(node.fullPath)}
-									>
-										{#if isSelected}
-											<span class="absolute -left-1 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r bg-primary"></span>
-										{/if}
-										<Icon
-											icon={isOpen && canExpand ? 'tabler:folder-open' : 'tabler:folder'}
-											class="h-5 w-5 shrink-0 opacity-70"
-										/>
-										<span class="min-w-0 flex-1 truncate text-left">{node.name}</span>
-										<span class="ml-2 shrink-0 text-xs opacity-50">{node.fileCount}</span>
-									</button>
-								</div>
-								{#if isOpen && canExpand && node.children}
-									<ul class="space-y-0.5">
-										{@render sidebarNodes(node.children)}
-									</ul>
-								{/if}
-							</li>
-						{/if}
-					{/each}
-				{/snippet}
-				{@render sidebarNodes(sidebarTree)}
-			</ul>
-			</div>
-		{/if}
-		<div
-			class="flex h-12 shrink-0 items-center border-t border-base-200 {foldersPaneOpen
-				? 'justify-end px-3'
-				: 'justify-center'}"
-		>
-			<button
-				type="button"
-				aria-label={foldersPaneOpen ? m.flows_folders_collapse() : m.flows_folders_expand()}
-				data-tip={foldersPaneOpen ? m.flows_folders_collapse() : m.flows_folders_expand()}
-				class="tooltip {foldersPaneOpen
-					? 'tooltip-top'
-					: 'tooltip-right'} flex h-10 w-10 items-center justify-center rounded-md text-base-content/70 transition-colors hover:bg-base-200 hover:text-base-content"
-				onclick={toggleFoldersPane}
-			>
-				<Icon
-					icon={foldersPaneOpen ? 'tabler:chevron-left' : 'tabler:chevron-right'}
-					class="h-5 w-5"
-				/>
-			</button>
+		<div class="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
+			<FolderTree
+				tree={sidebarTree}
+				selected={selectedFolder}
+				expanded={expandedFolders}
+				allLabel={m.flows_all()}
+				allIcon="tabler:layout-list"
+				allCount={scopedFlows.length}
+				expandLabel={(folder) => m.flows_folder_expand({ folder })}
+				collapseLabel={(folder) => m.flows_folder_collapse({ folder })}
+				onselect={selectFolder}
+				ontoggle={toggleFolder}
+			/>
 		</div>
-	</aside>
+	</SidePane>
 
-	<div class="flex min-w-0 flex-1 flex-col">
-	<div class="shrink-0 space-y-3 border-b border-base-200 bg-base-100 px-6 pb-4 pt-6">
-	<div class="flex min-h-8 items-center justify-between gap-2">
-		<div class="flex items-center gap-1.5 text-sm">
-			{#if selectedFolder}
-				{@const segments = selectedFolder.split('/')}
-				<button
-					type="button"
-					class="text-primary hover:underline"
-					onclick={() => selectFolder(null)}
-				>{m.flows_all()}</button>
-				{#each segments as segment, i}
-					<span class="opacity-40">/</span>
-					{#if i < segments.length - 1}
-						<button
-							type="button"
-							class="font-mono text-primary hover:underline"
-							onclick={() => selectFolder(segments.slice(0, i + 1).join('/'))}
-						>{segment}</button>
-					{:else}
-						<span class="font-mono">{segment}</span>
-					{/if}
-				{/each}
-			{:else}
-				<span>{m.flows_all()}</span>
-			{/if}
-			<span class="text-xs opacity-50">· {m.flows_count({ count: visibleFlows.length })}</span>
-		</div>
-		{#if authoring}
-			<div class="flex items-center gap-2">
-				<a
-					href="{base}/changes"
-					class="btn btn-ghost btn-sm gap-1.5 {pending.length > 0 ? 'text-attention' : ''}"
-				>
-					<Icon icon="tabler:git-pull-request" class="h-4 w-4" />
-					{m.flows_pending_changes({ count: pending.length })}
-				</a>
-				<a
-					href="{base}/edit?new=flow{selectedFolder ? `&folder=${encodePath(selectedFolder)}` : ''}"
-					class="btn btn-primary btn-sm gap-1.5"
-				>
-					<Icon icon="tabler:plus" class="h-4 w-4" />
-					{m.common_new()}
-				</a>
-			</div>
-		{/if}
-	</div>
+	<div class="@container flex min-w-0 flex-1 flex-col">
+	<div class="shrink-0 space-y-3 bg-base-100 px-6 pb-4 pt-6">
+	<ListHeader
+		allLabel={m.flows_all()}
+		folder={selectedFolder}
+		onselect={selectFolder}
+		count={m.flows_count({ count: visibleFlows.length })}
+		pending={authoring ? pending.length : null}
+		pendingLabel={m.flows_pending_changes({ count: pending.length })}
+		newHref="{base}/edit?new=flow{selectedFolder ? `&folder=${encodePath(selectedFolder)}` : ''}"
+	/>
 	<div class="flex flex-wrap items-center gap-2">
 		<div class="flex items-center gap-1">
 			<button
@@ -573,7 +425,7 @@
 			</button>
 			<button
 				type="button"
-				class="chip {statusFilter.ok ? 'chip-info' : 'chip-inactive'}"
+				class="chip {statusFilter.ok ? 'chip-success' : 'chip-inactive'}"
 				aria-pressed={statusFilter.ok}
 				onclick={() => toggleStatus('ok')}
 			>
@@ -608,7 +460,7 @@
 				{@const connector = connectorByName(connection.connector)}
 				<button
 					type="button"
-					class="chip border-base-300 bg-base-100 hover:bg-base-200"
+					class="chip bg-base-200 hover:bg-base-300/60"
 					onclick={clearConnection}
 					aria-label={m.flows_connection_filter_remove({ connection: connector.label })}
 				>
@@ -624,12 +476,11 @@
 				<button
 					type="button"
 					tabindex="0"
-					class="btn btn-sm border border-base-300 bg-base-100 font-normal hover:bg-base-200"
+					class="chip chip-neutral hover:bg-base-300/60"
 				>
-					<Icon icon="tabler:tag" class="h-4 w-4 opacity-70" />
 					<span>{m.flows_tag_filter()}</span>
 					{#if selectedTags.size > 0}
-						<span class="badge badge-sm bg-primary/20 text-primary">{selectedTags.size}</span>
+						<span class="tabular-nums opacity-60">{selectedTags.size}</span>
 					{/if}
 					<Icon icon="tabler:chevron-down" class="h-3.5 w-3.5 opacity-60" />
 				</button>
@@ -668,7 +519,7 @@
 					{#each [...selectedTags] as tag}
 						<button
 							type="button"
-							class="flex items-center gap-1 rounded-full border border-primary/50 bg-primary/10 px-2 py-0.5 text-xs"
+							class="chip chip-neutral hover:bg-base-300/60"
 							onclick={() => toggleTag(tag)}
 							aria-label={m.flows_tag_filter_remove({ tag })}
 						>
@@ -676,23 +527,20 @@
 							<Icon icon="tabler:x" class="h-3 w-3 opacity-60" />
 						</button>
 					{/each}
-					<div class="tooltip tooltip-bottom" data-tip={m.flows_tag_filters_clear()}>
-						<button
-							type="button"
-							class="btn btn-sm btn-ghost btn-circle"
-							aria-label={m.flows_tag_filters_clear()}
-							onclick={() => (selectedTags = new Set())}
-						>
-							<Icon icon="tabler:trash" class="h-5 w-5" />
-						</button>
-					</div>
+					<button
+						type="button"
+						class="btn btn-ghost btn-xs font-normal text-base-content/60"
+						onclick={() => (selectedTags = new Set())}
+					>
+						{m.flows_tag_filters_clear()}
+					</button>
 				</div>
 			{/if}
 		{/if}
 	</div>
 	</div>
 
-	<div class="flex min-h-0 flex-1 flex-col overflow-y-auto p-6">
+	<div class="flex min-h-0 flex-1 flex-col overflow-y-auto px-6 pb-6">
 	{#if loading || connectionLoading}
 		<div class="flex justify-center py-12">
 			<span class="loading loading-spinner loading-lg text-primary"></span>
@@ -708,14 +556,14 @@
 	{:else if visibleFlows.length === 0}
 		<StateMessage tone="notice" title={m.flows_no_match_title()} message={m.flows_no_match_message()} />
 	{:else}
-		<div class="shrink-0 overflow-x-auto rounded-lg border border-base-300 bg-base-100">
+		<div class="-mx-6 shrink-0 overflow-x-auto px-6">
 			<table class="table table-sm w-full bg-base-100">
-				<thead class="bg-base-100 text-xs uppercase tracking-wide">
+				<thead class="bg-base-100 text-xs font-medium text-base-content/50">
 					<tr>
 						<th>
 							<button
 								type="button"
-								class="flex items-center gap-1 uppercase tracking-wide"
+								class="flex items-center gap-1"
 								onclick={() => toggleSort('name')}
 								aria-label={m.flows_sort_by_name()}
 							>
@@ -730,12 +578,12 @@
 								/>
 							</button>
 						</th>
-						<th>{m.flows_column_description()}</th>
-						<th>{m.flows_column_tags()}</th>
+						<th class="@max-5xl:hidden">{m.flows_column_description()}</th>
+						<th class="@max-3xl:hidden">{m.flows_column_tags()}</th>
 						<th>
 							<button
 								type="button"
-								class="flex items-center gap-1 uppercase tracking-wide"
+								class="flex items-center gap-1"
 								onclick={() => toggleSort('status')}
 								aria-label={m.flows_sort_by_status()}
 							>
@@ -750,10 +598,10 @@
 								/>
 							</button>
 						</th>
-						<th>
+						<th class="@max-md:hidden">
 							<button
 								type="button"
-								class="flex items-center gap-1 uppercase tracking-wide"
+								class="flex items-center gap-1"
 								onclick={() => toggleSort('last_event')}
 								aria-label={m.flows_sort_by_last_event()}
 							>
@@ -773,7 +621,9 @@
 				<tbody>
 					{#each visibleFlows as flow (flow.path)}
 						<tr
-							class="cursor-pointer transition-colors hover:bg-base-200"
+							class="group cursor-pointer transition-colors hover:bg-base-200 {selected === flow.path
+								? 'selected bg-base-200'
+								: ''}"
 							onclick={() => openFlow(flow.path)}
 							ondblclick={() => goto(`${base}/flows/${encodePath(flow.path)}`)}
 							onkeydown={(e) => {
@@ -782,14 +632,14 @@
 							tabindex="0"
 							role="button"
 						>
-							<td class="whitespace-nowrap">
-								<div class="font-medium">{label(flow)}</div>
-								<div class="font-mono text-xs opacity-70">{flow.path}</div>
+							<td class="w-full max-w-0">
+								<div class="truncate font-medium">{label(flow)}</div>
+								<div class="truncate text-xs text-base-content/50">{flow.path}</div>
 							</td>
-							<td class="min-w-64 max-w-md text-sm">
+							<td class="min-w-64 max-w-md text-sm @max-5xl:hidden">
 								<span class="line-clamp-2">{flow.description ?? '—'}</span>
 							</td>
-							<td class="min-w-48">
+							<td class="min-w-48 @max-3xl:hidden">
 								{#if flow.tags.length === 0}
 									<span class="opacity-50">—</span>
 								{:else}
@@ -797,9 +647,9 @@
 										{#each flow.tags as tag}
 											<button
 												type="button"
-												class="rounded-full border px-2 py-0.5 text-xs transition-colors {selectedTags.has(tag)
-													? 'border-primary/50 bg-primary/10'
-													: 'border-base-300 opacity-70 hover:opacity-100'}"
+												class="rounded-full px-2 py-0.5 text-xs transition-colors {selectedTags.has(tag)
+													? 'bg-base-300/70'
+													: 'bg-base-200 text-base-content/70 group-hover:bg-base-300/50 group-focus-visible:bg-base-300/50 group-[.selected]:bg-base-300/50 hover:text-base-content'}"
 												aria-pressed={selectedTags.has(tag)}
 												onclick={(e) => {
 													e.stopPropagation();
@@ -814,16 +664,16 @@
 							</td>
 							<td>
 								{#if flow.status === 'ok'}
-									<Badge variant="success">{m.flows_status_ok()}</Badge>
+									<StatusDot variant="success" label={m.flows_status_ok()} />
 								{:else if flow.status === 'warn'}
-									<Badge variant="warning">{m.flows_status_warn()}</Badge>
+									<StatusDot variant="warning" label={m.flows_status_warn()} />
 								{:else if flow.status === 'error'}
-									<Badge variant="error">{m.flows_status_error()}</Badge>
+									<StatusDot variant="error" label={m.flows_status_error()} />
 								{:else}
-									<Badge>{m.flows_status_idle()}</Badge>
+									<StatusDot label={m.flows_status_idle()} />
 								{/if}
 							</td>
-							<td class="whitespace-nowrap text-sm opacity-70">
+							<td class="whitespace-nowrap text-sm opacity-70 @max-md:hidden">
 								{formatRelative(flow.last_event_at, nowTick)}
 							</td>
 						</tr>
@@ -834,78 +684,42 @@
 	{/if}
 	</div>
 	</div>
-</section>
 
-{#if selected}
-	<div
-		class="fixed inset-0 z-40 flex items-center justify-center bg-black/70 p-4"
-		role="dialog"
-		aria-modal="true"
-		aria-label={m.flow_preview_label()}
-		onclick={(e) => {
-			if (e.target === e.currentTarget) closeFlow();
-		}}
-		onkeydown={(e) => {
-			if (e.key === 'Escape') closeFlow();
-		}}
-		tabindex="-1"
-	>
-		<div
-			class="flex h-[90vh] w-full max-w-[95vw] flex-col overflow-hidden rounded-lg border border-base-300 bg-base-100 shadow-2xl ring-1 ring-base-content/10"
+	{#if selected}
+		{@const path = selected}
+		<Inspector
+			title={selectedDetail?.display_name ?? selectedLeaf}
+			label={m.flow_preview_label()}
+			onclose={closeFlow}
 		>
-			<div class="flex items-start justify-between border-b border-base-200 px-4 py-3">
-				<div class="min-w-0 flex-1">
-					<div class="mb-0.5 flex items-center gap-1.5 text-xs">
-						<span class="opacity-60">{m.flow_breadcrumb_flows()}</span>
-						{#each selectedFolders as segment}
-							<span class="opacity-40">/</span>
-							<span class="font-mono opacity-70">{segment}</span>
-						{/each}
-						<span class="opacity-40">/</span>
-						<span class="font-mono">{selectedLeaf}</span>
-					</div>
-					<div class="text-sm font-medium">
-						{selectedDetail?.display_name ?? selectedLeaf}
-					</div>
-				</div>
-				<div class="flex items-center gap-1">
-					{#if targetOf(targets, flowFilePath(selected))}
-						<EditButton href={editUrl(base, flowFilePath(selected))} tooltip="left" />
-					{/if}
-					<div class="tooltip tooltip-left" data-tip={m.flow_open_full_page()}>
-						<a
-							href="{base}/flows/{encodePath(selected)}"
-							class="btn btn-ghost btn-sm btn-circle"
-							aria-label={m.flow_open_full_page()}
-						>
-							<Icon icon="tabler:external-link" class="h-5 w-5" />
-						</a>
-					</div>
-					<div class="tooltip tooltip-left" data-tip={m.common_close()}>
-						<button
-							type="button"
-							class="btn btn-ghost btn-sm btn-circle"
-							aria-label={m.common_close()}
-							onclick={closeFlow}
-						>
-							<Icon icon="tabler:x" class="h-5 w-5" />
-						</button>
-					</div>
-				</div>
-			</div>
-			<div class="flex min-h-0 flex-1 overflow-hidden">
-				{#if selectedLoading}
-					<div class="flex flex-1 items-center justify-center py-12">
-						<span class="loading loading-spinner loading-md text-primary"></span>
-					</div>
-				{:else if selectedError}
-					<div class="flex-1">
-						<StateMessage tone="oops" title={m.flow_load_failed_title()} message={selectedError} />
-					</div>
-				{:else if selectedDetail}
-					<FlowInspector yaml={selectedDetail.yaml} activities={modalActivities} />
+			{#snippet subtitle()}
+				<span class="truncate">{path}</span>
+			{/snippet}
+			{#snippet actions()}
+				{#if targetOf(targets, flowFilePath(path))}
+					<IconButton icon="tabler:pencil" label={m.common_edit()} href={editUrl(base, flowFilePath(path))} />
 				{/if}
-			</div>
-		</div>
-	</div>
-{/if}
+				<IconButton
+					icon="tabler:arrow-up-right"
+					label={m.flow_open_full_page()}
+					href="{base}/flows/{encodePath(path)}"
+				/>
+			{/snippet}
+			{#if selectedLoading}
+				<div class="flex justify-center py-12">
+					<span class="loading loading-spinner loading-md text-primary"></span>
+				</div>
+			{:else if selectedError}
+				<StateMessage tone="oops" title={m.flow_load_failed_title()} message={selectedError} />
+			{:else if selectedDetail}
+				<div class="-mx-6 -mb-6 h-[calc(100vh-8rem)]">
+					<FlowDag
+						yaml={selectedDetail.yaml}
+						activities={activitiesFor(path)}
+						onNodeClick={(task) => goto(`${base}/flows/${encodePath(path)}?task=${encodeURIComponent(task)}`)}
+					/>
+				</div>
+			{/if}
+		</Inspector>
+	{/if}
+</section>

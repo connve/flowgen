@@ -120,13 +120,21 @@ fn parse_issue(source: config::ConfigError) -> Issue {
     let location = match &source {
         config::ConfigError::At { key: Some(key), .. }
         | config::ConfigError::Type { key: Some(key), .. }
-        | config::ConfigError::NotFound(key) => Some(key.replace('[', ".").replace(']', "")),
+        | config::ConfigError::NotFound(key) => Some(dotted(key)),
         _ => None,
     };
     Issue {
         location,
         message: Error::Parse(source).to_string(),
     }
+}
+
+/// A parser key such as `flow.tasks[0]stream` as `flow.tasks.0.stream`.
+fn dotted(key: &str) -> String {
+    key.split(['.', '[', ']'])
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 /// Validates a resource file by its extension: Rhai scripts must compile and
@@ -144,6 +152,128 @@ pub fn validate_resource(path: &str, content: &str) -> Vec<Issue> {
         Ok(()) => Vec::new(),
         Err(error) => vec![error.into()],
     }
+}
+
+/// Why a workspace directory could not be read.
+#[derive(thiserror::Error, Debug)]
+pub enum ReadError {
+    #[error("Workspace '{}' has no flows/ or resources/ folder; pass the workspace folder", root.display())]
+    NoWorkspace { root: std::path::PathBuf },
+    #[error("Failed to list the workspace files: {0}")]
+    Walk(#[from] walkdir::Error),
+    #[error("Failed to read '{path}': {source}")]
+    Read {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+/// A validated workspace: how many files were checked and the issues found.
+pub struct Workspace {
+    pub files: usize,
+    pub issues: Vec<flowgen_client::types::ValidationIssue>,
+}
+
+/// Validates the flows under `<root>/flows` and the resources under
+/// `<root>/resources`, skipping hidden files and folders.
+pub fn validate_workspace(root: &std::path::Path) -> Result<Workspace, ReadError> {
+    let folders: Vec<_> = ["flows", "resources"]
+        .into_iter()
+        .map(|folder| root.join(folder))
+        .filter(|dir| dir.is_dir())
+        .collect();
+    if folders.is_empty() {
+        return Err(ReadError::NoWorkspace {
+            root: root.to_path_buf(),
+        });
+    }
+    let mut files = Vec::new();
+    for dir in folders {
+        let entries = walkdir::WalkDir::new(&dir)
+            .follow_links(true)
+            .sort_by_file_name()
+            .into_iter()
+            .filter_entry(|entry| {
+                entry.depth() == 0 || !entry.file_name().to_string_lossy().starts_with('.')
+            });
+        for entry in entries {
+            let entry = entry?;
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let content =
+                std::fs::read_to_string(entry.path()).map_err(|source| ReadError::Read {
+                    path: entry.path().to_path_buf(),
+                    source,
+                })?;
+            let relative = match entry.path().strip_prefix(root) {
+                Ok(relative) => relative,
+                Err(_) => entry.path(),
+            };
+            let path = relative
+                .components()
+                .map(|part| part.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            let flow_file = match path.rsplit_once('.') {
+                Some((_, extension)) => crate::config::FLOW_CONFIG_EXTENSIONS.contains(&extension),
+                None => false,
+            };
+            if path.starts_with("flows/") && !flow_file {
+                continue;
+            }
+            files.push(flowgen_client::types::WorkspaceFile {
+                path,
+                content: Some(content),
+            });
+        }
+    }
+    let mut issues = crate::authoring::validate_files(&files);
+    issues.extend(duplicate_mcp_names(&files));
+    Ok(Workspace {
+        files: files.len(),
+        issues,
+    })
+}
+
+/// Issues for each MCP tool or prompt name that more than one flow registers,
+/// since the MCP server takes a name only once.
+fn duplicate_mcp_names(
+    files: &[flowgen_client::types::WorkspaceFile],
+) -> Vec<flowgen_client::types::ValidationIssue> {
+    let mut registered: std::collections::BTreeMap<(&str, String), Vec<&str>> =
+        std::collections::BTreeMap::new();
+    for file in files.iter().filter(|file| file.path.starts_with("flows/")) {
+        let Some(content) = &file.content else {
+            continue;
+        };
+        let Ok(raw) = FlowConfigRaw::parse(&file.path, content) else {
+            continue;
+        };
+        for task in &raw.flow.tasks {
+            let name = match task {
+                crate::config::TaskType::mcp_tool(tool) => ("tool", tool.name.clone()),
+                crate::config::TaskType::mcp_prompt(prompt) => ("prompt", prompt.name.clone()),
+                _ => continue,
+            };
+            registered.entry(name).or_default().push(&file.path);
+        }
+    }
+    registered
+        .into_iter()
+        .filter(|(_, paths)| paths.len() > 1)
+        .flat_map(|((kind, name), paths)| {
+            let all = paths.join(", ");
+            paths.into_iter().map(move |path| flowgen_client::types::ValidationIssue {
+                path: path.to_string(),
+                location: None,
+                message: format!(
+                    "MCP {kind} name '{name}' is registered by more than one flow ({all}); names are unique on the MCP server"
+                ),
+            })
+        })
+        .collect()
 }
 
 /// Flow identity for a path in the flows directory: the path without its extension.
@@ -186,6 +316,75 @@ flow:
             "{issues:?}"
         );
         assert_eq!(issues[0].location.as_deref(), Some("flow.tasks.0"));
+    }
+
+    #[test]
+    fn a_parser_key_becomes_a_dotted_location() {
+        assert_eq!(dotted("flow.tasks[0]stream"), "flow.tasks.0.stream");
+        assert_eq!(
+            dotted("flow.tasks[2].http_request.uri"),
+            "flow.tasks.2.http_request.uri"
+        );
+        assert_eq!(dotted("flow.tasks[0]"), "flow.tasks.0");
+    }
+
+    #[test]
+    fn a_workspace_folder_is_validated_without_hidden_files() {
+        let root = tempfile::tempdir().unwrap();
+        let write = |path: &str, content: &str| {
+            let path = root.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, content).unwrap();
+        };
+        write("flows/a/good.yaml", VALID);
+        write(
+            "flows/a/typo.yaml",
+            &VALID.replace("interval: 10s", "interval: 10s\n        intreval: 5s"),
+        );
+        write("flows/.hidden/b.yaml", "not: a flow");
+        write("resources/scripts/c.rhai", "let x = ;");
+        let tool = |name: &str| {
+            format!(
+                "flow:\n  tasks:\n    - mcp_tool:\n        name: {name}\n        description: d\n    - log:\n        name: out\n"
+            )
+        };
+        write("flows/b/d.yaml", &tool("one"));
+        write("flows/c/d.yaml", &tool("one"));
+        write("flows/c/e.yaml", &tool("a.two"));
+        write("flows/README.md", "# Flows");
+        write(
+            "shared/f.yaml",
+            &VALID.replace("interval: 10s", "intreval: 5s"),
+        );
+        std::os::unix::fs::symlink(
+            root.path().join("shared/f.yaml"),
+            root.path().join("flows/f.yaml"),
+        )
+        .unwrap();
+
+        let workspace = validate_workspace(root.path()).unwrap();
+        let empty = tempfile::tempdir().unwrap();
+        let missing = validate_workspace(empty.path());
+
+        let paths: Vec<_> = workspace
+            .issues
+            .iter()
+            .map(|issue| issue.path.as_str())
+            .collect();
+        assert_eq!(workspace.files, 7);
+        assert_eq!(
+            paths,
+            [
+                "flows/a/typo.yaml",
+                "flows/c/e.yaml",
+                "flows/f.yaml",
+                "resources/scripts/c.rhai",
+                "flows/b/d.yaml",
+                "flows/c/d.yaml"
+            ]
+        );
+        assert!(workspace.issues[4].message.contains("MCP tool name 'one'"));
+        assert!(matches!(missing, Err(ReadError::NoWorkspace { .. })));
     }
 
     #[test]

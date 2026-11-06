@@ -26,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 const PASSWORD: &str = "flowgen";
 
 struct Server {
-    _container: ContainerAsync<GenericImage>,
+    container: ContainerAsync<GenericImage>,
     _credentials: tempfile::NamedTempFile,
     credentials_path: PathBuf,
     client: tokio_postgres::Client,
@@ -63,7 +63,7 @@ async fn start_postgres_with(args: &[&str]) -> Server {
     )
     .expect("write credentials file");
     Server {
-        _container: container,
+        container,
         credentials_path: credentials.path().to_path_buf(),
         _credentials: credentials,
         client,
@@ -1324,3 +1324,96 @@ impl flowgen_core::conformance::Source for PostgresSource {
 }
 
 flowgen_core::source_conformance!(PostgresSource::start().await);
+
+/// A row the shared sink tests write and read back.
+#[derive(serde::Serialize)]
+struct SinkRow<'a> {
+    payload: &'a str,
+}
+
+/// `postgres_write` appending to a `records` table, for the shared sink tests.
+struct PostgresSink {
+    server: Server,
+}
+
+impl PostgresSink {
+    async fn start() -> Self {
+        let server = start_postgres().await;
+        server
+            .client
+            .batch_execute("CREATE TABLE records (payload text NOT NULL)")
+            .await
+            .expect("create table");
+        Self { server }
+    }
+}
+
+#[async_trait::async_trait]
+impl flowgen_core::conformance::Sink for PostgresSink {
+    async fn start(
+        &self,
+        context: Arc<flowgen_core::task::context::TaskContext>,
+        rx: mpsc::Receiver<Event>,
+    ) -> tokio::task::JoinHandle<()> {
+        let config = flowgen_postgres::write::Write {
+            name: "save".to_string(),
+            credentials_path: self.server.credentials_path.clone(),
+            table: "records".to_string(),
+            change_type: None,
+            max_connections: 4,
+            connection_timeout: Duration::from_secs(3),
+            query_timeout: Duration::from_secs(3),
+            depends_on: None,
+            retry: None,
+            max_in_flight: None,
+        };
+        let processor = flowgen_postgres::write::ProcessorBuilder::new()
+            .config(Arc::new(config))
+            .receiver(rx)
+            .task_id(1)
+            .task_type("postgres_write")
+            .task_context(context)
+            .build()
+            .expect("build processor");
+        tokio::spawn(async move {
+            use flowgen_core::task::runner::Runner;
+            let _ = processor.run().await;
+        })
+    }
+
+    fn event(&self, payload: &str) -> Event {
+        let row = serde_json::to_value(SinkRow { payload }).expect("serialize row");
+        EventBuilder::new()
+            .subject("rows".to_string())
+            .data(EventData::Json(row))
+            .task_id(0)
+            .task_type("test")
+            .build()
+            .expect("build event")
+    }
+
+    async fn written(&self) -> Vec<String> {
+        self.server
+            .client
+            .query("SELECT payload FROM records", &[])
+            .await
+            .expect("read records")
+            .iter()
+            .map(|row| row.get(0))
+            .collect()
+    }
+
+    async fn take_down(&self) {
+        self.server.container.pause().await.expect("pause server");
+    }
+
+    async fn bring_back(&self) {
+        self.server
+            .container
+            .unpause()
+            .await
+            .expect("unpause server");
+    }
+}
+
+flowgen_core::sink_conformance!(PostgresSink::start().await);

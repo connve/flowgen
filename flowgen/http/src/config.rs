@@ -120,7 +120,8 @@ pub struct Payload {
     /// Use incoming event data as payload.
     #[serde(default)]
     pub from_event: bool,
-    /// Format for sending the payload.
+    /// Format for sending the payload; JSON when omitted.
+    #[serde(default)]
     pub send_as: PayloadSendAs,
 }
 

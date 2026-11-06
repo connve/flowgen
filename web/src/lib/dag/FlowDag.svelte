@@ -4,11 +4,34 @@
 	import { parseFlow } from './parseFlow';
 	import TaskNode from './TaskNode.svelte';
 	import DagLayout from './DagLayout.svelte';
+	import type { Activity } from '$lib/flow/ActivityDetails.svelte';
+	import { setNodeStates, type NodeState } from './nodeStates';
 
 	let {
 		yaml,
+		activities,
 		onNodeClick
-	}: { yaml: string; onNodeClick?: (taskName: string) => void } = $props();
+	}: {
+		yaml: string;
+		/** The flow's activity, which marks each task with its latest status and duration. */
+		activities?: Activity[];
+		onNodeClick?: (taskName: string) => void;
+	} = $props();
+
+	// Latest info/warn/error per task; debug and trace never replace it.
+	let nodeStates = $derived.by(() => {
+		const map = new Map<string, NodeState>();
+		for (const a of activities ?? []) {
+			if (!a.task) continue;
+			if (a.level !== 'info' && a.level !== 'warn' && a.level !== 'error') continue;
+			const prev = map.get(a.task);
+			if (!prev || a.ts_ms >= prev.ts_ms) {
+				map.set(a.task, { level: a.level, ts_ms: a.ts_ms, duration_ms: a.duration_ms });
+			}
+		}
+		return map;
+	});
+	setNodeStates(() => nodeStates);
 
 	// Nodes start stacked; `DagLayout` (inside SvelteFlow) positions them with
 	// dagre once SvelteFlow has measured each node's real rendered size, so the
@@ -44,7 +67,11 @@
 	});
 </script>
 
-<div class="dag-container h-full w-full" bind:clientWidth={width} bind:clientHeight={height}>
+<div
+	class="dag-container h-full w-full"
+	bind:clientWidth={width}
+	bind:clientHeight={height}
+>
 	<SvelteFlow
 		bind:nodes
 		bind:edges

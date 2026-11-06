@@ -42,6 +42,7 @@ Because identity is derived from the path, two flows with the same basename can 
 |---|---|---|---|
 | `require_leader_election` | bool | `false` | When `true`, only the leader pod runs this flow. Other replicas wait in standby. |
 | `parallel_instances` | int | `1` | Number of concurrent instances of this flow to run on the active pod. |
+| `shutdown_timeout` | duration | app's `shutdown_timeout` | How long a stop lets the events in flight finish. See [Stopping a flow](#stopping-a-flow). |
 | `tasks` | list | required | List of tasks that form the flow. |
 
 ## Linear flows
@@ -208,6 +209,18 @@ A task that fails (after retries exhausted) sends the event on with `event.error
 ```
 
 A failed event that reaches a leaf reports the error to the source: the message is not acked, and an MCP tool or HTTP caller gets the error. Partial failures never silently ack: either every leaf reports success, or the source learns the flow did not complete.
+
+## Stopping a flow
+
+A flow stops when it is removed or reloaded, when the pod shuts down, and before it restarts after a task failed. It stops in stages:
+
+1. The sources stop reading, and the flow's webhooks, MCP tools and gateway routes are removed. Sources that drain keep the events already in the flow; a source's page says whether it drains. Other sources stop at once.
+2. The events in the flow run to the end. A `buffer` sends what it holds at once, and each task stops when the tasks before it have stopped. Sources that drain ack the events the flow completes, so a stop leaves nothing to deliver again.
+3. After `shutdown_timeout` (20 seconds by default), the tasks still running are stopped: sources hand back the events they hold for redelivery, and 5 seconds later every task is ended.
+
+A pod that loses the leadership of a flow skips the second stage, so the next leader gets the events at once.
+
+When the app stops, the flows that other flows call through `inproc_endpoint` stop after the others, so the calls of events still in flight reach a running flow. Such a flow that calls another one stops with it.
 
 ## Leader election
 

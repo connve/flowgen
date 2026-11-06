@@ -3,10 +3,13 @@
 	import { base } from '$app/paths';
 	import Icon from '@iconify/svelte';
 	import CopyButton from '$lib/CopyButton.svelte';
-	import Badge from '$lib/Badge.svelte';
+	import StatusDot from '$lib/StatusDot.svelte';
+	import Inspector from '$lib/Inspector.svelte';
+	import InspectorSection from '$lib/InspectorSection.svelte';
 	import StateMessage from '$lib/StateMessage.svelte';
 	import { apiUrl, encodePath, errorMessage, failure, type LogRecord } from '$lib/api';
 	import { formatRelative } from '$lib/time';
+	import { formatDuration } from '$lib/toolRuns.svelte';
 	import { rafBatch } from '$lib/rafBatch';
 	import {
 		extractFieldSummary,
@@ -54,6 +57,7 @@
 	let rows = $state<LogRow[]>([]);
 	const levelFilter = logsLevels;
 	let search = $state('');
+	let searchOpen = $state(false);
 	let live = $state(true);
 	let atTop = $state(true);
 	let selected = $state<LogRecord | null>(null);
@@ -71,6 +75,9 @@
 	// buffer, with top/bottom spacers standing in for the rest. Without this,
 	// live streaming re-renders all 1000 rows on every append and locks up.
 	const ROW_HEIGHT = 28;
+	/** Timestamp and target fold away when the list is narrow, e.g. beside the inspector. */
+	const COLUMNS =
+		'grid-cols-[5rem_5rem_minmax(0,1fr)] @3xl:grid-cols-[5rem_5rem_7rem_18rem_minmax(0,1fr)]';
 	const OVERSCAN = 8;
 	let scrollTop = $state(0);
 	let viewportHeight = $state(600);
@@ -285,20 +292,127 @@
 	let selectedExtraFields = $derived(selectedFieldSummary?.extra ?? []);
 	let selectedExtraSpans = $derived(selected ? nonHoistedSpans(selected) : []);
 
-	function formatDuration(ms: number | null): string {
-		if (ms === null) return '—';
-		if (ms < 1000) return `${ms}ms`;
-		if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
-		return `${(ms / 60_000).toFixed(1)}m`;
-	}
 </script>
 
 <svelte:head>
 	<title>{pageTitle(m.monitor_tab_logs(), m.nav_monitor())}</title>
 </svelte:head>
 
+<div class="flex min-h-0 min-w-0 flex-1">
 <section class="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-	<div class="shrink-0 border-b border-base-200 bg-base-100 px-6 pb-4 pt-6">
+	<div class="shrink-0 space-y-3 bg-base-100 px-6 pb-4 pt-6">
+		<div class="flex min-h-8 items-center justify-between gap-3">
+			<div class="flex items-baseline gap-1.5 text-[0.9375rem] font-semibold">
+				<span>{m.logs_all()}</span>
+				<span class="text-xs font-normal opacity-50">· {m.logs_count({ count: filtered.length })}</span>
+			</div>
+			<div class="flex items-center gap-1">
+				{#if searchOpen || search}
+					<label
+						class="input input-sm flex w-64 items-center gap-2 border border-base-300 bg-base-100 outline-none focus-within:border-primary"
+					>
+						<Icon icon="tabler:search" class="h-4 w-4 shrink-0 opacity-50" />
+						<input
+							type="text"
+							placeholder={m.logs_search_placeholder()}
+							aria-label={m.logs_search_placeholder()}
+							bind:value={search}
+							{@attach (node: HTMLInputElement) => node.focus()}
+							onblur={() => (searchOpen = false)}
+							onkeydown={(e) => {
+								if (e.key !== 'Escape') return;
+								e.stopPropagation();
+								search = '';
+								searchOpen = false;
+							}}
+						/>
+						{#if search}
+							<button
+								type="button"
+								class="opacity-50 hover:opacity-100"
+								aria-label={m.common_clear_search()}
+								onclick={() => (search = '')}
+							>
+								<Icon icon="tabler:x" class="h-4 w-4" />
+							</button>
+						{/if}
+					</label>
+				{:else}
+					<div class="tooltip tooltip-bottom" data-tip={m.logs_search_placeholder()}>
+						<button
+							type="button"
+							class="flex h-8 w-8 items-center justify-center rounded-md text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content"
+							aria-label={m.logs_search_placeholder()}
+							onclick={() => (searchOpen = true)}
+						>
+							<Icon icon="tabler:search" class="h-5 w-5" />
+						</button>
+					</div>
+				{/if}
+				{#if !atTop && live}
+					<div class="tooltip tooltip-bottom" data-tip={m.logs_jump_to_latest()}>
+						<button
+							type="button"
+							class="flex h-8 w-8 items-center justify-center rounded-md text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content"
+							aria-label={m.logs_jump_to_latest()}
+							onclick={resume}
+						>
+							<Icon icon="tabler:arrow-up" class="h-5 w-5" />
+						</button>
+					</div>
+				{/if}
+				<div class="tooltip tooltip-bottom" data-tip={live ? m.logs_tail_pause() : m.logs_tail_resume()}>
+					<button
+						type="button"
+						class="flex h-8 items-center gap-2 rounded-md px-2.5 text-sm transition-colors hover:bg-base-200 {live
+							? 'text-base-content'
+							: 'text-base-content/50'}"
+						aria-pressed={live}
+						onclick={() => (live = !live)}
+					>
+						<span
+							class="h-2 w-2 rounded-full {live ? 'animate-pulse bg-success' : 'bg-base-content/30'}"
+							aria-hidden="true"
+						></span>
+						{live ? m.logs_live() : m.logs_paused()}
+					</button>
+				</div>
+				<div class="dropdown dropdown-end">
+					<button
+						type="button"
+						tabindex="0"
+						class="flex h-8 w-8 items-center justify-center rounded-md text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content"
+						aria-label={m.logs_more_actions()}
+					>
+						<Icon icon="tabler:dots" class="h-5 w-5" />
+					</button>
+					<div
+						tabindex="-1"
+						class="dropdown-content z-10 mt-1 w-60 space-y-1 rounded-md border border-base-200 bg-base-100 p-1 text-sm shadow-lg"
+					>
+						<label class="flex h-9 items-center gap-2 rounded-md px-3">
+							<span class="flex-1">{m.logs_limit_label()}</span>
+							<input
+								type="number"
+								min="1"
+								max={LOGS_LIMIT_MAX}
+								step="1000"
+								value={logsLimit}
+								onchange={(e) => applyLimit(e.currentTarget.valueAsNumber)}
+								class="no-spinner w-16 rounded border border-base-300 bg-base-100 px-1.5 py-0.5 text-right tabular-nums outline-none focus:border-primary"
+							/>
+						</label>
+						<button
+							type="button"
+							class="flex h-9 w-full items-center rounded-md px-3 text-left transition-colors hover:bg-base-200"
+							onclick={clearView}
+						>
+							{m.logs_clear_view()}
+						</button>
+					</div>
+				</div>
+			</div>
+		</div>
 		<div class="flex flex-wrap items-center gap-2">
 			<div class="flex items-center gap-1">
 				{#each LEVELS as key (key)}
@@ -319,91 +433,10 @@
 				{/each}
 			</div>
 
-			<div class="tooltip tooltip-bottom" data-tip={m.logs_limit_tooltip()}>
-				<label
-					class="input input-sm flex items-center gap-1.5 border border-base-300 bg-base-100 outline-none focus-within:border-primary"
-				>
-					<Icon icon="tabler:stack-2" class="h-4 w-4 opacity-70" />
-					<span class="opacity-70">{m.logs_limit()}</span>
-					<input
-						type="number"
-						min="1"
-						max={LOGS_LIMIT_MAX}
-						step="1000"
-						value={logsLimit}
-						onchange={(e) => applyLimit(e.currentTarget.valueAsNumber)}
-						class="no-spinner w-12 bg-transparent tabular-nums outline-none"
-						aria-label={m.logs_limit_label()}
-					/>
-				</label>
-			</div>
-
-			{#if !atTop && live}
-				<div class="tooltip tooltip-bottom" data-tip={m.logs_jump_to_latest()}>
-					<button
-						type="button"
-						class="btn btn-sm btn-ghost btn-circle"
-						aria-label={m.logs_jump_to_latest()}
-						onclick={resume}
-					>
-						<Icon icon="tabler:arrow-up" class="h-5 w-5" />
-					</button>
-				</div>
-			{/if}
-			<div class="tooltip tooltip-bottom" data-tip={live ? m.logs_tail_pause() : m.logs_tail_resume()}>
-				<button
-					type="button"
-					class="btn btn-sm btn-ghost btn-circle"
-					aria-label={live ? m.logs_tail_pause() : m.logs_tail_resume()}
-					onclick={() => (live = !live)}
-				>
-					<Icon icon={live ? 'tabler:player-pause' : 'tabler:player-play'} class="h-5 w-5" />
-				</button>
-			</div>
-			<div class="tooltip tooltip-bottom" data-tip={m.logs_clear_view()}>
-				<button
-					type="button"
-					class="btn btn-sm btn-ghost btn-circle"
-					aria-label={m.logs_clear_view()}
-					onclick={clearView}
-				>
-					<Icon icon="tabler:x" class="h-5 w-5" />
-				</button>
-			</div>
-
-			<div class="flex-1"></div>
-
-			<label
-				class="input input-sm flex items-center gap-2 border border-base-300 bg-base-100 outline-none focus-within:border-primary"
-			>
-				<svg
-					class="h-4 w-4 opacity-50"
-					viewBox="0 0 24 24"
-					fill="none"
-					stroke="currentColor"
-					stroke-width="2"
-				>
-					<circle cx="11" cy="11" r="8" />
-					<path d="M21 21l-4.35-4.35" />
-				</svg>
-				<input type="text" placeholder={m.logs_search_placeholder()} bind:value={search} />
-				{#if search}
-					<div class="tooltip tooltip-left" data-tip={m.common_clear_search()}>
-						<button
-							type="button"
-							class="opacity-50 hover:opacity-100"
-							aria-label={m.common_clear_search()}
-							onclick={() => (search = '')}
-						>
-							<Icon icon="tabler:x" class="h-5 w-5" />
-						</button>
-					</div>
-				{/if}
-			</label>
 		</div>
 	</div>
 
-	<div class="flex min-h-0 flex-1 flex-col p-6">
+	<div class="flex min-h-0 flex-1 flex-col px-6 pb-6">
 		{#if filtered.length === 0 && loadError}
 			<StateMessage tone="oops" title={m.logs_load_failed_title()} message={loadError} />
 		{:else if filtered.length === 0 && filtering}
@@ -412,18 +445,17 @@
 			<StateMessage tone="notice" title={m.logs_empty_title()} message={m.logs_empty_message()} />
 		{:else}
 			<div
-				class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-base-300 bg-base-100"
+				class="@container flex min-h-0 flex-1 flex-col overflow-hidden bg-base-100"
 			>
 				<!-- Column headers rendered outside the virtualized scroll area so they
 				     stay visible without a sticky header fighting the spacer math. -->
 				<div
-					class="grid shrink-0 items-center border-b border-base-200 px-3 py-2 text-xs font-semibold uppercase tracking-wide opacity-60"
-					style="grid-template-columns: 5rem 5rem 7rem 18rem minmax(0, 1fr); gap: 0.75rem"
+					class="grid shrink-0 items-center gap-3 border-b border-base-200 px-3 py-2 text-xs font-medium text-base-content/50 {COLUMNS}"
 				>
 					<span>{m.logs_column_level()}</span>
 					<span>{m.logs_column_when()}</span>
-					<span>{m.logs_column_timestamp()}</span>
-					<span>{m.logs_column_target()}</span>
+					<span class="@max-3xl:hidden">{m.logs_column_timestamp()}</span>
+					<span class="@max-3xl:hidden">{m.logs_column_target()}</span>
 					<span>{m.logs_column_message()}</span>
 				</div>
 				<div
@@ -439,23 +471,23 @@
 						{@const tsMs = timestampMs(record)}
 						<button
 							type="button"
-							class="grid w-full items-center border-b border-base-200 px-3 text-left transition-colors hover:bg-base-200 focus:outline-none focus-visible:bg-base-200 {isSelected
+							class="grid w-full items-center gap-3 border-b border-base-200 px-3 text-left transition-colors hover:bg-base-200 focus:outline-none focus-visible:bg-base-200 {COLUMNS} {isSelected
 								? 'bg-base-200'
 								: ''}"
-							style="grid-template-columns: 5rem 5rem 7rem 18rem minmax(0, 1fr); gap: 0.75rem; height: {ROW_HEIGHT}px"
+							style:height="{ROW_HEIGHT}px"
 							onclick={() => (selected = record)}
 						>
-							<span><Badge variant={levelVariant(record.level)}>{levelLabel(record.level)}</Badge></span>
-							<span class="whitespace-nowrap opacity-70" title={formatAbsolute(record.timestamp)}>
+							<span><StatusDot variant={levelVariant(record.level)} label={levelLabel(record.level)} /></span>
+							<span class="whitespace-nowrap opacity-70">
 								{tsMs !== null ? formatRelative(tsMs) : '—'}
 							</span>
-							<span class="whitespace-nowrap font-mono opacity-70">
+							<span class="whitespace-nowrap font-mono opacity-70 @max-3xl:hidden">
 								{formatTs(record.timestamp) || '—'}
 							</span>
-							<span class="truncate font-mono opacity-70">
+							<span class="truncate font-mono opacity-70 @max-3xl:hidden">
 								{record.target}
 							</span>
-							<span class="truncate font-mono" title={record.body}>{record.body}</span>
+							<span class="truncate font-mono">{record.body}</span>
 						</button>
 					{/each}
 					<div style="height: {bottomPad}px"></div>
@@ -465,117 +497,86 @@
 	</div>
 </section>
 
-<svelte:window on:keydown={onKeydown} />
-
 {#if selected}
-	<div
-		class="fixed inset-y-0 right-0 z-40 flex w-full max-w-2xl flex-col border-l border-base-300 bg-base-100 shadow-2xl ring-1 ring-base-content/10"
-		role="dialog"
-		aria-modal="true"
-		aria-label={m.logs_detail_label()}
+	{@const record = selected}
+	<Inspector
+		title={selectedSummary?.task ?? selected.target}
+		label={m.logs_detail_label()}
+		onclose={() => (selected = null)}
 	>
-		<div class="flex items-center justify-between border-b border-base-300 px-4 py-2">
-			<div class="flex items-center gap-2 text-xs">
-				<Badge variant={levelVariant(selected.level)}>{levelLabel(selected.level)}</Badge>
-				{#if selectedSummary?.task_type}
-					<span class="opacity-40">•</span>
-					<span class="font-mono opacity-70">{selectedSummary.task_type}</span>
-				{/if}
-				{#if selectedSummary?.task}
-					<span class="opacity-40">•</span>
-					<span class="font-mono opacity-80">{selectedSummary.task}</span>
-				{:else if !selectedSummary?.task_type}
-					<span class="opacity-40">•</span>
-					<span class="font-mono opacity-80">{selected.target}</span>
-				{/if}
-			</div>
-			<div class="flex items-center gap-1">
-				<CopyButton text={buildClipboard(selected)} label={m.logs_copy_record()} />
-				<div class="tooltip tooltip-left" data-tip={m.common_close()}>
-					<button
-						type="button"
-						class="btn btn-ghost btn-sm btn-circle"
-						aria-label={m.common_close()}
-						onclick={() => (selected = null)}
-					>
-						<Icon icon="tabler:x" class="h-5 w-5" />
-					</button>
-				</div>
-			</div>
-		</div>
-
-		<div class="flex-1 overflow-y-auto">
-			<dl class="grid grid-cols-[6rem_1fr] gap-x-4 gap-y-1 px-4 py-2 text-xs">
-				<dt class="opacity-50">{m.logs_column_timestamp()}</dt>
-				<dd class="font-mono">{formatAbsolute(selected.timestamp)}</dd>
+		{#snippet actions()}
+			<CopyButton text={buildClipboard(record)} label={m.logs_copy_record()} tooltip="bottom" />
+		{/snippet}
+		{#snippet subtitle()}
+			<StatusDot variant={levelVariant(record.level)} label={levelLabel(record.level)} />
+			{#if selectedSummary?.task_type}
+				<span class="truncate">· {selectedSummary.task_type}</span>
+			{/if}
+			{#if selectedDurationMs !== null}
+				<span class="tabular-nums">· {formatDuration(selectedDurationMs)}</span>
+			{/if}
+		{/snippet}
+		<div class="space-y-3">
+			<dl class="grid grid-cols-[max-content_minmax(0,1fr)] gap-x-4 gap-y-1">
+				<dt class="text-base-content/50">{m.logs_column_timestamp()}</dt>
+				<dd class="tabular-nums">{formatAbsolute(selected.timestamp)}</dd>
 				{#if selectedTsMs !== null}
-					<dt class="opacity-50">{m.logs_column_when()}</dt>
+					<dt class="text-base-content/50">{m.logs_column_when()}</dt>
 					<dd>{formatRelative(selectedTsMs)}</dd>
 				{/if}
-				{#if selectedDurationMs !== null}
-					<dt class="opacity-50">{m.logs_detail_duration()}</dt>
-					<dd class="font-mono tabular-nums">{formatDuration(selectedDurationMs)}</dd>
-				{/if}
 				{#if selectedEventId}
-					<dt class="opacity-50">{m.logs_detail_event()}</dt>
-					<dd class="font-mono">{selectedEventId}</dd>
+					<dt class="text-base-content/50">{m.logs_detail_event()}</dt>
+					<dd class="[overflow-wrap:anywhere]">{selectedEventId}</dd>
 				{/if}
 				{#if selectedSummary?.flow}
-					<dt class="opacity-50">{m.logs_detail_flow()}</dt>
-					<dd class="min-w-0">
-						<a
-							href="{base}/flows/{encodePath(selectedSummary.flow)}"
-							class="font-mono text-primary hover:underline"
-						>
+					<dt class="text-base-content/50">{m.logs_detail_flow()}</dt>
+					<dd class="min-w-0 break-words">
+						<a href="{base}/flows/{encodePath(selectedSummary.flow)}" class="text-primary hover:underline">
 							{selectedSummary.flow}
 						</a>
 					</dd>
 				{/if}
-				<dt class="opacity-50">{m.logs_column_target()}</dt>
-				<dd class="font-mono">{selected.target}</dd>
+				<dt class="text-base-content/50">{m.logs_column_target()}</dt>
+				<dd class="[overflow-wrap:anywhere]">{selected.target}</dd>
 			</dl>
-
-			<div class="border-t border-base-300 px-4 py-2">
-				<div class="pb-1 text-xs opacity-50">{m.logs_column_message()}</div>
-				<pre class="max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono text-xs {selected.body
-						? 'opacity-80'
-						: 'opacity-40'}">{selected.body || '—'}</pre>
-			</div>
-
-			{#if selectedExtraSpans.length > 0}
-				<div class="border-t border-base-300 px-4 py-2">
-					<div class="pb-1 text-xs opacity-50">{m.logs_detail_spans()}</div>
-					<ul class="space-y-1 text-xs">
-						{#each selectedExtraSpans as span (span.name)}
-							<li>
-								<div class="font-mono font-semibold">{span.name}</div>
-								<dl class="ml-4 mt-0.5 grid grid-cols-[10rem_minmax(0,1fr)] gap-x-4 gap-y-0.5">
-									{#each span.fields as f (f.key)}
-										<dt class="truncate font-mono opacity-70" title={f.key}>{f.key}</dt>
-										<dd class="min-w-0 font-mono">
-											<pre class="whitespace-pre-wrap break-words">{f.value}</pre>
-										</dd>
-									{/each}
-								</dl>
-							</li>
-						{/each}
-					</ul>
-				</div>
-			{/if}
-
-			{#if selectedExtraFields.length > 0}
-				<div class="border-t border-base-300 px-4 py-2">
-					<div class="pb-1 text-xs opacity-50">{m.logs_detail_attributes()}</div>
-					<dl class="grid grid-cols-[10rem_minmax(0,1fr)] gap-x-4 gap-y-1 text-xs">
-						{#each selectedExtraFields as [key, value] (key)}
-							<dt class="truncate font-mono opacity-70" title={key}>{key}</dt>
-							<dd class="min-w-0">
-								<pre class="max-h-64 overflow-auto whitespace-pre-wrap break-all font-mono opacity-80">{value}</pre>
-							</dd>
-						{/each}
-					</dl>
-				</div>
-			{/if}
 		</div>
-	</div>
+
+		<InspectorSection title={m.logs_column_message()}>
+			<p class="whitespace-pre-wrap break-words {selected.body ? '' : 'text-base-content/40'}">
+				{selected.body || '—'}
+			</p>
+		</InspectorSection>
+
+		{#if selectedExtraSpans.length > 0}
+			<InspectorSection title={m.logs_detail_spans()}>
+				<ul class="space-y-3">
+					{#each selectedExtraSpans as span (span.name)}
+						<li>
+							<div class="font-medium">{span.name}</div>
+							<dl class="mt-1 grid grid-cols-[max-content_minmax(0,1fr)] gap-x-4 gap-y-1">
+								{#each span.fields as f (f.key)}
+									<dt class="text-base-content/50">{f.key}</dt>
+									<dd class="whitespace-pre-wrap [overflow-wrap:anywhere]">{f.value}</dd>
+								{/each}
+							</dl>
+						</li>
+					{/each}
+				</ul>
+			</InspectorSection>
+		{/if}
+
+		{#if selectedExtraFields.length > 0}
+			<InspectorSection title={m.logs_detail_attributes()}>
+				<dl class="grid grid-cols-[max-content_minmax(0,1fr)] gap-x-4 gap-y-1">
+					{#each selectedExtraFields as [key, value] (key)}
+						<dt class="text-base-content/50">{key}</dt>
+						<dd class="max-h-64 overflow-auto whitespace-pre-wrap [overflow-wrap:anywhere]">{value}</dd>
+					{/each}
+				</dl>
+			</InspectorSection>
+		{/if}
+	</Inspector>
 {/if}
+</div>
+
+<svelte:window on:keydown={onKeydown} />

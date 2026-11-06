@@ -242,3 +242,21 @@ http_server:
 #   enabled: true
 #   port: 8081
 
+# How long a stopping flow lets its events in flight finish before its
+# tasks are aborted (default 20s; a flow can set its own).
+# shutdown_timeout: 20s
+
+# Limits on what every ai_completion uses, across all models (optional).
+# ai_budget:
+#   limits:
+#     - scope: workspace
+#       period: month
+#       max_tokens: 50000000
+#     - scope: user
+#       period: day
+#       max_amount: 5
+#   # Price per million prompt (input) and completion (output) tokens,
+#   # which amount limits need.
+#   prices:
+#     model-name: { input: 0.40, output: 2.00 }
+

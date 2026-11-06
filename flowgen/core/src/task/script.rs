@@ -2782,6 +2782,24 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn to_json_writes_json_that_parses_back_for_any_character() {
+        let text = "a\u{a0}b\u{fe0f}c\"d\\e\nf";
+        let (processor, mut rx) =
+            processor_with_resources("#{ json: #{ text: event.data.text }.to_json() }", &[]).await;
+        let handler = processor.init().await.unwrap();
+
+        handler
+            .handle(json_event(json!({ "text": text })))
+            .await
+            .unwrap();
+
+        let output = rx.recv().await.unwrap().data_as_json().unwrap();
+        let written = output["json"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(written).unwrap();
+        assert_eq!(parsed, json!({ "text": text }));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_script_importing_a_missing_module_fails_at_start_and_is_retried() {
         let (processor, _rx) =
             processor_with_resources(r#"import "lib/missing" as m; event"#, &[]).await;

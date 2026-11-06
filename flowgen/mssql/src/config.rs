@@ -5,6 +5,7 @@ use serde::Deserialize;
 
 /// SQL Server connection credentials, loaded from the JSON file at `credentials_path`.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Credentials {
     /// Server hostname.
     pub host: String,
@@ -77,5 +78,14 @@ mod tests {
         let json = r#"{"host": "h", "database": "d", "username": "u", "password": "secret"}"#;
         let credentials: Credentials = serde_json::from_str(json).unwrap();
         assert!(!format!("{credentials:?}").contains("secret"));
+    }
+
+    #[test]
+    fn a_misspelled_credentials_field_is_rejected() {
+        let json = r#"{"host": "h", "database": "d", "username": "u", "password": "p", "trust_cert": true}"#;
+        let error = serde_json::from_str::<Credentials>(json)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown field `trust_cert`"), "{error}");
     }
 }

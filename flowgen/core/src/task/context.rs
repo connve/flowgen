@@ -84,8 +84,10 @@ pub struct TaskContext {
     pub resource_loader: Option<crate::resource::ResourceLoader>,
     /// Optional app-level retry configuration (can be overridden per task).
     pub retry: Option<crate::retry::RetryConfig>,
-    /// Cancellation token for graceful shutdown coordination.
+    /// Stops the task: a source hands back the events it holds.
     pub cancellation_token: tokio_util::sync::CancellationToken,
+    /// Cancelled first when the flow stops: sources stop reading, held events are sent on.
+    pub stop_reading: tokio_util::sync::CancellationToken,
     /// Number of leaf tasks in this flow's directed acyclic graph.
     ///
     /// Source tasks use this when constructing the completion channel so the
@@ -162,6 +164,8 @@ pub struct TaskContextBuilder {
     retry: Option<crate::retry::RetryConfig>,
     /// Cancellation token for graceful shutdown coordination.
     cancellation_token: Option<tokio_util::sync::CancellationToken>,
+    /// Token that stops sources reading.
+    stop_reading: Option<tokio_util::sync::CancellationToken>,
     /// Number of leaf tasks in the flow. Defaults to one when not set.
     leaf_count: Option<usize>,
     /// Shared client registry for connection pooling.
@@ -267,6 +271,12 @@ impl TaskContextBuilder {
         self
     }
 
+    /// Sets the token that stops sources reading; defaults to a child of the cancellation token.
+    pub fn stop_reading(mut self, stop_reading: tokio_util::sync::CancellationToken) -> Self {
+        self.stop_reading = Some(stop_reading);
+        self
+    }
+
     /// Sets the number of leaf tasks in the flow's directed acyclic graph.
     ///
     /// The flow builder computes this from the wired task topology and passes
@@ -306,6 +316,10 @@ impl TaskContextBuilder {
     /// # Errors
     /// Returns `Error::MissingBuilderAttribute` if required fields are not set.
     pub fn build(self) -> Result<TaskContext, Error> {
+        let cancellation_token = match self.cancellation_token {
+            Some(token) => token,
+            None => tokio_util::sync::CancellationToken::new(),
+        };
         Ok(TaskContext {
             flow: FlowOptions {
                 name: self
@@ -323,10 +337,11 @@ impl TaskContextBuilder {
             response_registry: self.response_registry,
             resource_loader: self.resource_loader,
             retry: self.retry,
-            cancellation_token: match self.cancellation_token {
+            stop_reading: match self.stop_reading {
                 Some(token) => token,
-                None => tokio_util::sync::CancellationToken::new(),
+                None => cancellation_token.child_token(),
             },
+            cancellation_token,
             leaf_count: self.leaf_count.unwrap_or(1),
             max_in_flight: crate::task::runner::max_in_flight(true),
             handles_failed: false,

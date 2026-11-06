@@ -9,9 +9,9 @@
 	import { apiUrl, errorMessage, failure } from '$lib/api';
 	import { m } from '$lib/paraglide/messages.js';
 	import { pageTitle } from '$lib/pageTitle';
-	import PaneResizer from '$lib/PaneResizer.svelte';
-	import { PaneWidth } from '$lib/paneWidth.svelte';
-	import { isMobile, PANE_OVER_PAGE } from '$lib/mobile';
+	import FolderTree from '$lib/FolderTree.svelte';
+	import SidePane from '$lib/SidePane.svelte';
+	import { isMobile } from '$lib/mobile';
 	import { formatRelative } from '$lib/time';
 	import CopyButton from '$lib/CopyButton.svelte';
 	import {
@@ -22,21 +22,23 @@
 		updateConversation,
 		deleteConversation,
 		type ConversationMessage,
-		type ConversationSummary
+		type ConversationSummary,
+		type ToolStep
 	} from '$lib/conversations';
 	import { agentConversations } from '$lib/agentConversations.svelte';
 	import { connectorByName, connectorFor } from '$lib/connectors';
-	import { buildTree, type TreeNode } from '$lib/tree';
+	import { buildTree } from '$lib/tree';
 	import { encodePath, type AgentTool } from '$lib/api';
-	import { SvelteSet } from 'svelte/reactivity';
+	import { scale } from 'svelte/transition';
+	import Inspector from '$lib/Inspector.svelte';
+	import InspectorSection from '$lib/InspectorSection.svelte';
+	import StatusDot from '$lib/StatusDot.svelte';
 	import {
 		formatDuration,
 		releaseToolRuns,
 		savedRun,
 		toolRun,
-		watchToolRuns,
-		type RunTask,
-		type ToolRun
+		watchToolRuns
 	} from '$lib/toolRuns.svelte';
 	import type { ActivityLevel } from '$lib/logRecord';
 
@@ -168,7 +170,6 @@
 	let conversations = $derived(agentConversations.list);
 	let activeId = $derived(page.params.id ?? null);
 	let historyPaneOpen = $state(true);
-	const paneWidth = new PaneWidth('agents');
 	// Id we've already loaded messages for, so the load effect doesn't refetch
 	// on unrelated state changes or clobber a chat we just minted an id for.
 	let loadedId = $state<string | null>(null);
@@ -196,6 +197,11 @@
 		)
 	);
 	let folders = $derived([...new Set(conversations.flatMap((c) => (c.folder ? [c.folder] : [])))].sort());
+
+	$effect(() => {
+		const folder = selectedFolder;
+		if (folder !== null && !conversations.some((c) => inFolder(c, folder))) selectedFolder = null;
+	});
 
 	function inFolder(c: ConversationSummary, folder: string | null): boolean {
 		if (folder === null) return true;
@@ -236,6 +242,7 @@
 			return;
 		}
 		untrack(() => stopFollowing());
+		inspected = null;
 		if (id === null) {
 			messages = [];
 			error = null;
@@ -294,7 +301,6 @@
 		input = '';
 		recalled = null;
 		if (textareaEl) textareaEl.style.height = 'auto';
-		multiline = false;
 	}
 
 	// On mobile the pane covers the chat, so it closes once a conversation is picked.
@@ -304,11 +310,13 @@
 
 	function openConversation(id: string) {
 		closePaneOnMobile();
+		inspected = null;
 		goto(`${base}/agents/${id}`);
 	}
 
 	function newConversation() {
 		closePaneOnMobile();
+		inspected = null;
 		goto(`${base}/agents`);
 	}
 
@@ -375,10 +383,17 @@
 
 	// The history row whose ⋮ menu is open, placed under its button. Fixed, so
 	// the scrolling list doesn't clip it.
-	let rowMenu = $state<{ c: ConversationSummary; top: number; right: number } | null>(null);
+	let rowMenu = $state<{
+		c: ConversationSummary;
+		top: number;
+		right: number;
+		inHeader: boolean;
+		/** Opened from the keyboard, so the first item takes focus. */
+		keyboard: boolean;
+	} | null>(null);
 	let rowMenuTrigger: HTMLElement | null = null;
 
-	function openRowMenu(event: MouseEvent, c: ConversationSummary) {
+	function openRowMenu(event: MouseEvent, c: ConversationSummary, inHeader = false) {
 		event.stopPropagation();
 		if (rowMenu?.c.id === c.id) {
 			rowMenu = null;
@@ -389,7 +404,7 @@
 		const menuHeight = 168;
 		const top =
 			rect.bottom + 4 + menuHeight > window.innerHeight ? rect.top - 4 - menuHeight : rect.bottom + 4;
-		rowMenu = { c, top, right: window.innerWidth - rect.right };
+		rowMenu = { c, top, right: window.innerWidth - rect.right, inHeader, keyboard: event.detail === 0 };
 	}
 
 	function closeRowMenu() {
@@ -397,14 +412,16 @@
 		rowMenuTrigger?.focus();
 	}
 
-	function rowAction(action: (c: ConversationSummary) => void) {
-		const c = rowMenu?.c;
+	function rowAction(action: (c: ConversationSummary, inHeader: boolean) => void) {
+		const menu = rowMenu;
 		closeRowMenu();
-		if (c) action(c);
+		if (menu) action(menu.c, menu.inHeader);
 	}
 
 	function focusFirstItem(node: HTMLElement) {
-		if (rowMenu) node.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
+		if (!rowMenu) return;
+		const target = rowMenu.keyboard ? node.querySelector<HTMLElement>('[role="menuitem"]') : node;
+		target?.focus();
 	}
 
 	function onRowMenuKeydown(event: KeyboardEvent) {
@@ -417,7 +434,7 @@
 				break;
 			case 'ArrowUp':
 				event.preventDefault();
-				items[(at - 1 + items.length) % items.length]?.focus();
+				items[at <= 0 ? items.length - 1 : at - 1]?.focus();
 				break;
 			case 'Escape':
 			case 'Tab':
@@ -467,6 +484,25 @@
 	// connectors shown as its icons.
 	let tools = $state<Record<string, AgentTool>>({});
 
+	/** A message's tools in the inspector: the list, or one step's details. */
+	let inspected = $state<{ msg: number; step: number | null } | null>(null);
+	let inspectedMessage = $derived(inspected ? (messages[inspected.msg] ?? null) : null);
+	let inspectedSteps = $derived(inspectedMessage?.steps ?? []);
+	let inspectedStep = $derived.by(() => {
+		if (inspected?.step == null) return null;
+		const step = inspectedSteps[inspected.step];
+		if (!step) return null;
+		return { step, live: isLiveStep(inspectedMessage, inspected.step) };
+	});
+
+	function isLiveStep(msg: ChatMessage | null, index: number): boolean {
+		return msg?.pending === true && index === (msg.steps?.length ?? 0) - 1;
+	}
+
+	function failedSteps(steps: ToolStep[]): number {
+		return steps.filter((s) => (savedRun(s) ?? (tools[s.name] ? toolRun(s.run) : null))?.failed).length;
+	}
+
 	async function loadTools() {
 		try {
 			const res = await fetch(apiUrl('api/agents/tools'));
@@ -507,16 +543,6 @@
 		return () => clearInterval(timer);
 	});
 
-	// Runs whose quick steps are shown too.
-	const allTasks = new SvelteSet<string>();
-
-	// Runs of more than 5 tasks fold the quick ones (under 20ms, no warning)
-	// into one line.
-	function visibleTasks(run: ToolRun, all: boolean): { shown: RunTask[]; hidden: number } {
-		if (all || run.tasks.length <= 5) return { shown: run.tasks, hidden: 0 };
-		const shown = run.tasks.filter((t) => t.level !== 'info' || t.duration_ms >= 20);
-		return { shown, hidden: run.tasks.length - shown.length };
-	}
 
 	function levelText(level: ActivityLevel): string {
 		switch (level) {
@@ -526,28 +552,6 @@
 				return 'text-attention';
 			default:
 				return 'text-base-content/80';
-		}
-	}
-
-	function levelMark(level: ActivityLevel): string {
-		switch (level) {
-			case 'error':
-				return 'text-error';
-			case 'warn':
-				return 'text-attention';
-			default:
-				return 'text-primary';
-		}
-	}
-
-	function levelIcon(level: ActivityLevel): string {
-		switch (level) {
-			case 'error':
-				return 'tabler:x';
-			case 'warn':
-				return 'tabler:exclamation-mark';
-			default:
-				return 'tabler:check';
 		}
 	}
 
@@ -724,6 +728,8 @@
 	function onWindowKeydown(event: KeyboardEvent) {
 		if (event.key === 'Escape' && rowMenu) {
 			rowMenu = null;
+		} else if (event.key === 'Escape' && inspected && !event.defaultPrevented) {
+			inspected = null;
 		} else if (event.key === 'Escape' && sending) {
 			event.preventDefault();
 			stopGenerating();
@@ -731,15 +737,11 @@
 	}
 
 	let textareaEl = $state<HTMLTextAreaElement | null>(null);
-	// True once the input wraps past one line — used to drop the send button to
-	// the bottom (centred looks off next to a tall box).
-	let multiline = $state(false);
 
 	// Grow the textarea with its content up to the CSS max-height, then scroll.
 	function autoGrow(el: HTMLTextAreaElement) {
 		el.style.height = 'auto';
 		el.style.height = `${el.scrollHeight}px`;
-		multiline = el.scrollHeight > 44;
 	}
 
 	function onInput(e: Event) {
@@ -768,127 +770,37 @@
 {/snippet}
 
 <section class="relative flex h-[calc(100vh-4rem)] min-w-0 overflow-hidden">
-	{#if historyPaneOpen}
-		<div class="absolute inset-0 z-20 bg-black/30 md:hidden" aria-hidden="true" onclick={closePaneOnMobile}></div>
-	{/if}
-	<!-- History pane, mirroring the folders pane in Resources 1:1. -->
-	<aside
-		class="relative flex shrink-0 flex-col border-r border-base-300 bg-base-100 {paneWidth.dragging
-			? ''
-			: 'transition-[width] duration-200 ease-out'} {historyPaneOpen ? PANE_OVER_PAGE : 'w-16'}"
-		style:width={historyPaneOpen ? `${paneWidth.width}px` : undefined}
+	<SidePane
+		open={historyPaneOpen}
+		title={m.agents_conversations()}
+		collapseLabel={m.agents_history_collapse()}
+		expandLabel={m.agents_history_expand()}
+		ontoggle={toggleHistoryPane}
+		onclose={closePaneOnMobile}
 	>
-		{#if historyPaneOpen}
-			<PaneResizer pane={paneWidth} />
-		{/if}
-		{#if !historyPaneOpen}
-			<div class="flex flex-1 flex-col items-center gap-1 py-2">
-				<div class="tooltip tooltip-right" data-tip={m.common_new()}>
-					<button
-						type="button"
-						aria-label={m.agents_new_conversation()}
-						class="flex h-10 w-10 items-center justify-center rounded-md bg-primary text-primary-content transition-colors hover:bg-primary/90 disabled:opacity-50"
-						onclick={newConversation}
-						disabled={sending}
-					>
-						<Icon icon="tabler:plus" class="h-5 w-5 shrink-0" />
-					</button>
-				</div>
-				<div class="tooltip tooltip-right" data-tip={m.agents_conversations()}>
-					<button
-						type="button"
-						aria-label={m.agents_history_expand()}
-						class="relative flex h-10 w-10 items-center justify-center rounded-md bg-base-200 text-primary transition-colors hover:bg-base-200"
-						onclick={toggleHistoryPane}
-					>
-						<span class="absolute -left-1 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r bg-primary"></span>
-						<Icon icon="tabler:message-2" class="h-5 w-5 shrink-0" />
-					</button>
-				</div>
-			</div>
-		{:else}
-			<div class="flex min-h-0 flex-1 flex-col px-3 py-2">
-				<!-- Pinned header: New + root stay put; only the list below scrolls. -->
-				<button
-					type="button"
-					class="btn btn-sm btn-primary w-full shrink-0 justify-start gap-1.5"
-					onclick={newConversation}
-					disabled={sending}
-				>
-					<Icon icon="tabler:plus" class="h-4 w-4" />
-					{m.common_new()}
-				</button>
-				<button
-					type="button"
-					class="relative mt-2 flex w-full items-center gap-1.5 h-10 shrink-0 rounded-md px-2 text-left text-sm transition-colors {selectedFolder ===
-					null
-						? 'bg-base-200 font-medium text-primary'
-						: 'hover:bg-base-200'}"
-					onclick={() => (selectedFolder = null)}
-				>
-					{#if selectedFolder === null}
-						<span class="absolute -left-1 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r bg-primary"></span>
-					{/if}
-					<Icon icon="tabler:message-2" class="h-5 w-5 shrink-0 opacity-70" />
-					<span>{m.agents_all_conversations()}</span>
-				</button>
+			<div class="flex min-h-0 flex-1 flex-col px-3 pb-3">
+				<!-- Folders stay put; only the list below scrolls. -->
 				{#if folderTree.length > 0}
-					<ul class="mt-0.5 shrink-0 space-y-0.5 text-sm">
-						{#snippet folderNodes(nodes: TreeNode<ConversationSummary>[])}
-							{#each nodes.filter((node) => node.isFolder) as node (node.fullPath)}
-								{@const isOpen = expandedFolders.has(node.fullPath)}
-								{@const isSelected = selectedFolder === node.fullPath}
-								{@const canExpand = (node.children ?? []).some((child) => child.isFolder)}
-								<li>
-									<div class="flex items-center gap-0.5">
-										{#if canExpand}
-											<button
-												type="button"
-												class="flex h-6 w-6 shrink-0 items-center justify-center rounded hover:bg-base-200"
-												aria-label={isOpen ? m.resources_collapse_folder() : m.resources_expand_folder()}
-												onclick={() => toggleFolder(node.fullPath)}
-											>
-												<Icon
-													icon={isOpen ? 'tabler:chevron-down' : 'tabler:chevron-right'}
-													class="h-3.5 w-3.5 opacity-70"
-												/>
-											</button>
-										{:else}
-											<span class="h-6 w-6 shrink-0"></span>
-										{/if}
-										<button
-											type="button"
-											class="relative flex h-9 flex-1 items-center gap-1.5 rounded-md px-2 text-left transition-colors {isSelected
-												? 'bg-base-200 font-medium text-primary'
-												: 'hover:bg-base-200'}"
-											style="padding-left: {node.depth * 0.75 + 0.375}rem"
-											onclick={() => (selectedFolder = node.fullPath)}
-										>
-											{#if isSelected}
-												<span class="absolute -left-1 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r bg-primary"></span>
-											{/if}
-											<Icon
-												icon={isOpen && canExpand ? 'tabler:folder-open' : 'tabler:folder'}
-												class="h-5 w-5 shrink-0 opacity-70"
-											/>
-											<span class="truncate">{node.name}</span>
-											{@render unreadCount(unreadIn(node.fullPath))}
-										</button>
-									</div>
-									{#if isOpen && canExpand && node.children}
-										<ul class="space-y-0.5">
-											{@render folderNodes(node.children)}
-										</ul>
-									{/if}
-								</li>
-							{/each}
-						{/snippet}
-						{@render folderNodes(folderTree)}
-					</ul>
-					<div class="my-1 shrink-0 border-t border-base-200"></div>
+					<div class="mb-3 shrink-0">
+						<FolderTree
+							tree={folderTree}
+							selected={selectedFolder}
+							expanded={expandedFolders}
+							allLabel={m.agents_all_conversations()}
+							allIcon="tabler:message-2"
+							expandLabel={() => m.resources_expand_folder()}
+							collapseLabel={() => m.resources_collapse_folder()}
+							onselect={(folder) => (selectedFolder = folder)}
+							ontoggle={toggleFolder}
+						>
+							{#snippet trailing(node)}
+								{@render unreadCount(unreadIn(node.fullPath))}
+							{/snippet}
+						</FolderTree>
+					</div>
 				{/if}
 				<ul
-					class="mt-1 min-h-0 flex-1 space-y-0.5 overflow-y-auto text-sm"
+					class="min-h-0 flex-1 space-y-px overflow-y-auto text-sm"
 					onscroll={() => (rowMenu = null)}
 				>
 					{#each filteredConversations as c (c.id)}
@@ -912,101 +824,68 @@
 							{:else}
 							<button
 								type="button"
-								class="relative flex w-full flex-col gap-0.5 rounded-md py-2 pl-2 pr-10 text-left transition-colors {activeId ===
+								class="relative flex h-9 w-full items-center gap-2 rounded-md pl-7 pr-2 text-left transition-colors {activeId ===
 								c.id
-									? 'bg-base-200 font-medium text-primary'
-									: 'hover:bg-base-200'}"
+									? 'bg-base-200 font-medium'
+									: 'hover:bg-base-200/60'}"
 								onclick={() => openConversation(c.id)}
 							>
-								{#if activeId === c.id}
+								{#if c.unread}
 									<span
-										class="absolute -left-1 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r bg-primary"
+										class="absolute left-2.5 top-1/2 h-2 w-2 -translate-y-1/2 rounded-full bg-primary"
+										role="img"
+										aria-label={m.agents_conversation_unread()}
 									></span>
 								{/if}
-								<span class="flex w-full items-center gap-1.5">
-									{#if c.unread}
-										<span
-											class="h-2 w-2 shrink-0 rounded-full bg-primary"
-											role="img"
-											aria-label={m.agents_conversation_unread()}
-										></span>
-									{/if}
-									<span class="block min-w-0 flex-1 truncate {c.unread ? 'font-semibold' : ''}"
-										>{c.title}</span
-									>
-								</span>
-								<span class="text-xs opacity-50">{formatRelative(c.updatedAt)}</span>
+								<span class="min-w-0 flex-1 truncate {c.unread ? 'font-semibold' : ''}">{c.title}</span>
+								<span
+									class="shrink-0 text-xs font-normal tabular-nums text-base-content/40 {rowMenu?.c.id === c.id
+										? 'invisible'
+										: 'group-focus-within:invisible group-hover:invisible'}">{formatRelative(c.updatedAt)}</span
+								>
 							</button>
 							<div
 								class="absolute right-1 top-1/2 -translate-y-1/2 transition-opacity {rowMenu?.c.id === c.id
 									? 'opacity-100'
 									: 'opacity-0 group-focus-within:opacity-100 group-hover:opacity-100'}"
 							>
-								<div class="tooltip tooltip-left" data-tip={m.agents_conversation_actions()}>
-									<button
-										type="button"
-										class="btn btn-sm btn-ghost btn-circle"
-										aria-label={m.agents_conversation_actions()}
-										aria-haspopup="menu"
-										aria-expanded={rowMenu?.c.id === c.id}
-										onclick={(e) => openRowMenu(e, c)}
-									>
-										<Icon icon="tabler:dots-vertical" class="h-5 w-5" />
-									</button>
-								</div>
+								<button
+									type="button"
+									class="flex h-7 w-7 items-center justify-center rounded-md text-base-content/60 transition-colors hover:bg-base-300/60 hover:text-base-content"
+									aria-label={m.agents_conversation_actions()}
+									aria-haspopup="menu"
+									aria-expanded={rowMenu?.c.id === c.id}
+									onclick={(e) => openRowMenu(e, c)}
+								>
+									<Icon icon="tabler:dots" class="h-4 w-4" />
+								</button>
 							</div>
 							{/if}
 						</li>
 					{/each}
 				</ul>
 			</div>
-		{/if}
-		<div
-			class="flex h-12 shrink-0 items-center border-t border-base-200 {historyPaneOpen
-				? 'justify-end px-3'
-				: 'justify-center'}"
-		>
-			<div
-				class="tooltip {historyPaneOpen ? 'tooltip-top' : 'tooltip-right'}"
-				data-tip={historyPaneOpen ? m.agents_history_collapse() : m.agents_history_expand()}
-			>
-				<button
-					type="button"
-					aria-label={historyPaneOpen ? m.agents_history_collapse() : m.agents_history_expand()}
-					class="flex h-10 w-10 items-center justify-center rounded-md text-base-content/70 transition-colors hover:bg-base-200 hover:text-base-content"
-					onclick={toggleHistoryPane}
-				>
-					<Icon
-						icon={historyPaneOpen ? 'tabler:chevron-left' : 'tabler:chevron-right'}
-						class="h-5 w-5"
-					/>
-				</button>
-			</div>
-		</div>
-	</aside>
+	</SidePane>
 
 	<div class="relative flex min-w-0 flex-1 flex-col overflow-hidden">
-	<div
-		class="flex shrink-0 items-center gap-2 border-b border-base-200 bg-base-100 px-6 pb-4 pt-6 max-md:flex-wrap max-md:px-4 max-md:pt-4"
-	>
-		<div class="min-w-0 flex-1 max-md:basis-full">
-			<div class="flex min-h-8 items-center gap-1.5 text-sm">
-				<a href="{base}/agents" class="shrink-0 text-primary hover:underline">{m.agents_breadcrumb()}</a>
-				{#each (activeSummary?.folder ?? '').split('/').filter(Boolean) as segment, i (i)}
-					{@const path = activeSummary?.folder?.split('/').slice(0, i + 1).join('/') ?? null}
-					<span class="shrink-0 opacity-40">/</span>
-					<button
-						type="button"
-						class="shrink-0 font-mono text-primary hover:underline"
-						onclick={() => (selectedFolder = path)}>{segment}</button
-					>
-				{/each}
-			</div>
+	<div class="flex min-h-8 shrink-0 items-center gap-2 bg-base-100 px-6 pb-4 pt-6">
+		<div class="min-w-0 flex-1">
+			{#if activeSummary?.folder}
+				<div class="flex items-center gap-1 text-xs text-base-content/50">
+					{#each activeSummary.folder.split('/').filter(Boolean) as segment, i (i)}
+						{@const path = activeSummary.folder.split('/').slice(0, i + 1).join('/')}
+						{#if i > 0}<span class="opacity-60">/</span>{/if}
+						<button type="button" class="hover:text-base-content" onclick={() => (selectedFolder = path)}
+							>{segment}</button
+						>
+					{/each}
+				</div>
+			{/if}
 			{#if activeSummary && renaming === activeSummary.id && renameInHeader}
 				{@const id = activeSummary.id}
 				<input
 					type="text"
-					class="input input-sm mt-1 w-full max-w-xl border border-primary bg-base-100 text-lg font-medium outline-none"
+					class="input input-sm w-full max-w-xl border border-primary bg-base-100 text-[0.9375rem] font-semibold outline-none"
 					aria-label={m.agents_conversation_rename()}
 					bind:value={renameTitle}
 					use:focusSelect
@@ -1020,57 +899,49 @@
 					onblur={() => saveRename(id)}
 				/>
 			{:else}
-				<h1 class="mt-1 truncate text-lg font-medium">{activeTitle}</h1>
+				<h1 class="truncate text-[0.9375rem] font-semibold">{activeTitle}</h1>
 			{/if}
 		</div>
 
-		<div class="flex shrink-0 items-center gap-2">
-			{#if activeSummary}
-				{@const c = activeSummary}
-				<div class="flex shrink-0 items-center">
-					{@render headerAction('tabler:folder', m.agents_conversation_move(), () => startMove(c))}
-					{@render headerAction('tabler:pencil', m.agents_conversation_rename(), () =>
-						startRename(c, true)
-					)}
-					{@render headerAction('tabler:mail', m.agents_conversation_mark_unread(), () =>
-						markUnread(c.id)
-					)}
-					{@render headerAction('tabler:trash', m.common_delete(), () => (pendingDelete = c), true)}
-				</div>
-			{/if}
-
-			{@render agentPicker()}
-		</div>
-	</div>
-
-	{#snippet headerAction(icon: string, label: string, onclick: () => void, danger = false)}
-		<div class="tooltip tooltip-bottom" data-tip={label}>
+		{#if activeSummary}
+			{@const c = activeSummary}
 			<button
 				type="button"
-				class="btn btn-ghost btn-circle btn-sm {danger ? 'text-error' : ''}"
-				aria-label={label}
-				{onclick}
+				class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content"
+				aria-label={m.agents_conversation_actions()}
+				aria-haspopup="menu"
+				aria-expanded={rowMenu?.c.id === c.id}
+				onclick={(e) => openRowMenu(e, c, true)}
 			>
-				<Icon {icon} class="h-5 w-5" />
+				<Icon icon="tabler:dots" class="h-5 w-5" />
 			</button>
-		</div>
-	{/snippet}
+		{/if}
+		<button
+			type="button"
+			class="btn btn-primary btn-sm shrink-0 gap-1.5"
+			onclick={newConversation}
+			disabled={sending}
+		>
+			<Icon icon="tabler:plus" class="h-4 w-4" />
+			{m.common_new()}
+		</button>
+	</div>
 
 	{#snippet agentPicker()}
-		<div class="dropdown dropdown-end shrink-0">
+		<div class="dropdown dropdown-top dropdown-start shrink-0">
 			<button
 				type="button"
 				tabindex="0"
-				class="btn btn-sm border border-base-300 bg-base-100 font-normal hover:bg-base-200 focus-visible:outline-primary"
+				class="btn btn-sm gap-1.5 rounded-full border border-base-300 bg-base-100 px-3 font-medium text-base-content shadow-none hover:bg-base-200 focus-visible:outline-primary"
 				disabled={models.length === 0}
 			>
-				<Icon icon="tabler:brain" class="h-4 w-4 opacity-70" />
+				<Icon icon="tabler:sparkles" class="h-4 w-4 text-primary" />
 				<span>{model ? modelLabel(model) : m.agents_model_picker()}</span>
 				<Icon icon="tabler:chevron-down" class="h-3.5 w-3.5 opacity-60" />
 			</button>
 			<div
 				tabindex="-1"
-				class="dropdown-content z-10 mt-1 max-h-80 w-80 overflow-auto rounded-md border border-base-200 bg-base-100 p-1 shadow-lg"
+				class="dropdown-content z-10 mb-2 max-h-80 w-80 overflow-auto rounded-xl border border-base-200 bg-base-100 p-1 shadow-lg"
 			>
 				{#each proxyGroups as group (group.proxy)}
 					{@const single = group.models.length === 1}
@@ -1135,13 +1006,11 @@
 
 	{#snippet composer()}
 		<div
-			class="flex gap-2 rounded-2xl border border-base-300 bg-base-100 py-1.5 pl-2 pr-1.5 shadow-sm transition-colors focus-within:border-primary {multiline
-				? 'items-end'
-				: 'items-center'}"
+			class="flex flex-col rounded-3xl border border-base-300 bg-base-100 px-2 pb-1.5 pt-1 shadow-sm transition-colors focus-within:border-base-content/30"
 		>
 			<textarea
 				bind:this={textareaEl}
-				class="max-h-48 min-h-[2.5rem] flex-1 resize-none bg-transparent px-2 py-2 text-[0.9375rem] leading-6 outline-none placeholder:text-base-content/40"
+				class="max-h-48 min-h-[2.5rem] w-full resize-none bg-transparent px-2.5 py-2 text-[0.9375rem] leading-6 outline-none placeholder:text-base-content/40"
 				rows="1"
 				placeholder={m.agents_composer_placeholder()}
 				bind:value={input}
@@ -1149,6 +1018,8 @@
 				oninput={onInput}
 				disabled={sending || !model}
 			></textarea>
+			<div class="flex items-center justify-between gap-2">
+			{@render agentPicker()}
 			{#if sending}
 				<!-- While a turn streams, the send button becomes Stop (also Esc). -->
 				<div class="tooltip tooltip-top shrink-0" data-tip={m.agents_stop_tooltip()}>
@@ -1165,15 +1036,16 @@
 				<div class="tooltip tooltip-top shrink-0" data-tip={m.agents_send()}>
 					<button
 						type="button"
-						class="btn btn-ghost btn-sm btn-circle text-primary"
+						class="btn btn-primary btn-sm btn-circle disabled:bg-base-200 disabled:text-base-content/30"
 						onclick={send}
 						disabled={!model || input.trim().length === 0}
 						aria-label={m.agents_send()}
 					>
-						<Icon icon="tabler:arrow-up" class="h-5 w-5" />
+						<Icon icon="tabler:arrow-up" class="h-4 w-4" />
 					</button>
 				</div>
 			{/if}
+			</div>
 		</div>
 	{/snippet}
 
@@ -1226,7 +1098,7 @@
 			bind:this={scroller}
 			class="min-h-0 flex-1 overflow-y-auto px-6 pb-10 pt-6 [mask-image:linear-gradient(to_bottom,transparent,black_1.5rem,black_calc(100%-2.5rem),transparent)]"
 		>
-			<div class="mx-auto flex max-w-4xl flex-col gap-5">
+			<div class="mx-auto flex max-w-3xl flex-col gap-8">
 				{#each messages as msg, i (i)}
 					{@const streaming = msg.role === 'assistant' && msg.pending === true}
 					{@const steps = msg.steps ?? []}
@@ -1244,16 +1116,18 @@
 							</span>
 						{:else if msg.role === 'user'}
 							<div
-								class="max-w-[85%] whitespace-pre-wrap rounded-2xl bg-primary px-4 py-2.5 text-sm text-primary-content shadow-sm"
+								class="max-w-[80%] whitespace-pre-wrap rounded-3xl bg-base-200 px-4 py-2.5 text-[0.9375rem] leading-relaxed text-base-content"
 							>
 								{msg.content}
 							</div>
 						{:else}
-							<div
-								class="chat-markdown prose prose-sm max-w-[85%] min-w-0 rounded-2xl border border-base-200 bg-base-100/60 px-4 py-2.5 text-sm text-base-content shadow-sm"
-							>
-								<!-- eslint-disable-next-line svelte/no-at-html-tags -->
-								{@html renderMarkdown(msg.content)}
+							<div class="flex w-full min-w-0 flex-col gap-3">
+								<div
+									class="chat-markdown prose max-w-none text-[0.9375rem] leading-relaxed text-base-content"
+								>
+									<!-- eslint-disable-next-line svelte/no-at-html-tags -->
+									{@html renderMarkdown(msg.content)}
+								</div>
 								{#if msg.stopped}
 									<p class="not-prose mt-2 flex items-center gap-1.5 text-xs text-base-content/50">
 										<Icon icon="tabler:player-stop" class="h-3.5 w-3.5 shrink-0" />
@@ -1268,189 +1142,61 @@
 										<span>{msg.error}</span>
 									</p>
 								{/if}
-								{#if steps.length > 0}
-									<!-- Tool calls as status lines: `✱ <name>`, expandable to
-									     its arguments. The last one shimmers while streaming. -->
-									<div class="chat-tools mt-3 space-y-0.5 border-t border-base-200 pt-2 text-xs">
-										{#each steps as step, si (si)}
-											{@const live = streaming && si === steps.length - 1}
-											{@const tool = tools[step.name]}
-											{@const reached = tool?.connectors ?? []}
-											{@const run = savedRun(step) ?? (tool ? toolRun(step.run) : null)}
-											<details class="chat-step">
-												<summary
-													class="chat-status -mx-1 flex cursor-pointer list-none items-center gap-2 rounded px-1 py-0.5 font-mono outline-none focus-visible:outline-2 focus-visible:outline-primary {live
-														? ''
-														: 'text-base-content/50 hover:text-base-content/80'}"
-												>
-													<Icon
-														icon={tool ? 'tabler:binary-tree' : 'tabler:tool'}
-														mode="mask"
-														class="h-3 w-3 shrink-0 {live ? 'chat-status-pulse' : 'opacity-60'}"
-													/>
-													{#if tool}
-														<span class="tooltip tooltip-top flex min-w-0" data-tip={m.agents_tool_open_flow()}>
-															<a
-																href="{base}/flows/{encodePath(tool.flow)}"
-																class="[overflow-wrap:anywhere] hover:underline {live ? 'chat-status-live' : ''}"
-																>{step.name}{live ? '…' : ''}</a
-															>
-														</span>
-													{:else}
-														<span class="min-w-0 [overflow-wrap:anywhere] {live ? 'chat-status-live' : ''}"
-															>{step.name || m.agents_tool_step_fallback()}{live ? '…' : ''}</span
-														>
-													{/if}
-													{#if reached.length > 0}
-														<span
-															class="ml-1 flex shrink-0 items-center gap-1 {run ? 'chat-step-connectors' : ''}"
-														>
-															{#each reached.slice(0, 3) as name (name)}
-																{@const connector = connectorByName(name)}
-																<span class="tooltip tooltip-top" data-tip={connector.label}>
-																	<img src={connector.iconUrl} alt={connector.label} class="h-3.5 w-3.5" />
-																</span>
-															{/each}
-															{#if reached.length > 3}
-																<span class="font-sans text-[10px] text-base-content/50"
-																	>{m.agents_tool_more_connectors({ count: reached.length - 3 })}</span
-																>
-															{/if}
-														</span>
-													{/if}
-													{#if run && live}
-														<span
-															class="ml-auto flex min-w-0 shrink items-center gap-2 font-sans text-[11px] tabular-nums text-base-content/50"
-														>
-															<span class="truncate">{run.last}</span>
-															<span class="shrink-0">{formatDuration(now - run.started_ms)}</span>
-														</span>
-													{:else if run}
-														{@const level = run.failed ? 'error' : run.warned ? 'warn' : 'info'}
-														<span
-															class="ml-auto flex shrink-0 items-center gap-1.5 font-sans text-[11px] tabular-nums {run.failed
-																? 'text-error'
-																: run.warned
-																	? 'text-attention'
-																	: 'text-base-content/50'}"
-														>
-															{#if run.failed}
-																<span class="max-sm:hidden">{m.agents_tool_failed_at({ task: run.failed })} ·</span>
-															{/if}
-															<span class="shrink-0">{formatDuration(run.ended_ms - run.started_ms)}</span>
-															<span
-																class="tooltip tooltip-top inline-flex shrink-0"
-																data-tip={run.failed ? m.agents_tool_failed() : m.agents_tool_succeeded()}
-															>
-																<Icon icon={levelIcon(level)} class="h-3.5 w-3.5 {levelMark(level)}" />
-															</span>
-														</span>
-													{/if}
-													{#if step.arguments || reached.length > 3 || run}
-														<Icon
-															icon="tabler:chevron-right"
-															class="chat-step-chevron h-3 w-3 shrink-0 opacity-40"
-														/>
-													{/if}
-												</summary>
-												{#if reached.length > 3 && !run}
-													<div class="mt-1 ml-5 flex flex-wrap gap-x-3 gap-y-1 font-sans text-[11px] text-base-content/60">
-														{#each reached as name (name)}
-															{@const connector = connectorByName(name)}
-															<span class="flex items-center gap-1">
-																<img src={connector.iconUrl} alt="" class="h-3.5 w-3.5" />
-																{connector.label}
-															</span>
-														{/each}
-													</div>
-												{/if}
-												{#if step.arguments}
-													{@const fields = stepFields(step.arguments)}
-													{#if fields}
-														<div class="not-prose mt-1 ml-5 font-sans text-[11px] leading-5">
-															<div class="text-[10px] font-medium uppercase tracking-wide text-base-content/40">
-																{m.agents_tool_input()}
-															</div>
-															<dl class="m-0 grid grid-cols-[max-content_1fr] items-baseline gap-x-3">
-																{#each fields as field, fi (fi)}
-																	<dt class="m-0 font-normal text-base-content/50">{field.label}</dt>
-																	<dd class="m-0 break-words text-base-content/80">{field.value}</dd>
-																{/each}
-															</dl>
-														</div>
-													{:else}
-														<pre
-															class="mt-0.5 ml-5 overflow-x-auto whitespace-pre-wrap break-words rounded bg-base-200/50 px-2 py-1 text-[11px] leading-snug text-base-content/60">{formatStepArgs(
-																step.arguments
-															)}</pre>
-													{/if}
-												{/if}
-												{#if run && step.run}
-													{@const runId = step.run}
-													{@const { shown, hidden } = visibleTasks(run, allTasks.has(runId))}
-													<div class="not-prose mt-1.5 ml-5 font-sans text-[11px] leading-5">
-														<div class="text-[10px] font-medium uppercase tracking-wide text-base-content/40">
-															{m.agents_tool_steps()}
-														</div>
-														<dl class="m-0 grid grid-cols-[max-content_max-content_1fr] items-center gap-x-3">
-															{#each shown as task (task.task)}
-																{@const connector = connectorFor(task.task_type ?? '')}
-																<dt class="m-0 flex items-center gap-1.5 font-normal {levelText(task.level)}">
-																	<span class="tooltip tooltip-top shrink-0" data-tip={connector.label}>
-																		<img src={connector.iconUrl} alt={connector.label} class="h-3.5 w-3.5" />
-																	</span>
-																	<span
-																		>{task.task}{#if task.count > 1}<span class="text-base-content/40">
-																				×{task.count}</span
-																			>{/if}</span
-																	>
-																</dt>
-																<dd class="m-0 text-right tabular-nums text-base-content/50">
-																	{formatDuration(task.duration_ms)}
-																</dd>
-																<dd class="m-0 flex items-center">
-																	<Icon icon={levelIcon(task.level)} class="h-3.5 w-3.5 {levelMark(task.level)}" />
-																</dd>
-															{/each}
-														</dl>
-														{#if hidden > 0}
-															<button
-																type="button"
-																class="cursor-pointer text-base-content/40 hover:text-base-content/70"
-																onclick={() => allTasks.add(runId)}
-															>
-																· {m.agents_tool_more_steps({ count: hidden })}
-															</button>
-														{/if}
-													</div>
-												{/if}
-											</details>
-										{/each}
-									</div>
-								{/if}
 								{#if streaming}
-									<!-- Text is streaming (no fresh tool call to shimmer): a
-									     working status line marks progress instead of a cursor. -->
-									<span
-										class="chat-status chat-status-live mt-2 flex items-center gap-1.5 text-xs font-medium"
-									>
-										<Icon icon="tabler:activity" mode="mask" class="chat-status-pulse h-3.5 w-3.5" />
-										{m.agents_working()}
-									</span>
+									{#if steps.length > 0 && msg.content.length === 0}
+										<button
+											type="button"
+											class="chat-status chat-status-live flex w-fit items-center gap-1.5 text-xs font-medium"
+											onclick={() => (inspected = { msg: i, step: null })}
+										>
+											<Icon icon="tabler:activity" mode="mask" class="chat-status-pulse h-3.5 w-3.5" />
+											{m.agents_tools_using({
+												name: steps[steps.length - 1].name || m.agents_tool_step_fallback()
+											})}
+										</button>
+									{:else}
+										<span
+											class="chat-status chat-status-live flex items-center gap-1.5 text-xs font-medium"
+										>
+											<Icon icon="tabler:activity" mode="mask" class="chat-status-pulse h-3.5 w-3.5" />
+											{m.agents_working()}
+										</span>
+									{/if}
 								{/if}
 							</div>
 						{/if}
 						{#if !streaming && !bareStatus}
 							<div
-								class="flex items-center gap-1 px-1 opacity-0 transition-opacity group-hover:opacity-100 {msg.role ===
-								'user'
-									? 'flex-row-reverse'
-									: ''}"
+								class="flex items-center gap-3 {msg.role === 'user' ? 'flex-row-reverse' : '-ml-1'}"
 							>
-								<CopyButton text={msg.content} size="xs" />
-								<span class="text-xs tabular-nums text-base-content/40">
-									{formatTimestamp(msg.at)}
-								</span>
+								{#if steps.length > 0}
+									{@const failed = failedSteps(steps)}
+										<button
+										type="button"
+										class="flex h-6 items-center gap-1 rounded-md px-1 text-xs text-base-content/50 transition-colors hover:bg-base-200 hover:text-base-content {inspected?.msg ===
+										i
+											? 'bg-base-200 text-base-content'
+											: ''}"
+										aria-pressed={inspected?.msg === i}
+										onclick={() => (inspected = inspected?.msg === i ? null : { msg: i, step: null })}
+									>
+										{m.agents_tools_count({ count: steps.length })}
+										{#if failed > 0}
+											<span class="text-error">· {m.agents_tools_failed({ count: failed })}</span>
+										{/if}
+									</button>
+								{/if}
+								<div
+									class="flex items-center gap-1.5 opacity-0 transition-opacity group-hover:opacity-100 {msg.role ===
+									'user'
+										? 'flex-row-reverse'
+										: ''}"
+								>
+									<CopyButton text={msg.content} size="xs" tooltip="top" />
+									<span class="text-xs tabular-nums text-base-content/40">
+										{formatTimestamp(msg.at)}
+									</span>
+								</div>
 							</div>
 						{/if}
 					</div>
@@ -1459,7 +1205,7 @@
 		</div>
 
 		{#if error}
-			<div class="mx-auto w-full max-w-4xl px-6">
+			<div class="mx-auto w-full max-w-3xl px-6">
 				<div class="alert alert-error alert-sm mb-2" role="alert">
 					<span>{error}</span>
 				</div>
@@ -1467,7 +1213,7 @@
 		{/if}
 
 		<div class="shrink-0 px-6 pb-6">
-			<div class="mx-auto max-w-4xl">
+			<div class="mx-auto max-w-3xl">
 				{@render composer()}
 			</div>
 		</div>
@@ -1476,8 +1222,9 @@
 	{#if rowMenu}
 		{@const c = rowMenu.c}
 		<ul
-			class="menu fixed z-50 w-48 rounded-md border border-base-200 bg-base-100 p-1 text-sm shadow-lg"
+			class="menu fixed z-50 w-48 origin-top-right rounded-md border border-base-200 bg-base-100 p-1 text-sm shadow-lg outline-none"
 			style="top: {rowMenu.top}px; right: {rowMenu.right}px"
+			in:scale={{ duration: 120, start: 0.96 }}
 			role="menu"
 			aria-label={m.agents_conversation_actions()}
 			tabindex="-1"
@@ -1506,7 +1253,7 @@
 
 	{#if moving}
 		<div
-			class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+			class="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4"
 			role="dialog"
 			aria-modal="true"
 			aria-label={m.agents_conversation_move()}
@@ -1521,16 +1268,14 @@
 			}}
 		>
 			<form
-				class="w-full max-w-sm overflow-hidden rounded-lg border border-base-200 bg-base-100 shadow-xl"
+				class="w-full max-w-sm space-y-4 rounded-xl bg-base-100 p-5 shadow-2xl"
 				onsubmit={(e) => {
 					e.preventDefault();
 					saveMove();
 				}}
 			>
-				<div class="border-b border-base-200 px-4 py-3 text-sm font-medium">
-					{m.agents_conversation_move_title()}
-				</div>
-				<div class="space-y-1 px-4 py-3 text-sm">
+				<h2 class="text-[0.9375rem] font-semibold">{m.agents_conversation_move_title()}</h2>
+				<div class="space-y-1 text-sm">
 					<input
 						type="text"
 						class="input input-sm w-full border border-base-300 bg-base-100 outline-none focus:border-primary"
@@ -1546,8 +1291,8 @@
 					</datalist>
 					<p class="text-xs opacity-60">{m.agents_conversation_move_hint()}</p>
 				</div>
-				<div class="flex justify-end gap-1 border-t border-base-200 px-3 py-2">
-					<button type="button" class="btn btn-sm border-base-300 bg-base-100" onclick={() => (moving = null)}>
+				<div class="flex justify-end gap-2">
+					<button type="button" class="btn btn-ghost btn-sm" onclick={() => (moving = null)}>
 						{m.common_cancel()}
 					</button>
 					<button type="submit" class="btn btn-primary btn-sm">{m.agents_conversation_move_confirm()}</button>
@@ -1559,7 +1304,7 @@
 	{#if pendingDelete}
 		{@const target = pendingDelete}
 		<div
-			class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+			class="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4"
 			role="dialog"
 			aria-modal="true"
 			aria-label={m.agents_conversation_delete()}
@@ -1573,15 +1318,13 @@
 				pendingDelete = null;
 			}}
 		>
-			<div class="w-full max-w-sm overflow-hidden rounded-lg border border-base-200 bg-base-100 shadow-xl">
-				<div class="border-b border-base-200 px-4 py-3 text-sm font-medium">
-					{m.agents_conversation_delete_title()}
-				</div>
-				<p class="px-4 py-3 text-sm opacity-70">{m.agents_conversation_delete_message()}</p>
-				<div class="flex justify-end gap-1 border-t border-base-200 px-3 py-2">
+			<div class="w-full max-w-sm space-y-4 rounded-xl bg-base-100 p-5 shadow-2xl">
+				<h2 class="text-[0.9375rem] font-semibold">{m.agents_conversation_delete_title()}</h2>
+				<p class="text-sm text-base-content/70">{m.agents_conversation_delete_message()}</p>
+				<div class="flex justify-end gap-2">
 					<button
 						type="button"
-						class="btn btn-sm border-base-300 bg-base-100"
+						class="btn btn-ghost btn-sm"
 						bind:this={cancelDeleteButton}
 						onclick={() => (pendingDelete = null)}
 					>
@@ -1589,7 +1332,7 @@
 					</button>
 					<button
 						type="button"
-						class="btn btn-error btn-soft btn-sm"
+						class="btn btn-error btn-sm"
 						onclick={() => removeConversation(target.id)}
 					>
 						{m.common_delete()}
@@ -1599,6 +1342,162 @@
 		</div>
 	{/if}
 	</div>
+
+	{#if inspected && inspectedMessage}
+		{@const msgIndex = inspected.msg}
+		{@const failed = failedSteps(inspectedSteps)}
+		{@const toolsTitle = m.agents_tools_count({ count: inspectedSteps.length })}
+		<Inspector
+			title={inspectedStep
+				? inspectedStep.step.name || m.agents_tool_step_fallback()
+				: toolsTitle}
+			label={m.agents_tool_details()}
+			backLabel={toolsTitle}
+			onback={inspectedStep ? () => (inspected = { msg: msgIndex, step: null }) : undefined}
+			onclose={() => (inspected = null)}
+		>
+			{#if inspectedStep}
+				{@render stepDetails(inspectedStep.step, inspectedStep.live)}
+			{:else}
+			{#if failed > 0}
+				<p class="text-error">{m.agents_tools_failed({ count: failed })}</p>
+			{/if}
+			<ul class="space-y-px">
+				{#each inspectedSteps as step, si (si)}
+					{@const live = isLiveStep(inspectedMessage, si)}
+					{@const tool = tools[step.name]}
+					{@const reached = tool?.connectors ?? []}
+					{@const run = savedRun(step) ?? (tool ? toolRun(step.run) : null)}
+					<li>
+						<button
+							type="button"
+							class="-mx-2 flex h-9 w-[calc(100%+1rem)] select-none items-center gap-2 rounded-md px-2 text-left outline-none transition-colors hover:bg-base-200/60 focus-visible:outline-2 focus-visible:outline-primary"
+							onclick={() => (inspected = { msg: msgIndex, step: si })}
+						>
+							{#if reached.length > 0}
+								{@const connector = connectorByName(reached[0])}
+								<img
+									src={connector.iconUrl}
+									alt={connector.label}
+									class="h-4 w-4 shrink-0 {live ? 'chat-status-pulse' : ''}"
+								/>
+							{:else}
+								<Icon
+									icon="tabler:tool"
+									class="h-4 w-4 shrink-0 text-base-content/40 {live ? 'chat-status-pulse' : ''}"
+								/>
+							{/if}
+							<span
+								class="min-w-0 flex-1 truncate {run?.failed ? 'text-error' : live ? 'chat-status-live' : ''}"
+								>{step.name || m.agents_tool_step_fallback()}{live ? '…' : ''}</span
+							>
+							{#if run}
+								{#if live}
+									<span class="min-w-0 truncate text-xs text-base-content/40">{run.last}</span>
+								{/if}
+								<span class="shrink-0 tabular-nums text-base-content/50"
+									>{formatDuration(live ? now - run.started_ms : run.ended_ms - run.started_ms)}</span
+								>
+								{#if run.failed}
+									<Icon
+										icon="tabler:alert-circle"
+										class="h-4 w-4 shrink-0 text-error"
+										aria-label={m.agents_tool_failed()}
+									/>
+								{:else if run.warned}
+									<Icon icon="tabler:alert-triangle" class="h-4 w-4 shrink-0 text-attention" />
+								{/if}
+							{/if}
+							<Icon icon="tabler:chevron-right" class="h-4 w-4 shrink-0 text-base-content/30" />
+						</button>
+					</li>
+				{/each}
+			</ul>
+			{/if}
+		</Inspector>
+	{/if}
+
+	{#snippet stepDetails(step: ToolStep, live: boolean)}
+		{@const tool = tools[step.name]}
+		{@const reached = tool?.connectors ?? []}
+		{@const run = savedRun(step) ?? (tool ? toolRun(step.run) : null)}
+		{@const fields = step.arguments ? stepFields(step.arguments) : null}
+				<div class="space-y-1">
+					{#if run}
+						<p class="flex items-center gap-2">
+							<span class={live ? 'chat-status-live' : ''}>
+								<StatusDot
+									variant={run.failed ? 'error' : run.warned ? 'warning' : live ? 'neutral' : 'success'}
+									label={live
+										? m.agents_tools_using({ name: step.name })
+										: run.failed
+											? m.agents_tool_failed_at({ task: run.failed })
+											: m.agents_tool_succeeded()}
+								/>
+							</span>
+							<span class="ml-auto tabular-nums text-base-content/50">
+								{formatDuration(live ? now - run.started_ms : run.ended_ms - run.started_ms)}
+							</span>
+						</p>
+					{/if}
+					{#if reached.length > 0}
+						<p class="flex flex-wrap items-center gap-x-3 gap-y-1 text-base-content/60">
+							{#each reached as name (name)}
+								{@const connector = connectorByName(name)}
+								<span class="flex items-center gap-1.5">
+									<img src={connector.iconUrl} alt="" class="h-3.5 w-3.5" />
+									{connector.label}
+								</span>
+							{/each}
+						</p>
+					{/if}
+				</div>
+
+				{#if step.arguments}
+					<InspectorSection title={m.agents_tool_input()}>
+						{#if fields}
+							<dl class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1">
+								{#each fields as field, fi (fi)}
+									<dt class="text-base-content/50">{field.label}</dt>
+									<dd class="break-words">{field.value}</dd>
+								{/each}
+							</dl>
+						{:else}
+							<pre
+								class="overflow-x-auto whitespace-pre-wrap break-words rounded-md bg-base-200/50 px-3 py-2 text-xs leading-snug">{formatStepArgs(
+									step.arguments
+								)}</pre>
+						{/if}
+					</InspectorSection>
+				{/if}
+
+				{#if run && run.tasks.length > 0}
+					<InspectorSection title={m.agents_tool_steps()}>
+						<ul class="space-y-px">
+							{#each run.tasks as task (task.task)}
+								{@const connector = connectorFor(task.task_type ?? '')}
+								<li class="flex h-8 items-center gap-2">
+									<img src={connector.iconUrl} alt={connector.label} class="h-4 w-4 shrink-0" />
+									<span class="min-w-0 flex-1 truncate {task.level === 'info' ? '' : levelText(task.level)}"
+										>{task.task}{#if task.count > 1}<span class="text-base-content/40">
+												×{task.count}</span
+											>{/if}</span
+									>
+									<span class="shrink-0 tabular-nums text-base-content/50"
+										>{formatDuration(task.duration_ms)}</span
+									>
+								</li>
+							{/each}
+						</ul>
+					</InspectorSection>
+				{/if}
+
+				{#if tool}
+					<a href="{base}/flows/{encodePath(tool.flow)}" class="btn btn-ghost btn-sm -ml-3">
+						{m.agents_tool_open_flow()}
+					</a>
+				{/if}
+	{/snippet}
 </section>
 
 
@@ -1740,17 +1639,6 @@
 			opacity: 0.45;
 		}
 	}
-	/* Disclosure chevron rotates when its step is expanded. */
-	/* Expanded, each flow step shows its own connector. */
-	.chat-step[open] .chat-step-connectors {
-		display: none;
-	}
-	.chat-step[open] :global(.chat-step-chevron) {
-		transform: rotate(90deg);
-	}
-	.chat-step :global(.chat-step-chevron) {
-		transition: transform 0.15s ease;
-	}
 	@media (prefers-reduced-motion: reduce) {
 		.chat-status-live,
 		:global(.chat-status-pulse) {
@@ -1820,13 +1708,5 @@
 	.chat-markdown :global(th) {
 		background: color-mix(in oklab, var(--color-base-200) 45%, transparent);
 		font-weight: 600;
-	}
-	/* Tool step args: reset the prose <pre> treatment so they stay compact. */
-	.chat-tools :global(pre) {
-		margin: 0.125rem 0 0;
-		padding: 0.25rem 0.5rem;
-		border-radius: 0.3rem;
-		background: color-mix(in oklab, var(--color-base-200) 50%, transparent);
-		line-height: 1.4;
 	}
 </style>

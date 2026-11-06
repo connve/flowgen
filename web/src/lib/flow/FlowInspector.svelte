@@ -1,37 +1,36 @@
 <script lang="ts">
-	import { base } from '$app/paths';
-	import { onMount, untrack } from 'svelte';
+	import { onMount, tick, untrack } from 'svelte';
 	import { load } from 'js-yaml';
 	import Icon from '@iconify/svelte';
 	import ResourceViewer from '$lib/ResourceViewer.svelte';
 	import CodeEditor from '$lib/CodeEditor.svelte';
 	import FlowDag from '$lib/dag/FlowDag.svelte';
-	import Badge from '$lib/Badge.svelte';
 	import CopyButton from '$lib/CopyButton.svelte';
+	import type { Activity } from '$lib/flow/ActivityDetails.svelte';
 	import ActivityPanel from '$lib/flow/ActivityPanel.svelte';
-	import StateMessage from '$lib/StateMessage.svelte';
-	import { apiUrl, encodePath, errorMessage, failure } from '$lib/api';
-	import type { ActivityLevel } from '$lib/logRecord';
 	import { m } from '$lib/paraglide/messages.js';
-
-	interface Activity {
-		flow: string;
-		task: string | null;
-		task_type: string | null;
-		level: ActivityLevel;
-		ts_ms: number;
-		message: string;
-		duration_ms?: number;
-	}
 
 	interface Props {
 		yaml: string;
 		activities?: Activity[];
 		// Config becomes an editor bound to `yaml`, and the graph follows it.
 		editable?: boolean;
+		/** The resource clicked in the config, for the page's details. */
+		resource?: string | null;
+		/** The activity record clicked, for the page's details. */
+		activity?: Activity | null;
+		/** A task to scroll to and filter the activity by once the page opens. */
+		focusTask?: string | null;
 	}
 
-	let { yaml = $bindable(), activities, editable = false }: Props = $props();
+	let {
+		yaml = $bindable(),
+		activities,
+		editable = false,
+		resource = $bindable(null),
+		activity = $bindable(null),
+		focusTask = null
+	}: Props = $props();
 
 	// While editing, the graph keeps the last YAML that parsed, so it does not
 	// blank out mid-keystroke.
@@ -55,29 +54,24 @@
 	}
 	let graphYaml = $derived(editable ? parsedYaml : yaml);
 
-	interface ResourcePreview {
-		key: string;
-		extension: string | null;
-		content: string;
-	}
-
-	let previewKey = $state<string | null>(null);
-	let previewContent = $state<ResourcePreview | null>(null);
-	let previewLoading = $state(false);
-	let previewError = $state<string | null>(null);
-
-	function resourceHref(key: string): string {
-		return `${base}/resources/${encodePath(key)}`;
-	}
-
 	let yamlPane = $state<HTMLElement | null>(null);
-	let dagPane = $state<HTMLElement | null>(null);
 	let activityPanel = $state<ActivityPanel | null>(null);
 	let activityExpanded = $state(false);
+	$effect(() => {
+		if (activity) untrack(() => (resource = null));
+	});
 	let configHidden = $state(false);
+
+	const ROOMY_WIDTH = 1280;
+	let windowWidth = $state(ROOMY_WIDTH);
+	let narrow = $derived(windowWidth < ROOMY_WIDTH);
+	let view = $state<'graph' | 'config'>(untrack(() => (editable ? 'config' : 'graph')));
+	let showGraph = $derived(!narrow || view === 'graph');
+	let showConfig = $derived(narrow ? view === 'config' : editable || !configHidden);
 
 	onMount(() => {
 		configHidden = localStorage.getItem('flowgen-config-hidden') === '1';
+		if (focusTask) tick().then(() => onNodeClick(focusTask));
 	});
 
 	function toggleConfig() {
@@ -87,62 +81,6 @@
 	let highlightTimeout: ReturnType<typeof setTimeout> | null = null;
 	let flashedEl: HTMLElement | null = null;
 
-	// Latest-per-task snapshot: level for the status pill, duration for the
-	// inline badge. Both feed the DAG so the user sees "just processed, took Xms".
-	// The badge is an operational health signal, not a log viewer, so it
-	// only ever reflects info/warn/error — a debug/trace event landing
-	// after a task's last info!() must not blank out that "just succeeded"
-	// signal, so those levels are skipped entirely when picking "latest".
-	interface NodeState {
-		level: 'info' | 'warn' | 'error';
-		ts_ms: number;
-		duration_ms?: number;
-	}
-	let nodeStates = $derived.by(() => {
-		const map = new Map<string, NodeState>();
-		for (const a of activities ?? []) {
-			if (!a.task) continue;
-			if (a.level !== 'info' && a.level !== 'warn' && a.level !== 'error') continue;
-			const prev = map.get(a.task);
-			if (!prev || a.ts_ms >= prev.ts_ms) {
-				map.set(a.task, { level: a.level, ts_ms: a.ts_ms, duration_ms: a.duration_ms });
-			}
-		}
-		return map;
-	});
-
-	function formatDuration(ms: number): string {
-		if (ms < 1000) return `${ms}ms`;
-		if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
-		return `${Math.floor(ms / 60_000)}m`;
-	}
-
-	// Push node states into the DAG DOM as data attributes / text. TaskNode
-	// renders the persistent status pill + duration badge from these.
-	$effect(() => {
-		if (!dagPane) return;
-		const nodes = dagPane.querySelectorAll<HTMLElement>('[data-task]');
-		for (const el of nodes) {
-			const name = el.dataset.task;
-			if (!name) continue;
-			const st = nodeStates.get(name);
-			const badge = el.querySelector<HTMLElement>('.duration-badge');
-			if (st) {
-				el.dataset.level = st.level;
-				if (st.duration_ms !== undefined) {
-					el.dataset.duration = String(st.duration_ms);
-					if (badge) badge.textContent = formatDuration(st.duration_ms);
-				} else {
-					delete el.dataset.duration;
-					if (badge) badge.textContent = '—';
-				}
-			} else {
-				delete el.dataset.level;
-				delete el.dataset.duration;
-				if (badge) badge.textContent = '—';
-			}
-		}
-	});
 
 	function onNodeClick(name: string) {
 		scrollToTask(name);
@@ -176,52 +114,57 @@
 		}, 1600);
 	}
 
-	async function openResource(key: string) {
-		previewKey = key;
-		previewContent = null;
-		previewError = null;
-		previewLoading = true;
-		try {
-			const response = await fetch(apiUrl(`api/resources/${encodePath(key)}`));
-			if (!response.ok) throw await failure(response);
-			previewContent = await response.json();
-		} catch (err) {
-			previewError = errorMessage(err, m.flow_resource_load_failed({ key }));
-		} finally {
-			previewLoading = false;
-		}
-	}
-
-	function closeResource() {
-		previewKey = null;
-		previewContent = null;
-		previewError = null;
-	}
-
-	function onKeydown(event: KeyboardEvent) {
-		if (event.key === 'Escape' && previewKey) closeResource();
+	function openResource(key: string) {
+		activity = null;
+		resource = key;
 	}
 </script>
 
-<svelte:window on:keydown={onKeydown} />
+<svelte:window bind:innerWidth={windowWidth} />
+
+{#snippet viewSwitch()}
+	<div
+		class="flex items-center gap-0.5 rounded-full border border-base-300 bg-base-200/50 p-0.5 text-xs"
+		role="group"
+		aria-label={m.flow_view_label()}
+	>
+		{#each [{ id: 'graph' as const, label: m.flow_graph_heading() }, { id: 'config' as const, label: m.flow_config_heading() }] as opt (opt.id)}
+			<button
+				type="button"
+				class="h-6 rounded-full px-3 transition-colors {view === opt.id
+					? 'bg-base-100 font-medium shadow-sm'
+					: 'text-base-content/60 hover:text-base-content'}"
+				aria-pressed={view === opt.id}
+				onclick={() => (view = opt.id)}
+			>
+				{opt.label}
+			</button>
+		{/each}
+	</div>
+{/snippet}
 
 <div class="flex min-h-0 flex-1 flex-col">
+	<div class="flex min-h-0 flex-1">
 	<div
-		class="grid min-h-0 flex-1 gap-0 divide-x divide-base-200 {configHidden && !editable
-			? 'grid-cols-1'
-			: 'grid-cols-2'}"
+		class="grid min-h-0 min-w-0 flex-1 gap-0 divide-x divide-base-200 {showGraph && showConfig
+			? 'grid-cols-2'
+			: 'grid-cols-1'}"
 	>
-		<div class="flex min-h-0 flex-col">
-			<div class="flex h-10 shrink-0 items-center justify-between border-b border-base-200 bg-base-100 px-4">
-				<span class="text-xs font-medium opacity-70">{m.flow_graph_heading()}</span>
-				{#if !editable}
+		<div class="flex min-h-0 flex-col {showGraph ? '' : 'hidden'}">
+			<div class="flex h-10 shrink-0 items-center justify-between bg-base-100 px-4">
+				{#if narrow}
+					{@render viewSwitch()}
+				{:else}
+					<span class="text-xs font-medium text-base-content/50">{m.flow_graph_heading()}</span>
+				{/if}
+				{#if !editable && !narrow}
 					<div
 						class="tooltip tooltip-left"
 						data-tip={configHidden ? m.flow_config_expand() : m.flow_config_collapse()}
 					>
 						<button
 							type="button"
-							class="btn btn-ghost btn-sm btn-circle"
+							class="flex h-8 w-8 items-center justify-center rounded-md text-base-content/50 transition-colors hover:bg-base-200 hover:text-base-content"
 							aria-label={configHidden ? m.flow_config_expand() : m.flow_config_collapse()}
 							aria-pressed={configHidden}
 							onclick={toggleConfig}
@@ -236,13 +179,17 @@
 					</div>
 				{/if}
 			</div>
-			<div bind:this={dagPane} class="min-h-0 flex-1">
-				<FlowDag yaml={graphYaml} onNodeClick={onNodeClick} />
+			<div class="min-h-0 flex-1">
+				<FlowDag yaml={graphYaml} {activities} onNodeClick={onNodeClick} />
 			</div>
 		</div>
-		<div class="flex min-h-0 flex-col {configHidden && !editable ? 'hidden' : ''}">
-			<div class="flex h-10 shrink-0 items-center justify-between border-b border-base-200 bg-base-100 px-4">
-				<span class="text-xs font-medium opacity-70">{m.flow_config_heading()}</span>
+		<div class="flex min-h-0 flex-col {showConfig ? '' : 'hidden'}">
+			<div class="flex h-10 shrink-0 items-center justify-between bg-base-100 px-4">
+				{#if narrow}
+					{@render viewSwitch()}
+				{:else}
+					<span class="text-xs font-medium text-base-content/50">{m.flow_config_heading()}</span>
+				{/if}
 				<CopyButton text={yaml} label={m.flow_copy_yaml()} />
 			</div>
 			<div bind:this={yamlPane} class="flex min-h-0 flex-1 flex-col overflow-auto bg-base-200">
@@ -259,9 +206,11 @@
 			</div>
 		</div>
 	</div>
+	</div>
 	{#if activities}
 		<ActivityPanel
 			bind:this={activityPanel}
+			bind:selected={activity}
 			{activities}
 			expanded={activityExpanded}
 			onToggle={() => (activityExpanded = !activityExpanded)}
@@ -269,77 +218,6 @@
 		/>
 	{/if}
 </div>
-
-{#if previewKey}
-	<div
-		class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
-		role="dialog"
-		aria-modal="true"
-		aria-label={m.flow_resource_preview_label()}
-		onclick={(e) => {
-			if (e.target === e.currentTarget) closeResource();
-		}}
-		onkeydown={(e) => {
-			if (e.key === 'Escape') closeResource();
-		}}
-		tabindex="-1"
-	>
-		<div
-			class="flex max-h-[85vh] w-full max-w-4xl flex-col overflow-hidden rounded-lg border border-base-200 bg-base-100 shadow-xl"
-		>
-			<div class="flex items-center justify-between border-b border-base-200 px-4 py-2">
-				<div class="flex items-center gap-2">
-					<span class="font-mono text-sm font-medium leading-none">{previewKey}</span>
-					{#if previewContent?.extension}
-						<Badge>{previewContent.extension}</Badge>
-					{/if}
-				</div>
-				<div class="flex items-center gap-1">
-					<div class="tooltip tooltip-left" data-tip={m.flow_open_full_page()}>
-						<a
-							href={resourceHref(previewKey)}
-							class="btn btn-ghost btn-sm btn-circle"
-							aria-label={m.flow_open_full_page()}
-						>
-							<Icon icon="tabler:external-link" class="h-5 w-5" />
-						</a>
-					</div>
-					<div class="tooltip tooltip-left" data-tip={m.common_close()}>
-						<button
-							type="button"
-							class="btn btn-ghost btn-sm btn-circle"
-							aria-label={m.common_close()}
-							onclick={closeResource}
-						>
-							<Icon icon="tabler:x" class="h-5 w-5" />
-						</button>
-					</div>
-				</div>
-			</div>
-			<div class="flex items-center justify-end border-b border-base-200 bg-base-100 px-4 py-1">
-				<CopyButton text={previewContent?.content} label={m.common_copy()} />
-			</div>
-			<div class="flex min-h-0 flex-1 flex-col overflow-hidden bg-base-200">
-				{#if previewLoading}
-					<div class="flex items-center justify-center py-12">
-						<span class="loading loading-spinner loading-md text-primary"></span>
-					</div>
-				{:else if previewError}
-					<div class="flex-1">
-						<StateMessage tone="oops" title={m.flow_resource_load_failed_title()} message={previewError} />
-					</div>
-				{:else if previewContent}
-					<div class="min-h-0 flex-1 overflow-auto">
-						<ResourceViewer
-							content={previewContent.content}
-							extension={previewContent.extension}
-						/>
-					</div>
-				{/if}
-			</div>
-		</div>
-	</div>
-{/if}
 
 <style>
 	:global(.task-flash) {

@@ -52,6 +52,8 @@ pub struct Registration {
     /// Flows allowed to call: each entry admits the flow of that identity and
     /// every flow in it as a folder, and an empty entry admits every flow.
     pub callers: Vec<String>,
+    /// Cancelled once the registering task stops reading.
+    pub cancellation_token: tokio_util::sync::CancellationToken,
 }
 
 /// Callers a flow accepts by default: flows in its own top-level folder, or
@@ -77,8 +79,16 @@ impl InprocRegistry {
 
     /// Registers `flow`, replacing a registration left by an earlier run of the same flow.
     pub fn register(&self, flow: String, registration: Registration) {
-        info!(flow = %flow, "Registering inproc endpoint");
-        self.table.insert(flow, Arc::new(registration));
+        let entry = self.table.entry(flow);
+        if !registration.cancellation_token.is_cancelled() {
+            info!(flow = %entry.key(), "Registering inproc endpoint");
+            entry.insert(Arc::new(registration));
+        }
+    }
+
+    /// Whether `flow` is callable here.
+    pub fn is_registered(&self, flow: &str) -> bool {
+        self.table.contains_key(flow)
     }
 
     /// How long a call to `flow` may take; `None` when `flow` is not
@@ -183,7 +193,23 @@ mod tests {
             leaf_count: 1,
             ack_timeout,
             callers: default_callers("a/b"),
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn a_registration_from_a_stopped_task_does_not_stay() {
+        let registry = InprocRegistry::new();
+        let (tx, _rx) = mpsc::channel(4);
+        let stopped = registration(tx, None);
+        stopped.cancellation_token.cancel();
+
+        registry.register("a/b".to_string(), stopped);
+        let result = registry
+            .call(&[], "a/b", Value::Null, Map::new(), None)
+            .await;
+
+        assert!(matches!(result, Err(CallError::NotFound { .. })));
     }
 
     #[tokio::test]

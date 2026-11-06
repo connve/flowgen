@@ -52,29 +52,38 @@
 		show(g.graph().width!, g.graph().height!);
 	});
 
+	// A fitted graph stays centred when the pane's height changes; a large one
+	// shown from its first task stays at the top.
+	let centred = false;
+
 	// Fits the graph when it stays readable, otherwise starts at its first task.
 	function show(graphWidth: number, graphHeight: number) {
 		const fit = Math.min(
 			(width - 2 * PADDING) / graphWidth,
 			(height - 2 * PADDING) / graphHeight
 		);
-		if (fit >= READABLE_ZOOM) {
-			fitView({ maxZoom: 1.5, padding: 0.15 });
+		centred = fit >= READABLE_ZOOM;
+		if (centred) {
+			fitView({ maxZoom: 1, padding: 0.15 });
 			return;
 		}
 		const zoom = READABLE_ZOOM;
 		setViewport({ x: (width - graphWidth * zoom) / 2, y: PADDING, zoom });
 	}
 
-	// Keeps the graph's centre and zoom when the pane is resized.
+	// Keeps the graph's centre and zoom when the pane is resized; a hidden pane
+	// keeps its last visible size, so showing it again leaves the view as it was.
 	let previousWidth = 0;
+	let previousHeight = 0;
 
 	$effect(() => {
-		const delta = width - previousWidth;
-		const resized = previousWidth > 0 && delta !== 0;
+		if (width === 0 || height === 0) return;
+		const dx = previousWidth > 0 ? width - previousWidth : 0;
+		const dy = previousHeight > 0 && centred ? height - previousHeight : 0;
 		previousWidth = width;
-		if (!resized || untrack(() => laidOutKey) === '') return;
+		previousHeight = height;
+		if ((dx === 0 && dy === 0) || untrack(() => laidOutKey) === '') return;
 		const { x, y, zoom } = getViewport();
-		setViewport({ x: x + delta / 2, y, zoom }, { duration: 200 });
+		setViewport({ x: x + dx / 2, y: y + dy / 2, zoom }, { duration: 200 });
 	});
 </script>

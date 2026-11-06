@@ -174,6 +174,9 @@ pub trait TaskMeta {
     /// that returns on its own has stopped reading and fails its flow.
     const RUNS_UNTIL_STOPPED: bool = false;
 
+    /// Finishes its events in flight after `stop_reading`, until `cancellation_token`.
+    const DRAINS: bool = false;
+
     /// The external systems the task connects to.
     fn connections(&self) -> Vec<Connection> {
         Vec::new()

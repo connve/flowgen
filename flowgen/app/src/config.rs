@@ -177,6 +177,14 @@ pub struct Flow {
     /// Best used with leader election enabled. Defaults to 1.
     #[serde(default = "default_parallel_instances")]
     pub parallel_instances: usize,
+    /// How long a stop lets the events in flight finish; the app's `shutdown_timeout` when unset.
+    #[serde(default, with = "humantime_serde")]
+    pub shutdown_timeout: Option<Duration>,
+}
+
+/// How long a stopping flow lets its events in flight finish, when the config does not say.
+pub fn default_shutdown_timeout() -> Duration {
+    Duration::from_secs(20)
 }
 
 macro_rules! task_types {
@@ -272,6 +280,13 @@ macro_rules! task_types {
                 }
             }
 
+            /// Whether this source finishes its events in flight after it stops reading.
+            pub const fn drains(&self) -> bool {
+                match self {
+                    $(TaskType::$tag(_) => <$config as TaskMeta>::DRAINS,)+
+                }
+            }
+
             /// Whether this task handles events whose upstream task failed.
             pub fn handles_failed(&self) -> bool {
                 match self {
@@ -290,7 +305,7 @@ macro_rules! task_types {
                 let task = self.name().to_string();
                 match self {
                     $(TaskType::$tag(config) => {
-                        let stop = context.cancellation_token.clone();
+                        let stop = context.stop_reading.clone();
                         tasks.spawn(
                             async move {
                                 let result = config.run(io, context).await;
@@ -430,7 +445,8 @@ impl std::fmt::Display for TaskType {
 /// Main application configuration.
 ///
 /// Flowgen ships as a single binary — there is no separate worker/server
-/// split — so component sections live at the top level.
+/// split — so component sections live at the top level. Load it with
+/// [`AppConfig::load`], which rejects unknown keys of the file but not of `APP_*`.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 pub struct AppConfig {
     /// Optional cache configuration (shared across components).
@@ -459,12 +475,22 @@ pub struct AppConfig {
     pub retry: Option<flowgen_core::retry::RetryConfig>,
     /// Optional OpenTelemetry configuration for metrics and tracing.
     pub telemetry: Option<TelemetryOptions>,
+    /// How long a stopping flow lets its events in flight finish (can be overridden per flow).
+    #[serde(default = "default_shutdown_timeout", with = "humantime_serde")]
+    pub shutdown_timeout: Duration,
+    /// Token and amount limits of every `ai_completion`; unlimited when omitted.
+    pub ai_budget: Option<flowgen_ai_agent::budget::BudgetConfig>,
 }
 
 /// Rejected configuration, reported before anything starts.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum ValidationError {
+    #[error(transparent)]
+    AiBudget {
+        #[from]
+        source: flowgen_ai_agent::budget::Error,
+    },
     #[error(
         "Move `cache.db_name` under `cache.runtime`:\n\
          \x20 cache:\n\
@@ -489,14 +515,47 @@ pub enum ValidationError {
 }
 
 impl AppConfig {
-    /// Rejects configuration that would otherwise be accepted with the wrong
-    /// meaning. Serde ignores unknown keys, so a renamed field needs an
-    /// explicit check to avoid changing behaviour on upgrade without a word.
+    /// Reads `file` with `env` layered over it; a key of `file` that no setting knows fails.
+    pub fn load(
+        file: impl config::Source + Send + Sync + 'static,
+        env: config::Environment,
+    ) -> Result<Self, config::ConfigError> {
+        let file = config::Config::builder().add_source(file).build()?;
+        let in_file: std::collections::HashSet<String> =
+            config::Source::collect(&file)?.into_keys().collect();
+        let merged = config::Config::builder()
+            .add_source(file)
+            .add_source(env)
+            .build()?;
+        let mut unknown = Vec::new();
+        let app_config = serde_ignored::deserialize(merged, |path| {
+            let path = path.to_string();
+            let section = match path.split_once('.') {
+                Some((section, _)) => section,
+                None => path.as_str(),
+            };
+            if in_file.contains(section) {
+                unknown.push(path);
+            }
+        })?;
+        match unknown.is_empty() {
+            true => Ok(app_config),
+            false => Err(config::ConfigError::Message(format!(
+                "Unknown field(s) in the config file: {}",
+                unknown.join(", ")
+            ))),
+        }
+    }
+
+    /// Rejects configuration that parses but would run with the wrong meaning.
     pub fn validate(&self) -> Result<(), ValidationError> {
         if let Some(db_name) = self.cache.as_ref().and_then(|c| c.db_name.as_ref()) {
             return Err(ValidationError::RenamedCacheDbName {
                 db_name: db_name.clone(),
             });
+        }
+        if let Some(budget) = self.ai_budget.as_ref() {
+            budget.validate()?;
         }
         let Some(web) = self.web.as_ref() else {
             return Ok(());
@@ -528,6 +587,7 @@ pub enum CacheType {
 
 /// Cache configuration options.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct CacheOptions {
     /// Whether caching is enabled.
     pub enabled: bool,
@@ -540,10 +600,8 @@ pub struct CacheOptions {
     /// NATS server URL (e.g., "nats://localhost:4222"). Defaults to "localhost:4222".
     #[serde(default = "default_nats_url")]
     pub url: String,
-    /// Pre-0.135 spelling of `runtime.db_name`. Kept solely to reject it:
-    /// serde ignores unknown keys, so without this an upgraded config would
-    /// silently fall back to the default bucket and leave the operator's data
-    /// in the old one.
+    /// Pre-0.135 spelling of `runtime.db_name`. Kept solely to reject it with
+    /// a migration hint naming the old bucket.
     #[serde(default)]
     pub db_name: Option<String>,
     /// Runtime bucket, reachable from scripts through `ctx.cache`.
@@ -568,6 +626,7 @@ pub struct CacheOptions {
 
 /// Runtime bucket options.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct BucketOptions {
     /// Bucket name (defaults to "flowgen_cache").
     #[serde(default = "default_runtime_db_name")]
@@ -589,6 +648,7 @@ impl Default for BucketOptions {
 /// the bucket falls back to an in-memory store, which cannot coordinate
 /// across pods — see the warning `App` emits for leader-elected flows.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SystemBucketOptions {
     /// Bucket name (defaults to "flowgen_system").
     #[serde(default = "default_system_db_name")]
@@ -616,6 +676,7 @@ fn default_runtime_db_name() -> String {
 /// On a name collision the filesystem entry wins so a locally mounted flow
 /// cannot be silently overridden by a stale cache entry.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct FlowOptions {
     /// Path for discovering flow configuration files.
     /// Can be either:
@@ -640,6 +701,7 @@ fn default_system_db_name() -> String {
 
 /// Cache-based flow loading options.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct FlowCacheOptions {
     /// Whether to load flows from the cache instead of the filesystem.
     pub enabled: bool,
@@ -659,6 +721,7 @@ pub struct FlowCacheOptions {
 /// and falls back to the cache on a miss, so a locally mounted resource
 /// always takes precedence over a cached copy with the same key.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct ResourceOptions {
     /// Optional base path for loading external resource files (SQL, JSON, HTML, etc.).
     /// Resource keys are resolved relative to this path.
@@ -680,6 +743,7 @@ fn default_resources_cache_prefix() -> String {
 
 /// Cache-based resource loading options.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResourceCacheOptions {
     /// Whether to load resources from the cache instead of the filesystem.
     pub enabled: bool,
@@ -704,6 +768,7 @@ fn default_mcp_path() -> String {
 
 /// MCP server configuration options.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct McpServerOptions {
     /// Whether MCP server is enabled. Must be explicitly enabled by the admin
     /// for `mcp_tool` tasks to be registered.
@@ -764,6 +829,7 @@ fn default_ai_gateway_max_body_bytes() -> usize {
 /// (`model: "<gateway-name>/<downstream-model>"`), so OpenAI clients work with
 /// stock `base_url` configuration and no per-gateway URL changes.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct AiGatewayOptions {
     /// Whether the AI gateway server is enabled. Must be explicitly enabled by
     /// the admin for `llm_proxy` tasks to be registered.
@@ -805,6 +871,7 @@ fn default_web_path() -> String {
 /// Serves a lightweight, read-only dashboard for inspecting loaded flows.
 /// The UI is built into the binary as static assets.
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct WebOptions {
     /// Whether the web UI is enabled.
     pub enabled: bool,
@@ -1073,7 +1140,7 @@ fn default_health_enabled() -> bool {
 
 /// Kubernetes liveness/readiness listener configuration.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct HealthOptions {
     /// Whether the health listener is enabled. Defaults to true.
     pub enabled: bool,
@@ -1102,6 +1169,7 @@ fn default_http_path() -> String {
 
 /// HTTP server configuration options.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct HttpServerOptions {
     /// Whether HTTP server is enabled.
     pub enabled: bool,
@@ -1126,6 +1194,7 @@ pub struct HttpServerOptions {
 /// in-memory backend, so `enabled: true` with no other fields is a
 /// valid standalone configuration.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct TelemetryOptions {
     /// Whether OpenTelemetry is enabled.
     pub enabled: bool,
@@ -1147,7 +1216,7 @@ pub struct TelemetryOptions {
 /// that make sense for that backend, so an invalid combination
 /// (e.g. `logs_per_flow` on the `remote` backend) fails at parse time.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
+#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 pub enum TelemetryBackendOptions {
     /// Keep logs and flow counters in memory on each pod; with `cache`, the
     /// web UI shows every pod.
@@ -1200,6 +1269,20 @@ mod tests {
     use serde_json;
     use std::path::PathBuf;
 
+    /// Each file under `root` with extension `ext`, with its content.
+    fn files_under(root: &std::path::Path, ext: &str) -> Vec<(PathBuf, String)> {
+        walkdir::WalkDir::new(root)
+            .into_iter()
+            .map(|entry| entry.expect("readable dir entry").into_path())
+            .filter(|path| path.extension().is_some_and(|e| e == ext))
+            .map(|path| {
+                let content = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+                (path, content)
+            })
+            .collect()
+    }
+
     /// Every example under `examples/` must deserialize through the real task
     /// configs. Without this, a key that no struct declares is silently
     /// dropped by serde and the example documents a setting that never
@@ -1210,31 +1293,11 @@ mod tests {
         let mut checked = 0;
         let mut failures: Vec<String> = Vec::new();
 
-        let mut dirs = vec![root.clone()];
-        while let Some(dir) = dirs.pop() {
-            let entries = std::fs::read_dir(&dir)
-                .unwrap_or_else(|e| panic!("reading {}: {e}", dir.display()));
-            for entry in entries {
-                let path = entry.expect("readable dir entry").path();
-                if path.is_dir() {
-                    dirs.push(path);
-                    continue;
-                }
-                if path.extension().is_none_or(|ext| ext != "yaml") {
-                    continue;
-                }
-
-                let source = std::fs::read_to_string(&path)
-                    .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
-                let config = config::Config::builder()
-                    .add_source(config::File::from_str(&source, config::FileFormat::Yaml))
-                    .build()
-                    .unwrap_or_else(|e| panic!("{} failed to parse: {e}", path.display()));
-                if let Err(e) = config.try_deserialize::<FlowConfigRaw>() {
-                    failures.push(format!("{}: {e}", path.display()));
-                }
-                checked += 1;
+        for (path, source) in files_under(&root, "yaml") {
+            if let Err(e) = FlowConfigRaw::parse(&path.display().to_string(), &source) {
+                failures.push(format!("{}: {e}", path.display()));
             }
+            checked += 1;
         }
 
         assert!(checked > 0, "no examples found under {}", root.display());
@@ -1244,6 +1307,112 @@ mod tests {
             failures.len(),
             failures.join("\n")
         );
+    }
+
+    #[test]
+    fn every_whole_flow_in_the_docs_loads() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/src/routes");
+        let mut checked = 0;
+        let mut failures: Vec<String> = Vec::new();
+
+        for (path, page) in files_under(&root, "md") {
+            for (index, block) in page.split("```yaml\n").skip(1).enumerate() {
+                let Some((source, _)) = block.split_once("```") else {
+                    continue;
+                };
+                if !source.starts_with("flow:") || source.contains("# ...") {
+                    continue;
+                }
+                if let Err(e) = FlowConfigRaw::parse("block.yaml", source) {
+                    failures.push(format!("{} block {}: {e}", path.display(), index + 1));
+                }
+                checked += 1;
+            }
+        }
+
+        assert!(checked > 0, "no doc flows found under {}", root.display());
+        assert!(
+            failures.is_empty(),
+            "{} doc flow(s) failed:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+
+    #[test]
+    fn app_config_sections_reject_unknown_fields() {
+        let parse = |yaml: &str| {
+            config::Config::builder()
+                .add_source(config::File::from_str(yaml, config::FileFormat::Yaml))
+                .build()
+                .unwrap()
+                .try_deserialize::<AppConfig>()
+                .unwrap_err()
+                .to_string()
+        };
+        let cases = [
+            ("flows:\n  cache:\n    enabled: true\n    prefx: f\n", "prefx"),
+            (
+                "flows: {}\ncache:\n  enabled: true\n  type: nats\n  runtime:\n    name: c\n",
+                "name",
+            ),
+            (
+                "flows: {}\ntelemetry:\n  enabled: true\n  backend:\n    type: memory\n    logs_per_flows: 5\n",
+                "logs_per_flows",
+            ),
+            (
+                "flows: {}\nhttp_server:\n  enabled: true\n  auth:\n    type: jwt\n    jwks: https://a\n",
+                "jwks",
+            ),
+            (
+                "flows: {}\nweb:\n  enabled: true\n  auth:\n    issuer_url: https://a\n    client_id: c\n    redirect_uri: https://b\n    scopes: [x]\n",
+                "scopes",
+            ),
+        ];
+        for (yaml, field) in cases {
+            let error = parse(yaml);
+            assert!(
+                error.contains(&format!("unknown field `{field}`")),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_key_fails_unless_it_is_a_top_level_environment_variable() {
+        let env = |vars: &[(&str, &str)]| {
+            env_source().source(Some(
+                vars.iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            ))
+        };
+        let file = |yaml: &'static str| config::File::from_str(yaml, config::FileFormat::Yaml);
+
+        let typo = AppConfig::load(file("flows: {}\nshutdown_timout: 5s\n"), env(&[]))
+            .unwrap_err()
+            .to_string();
+        let loaded = AppConfig::load(
+            file("flows: {}\n"),
+            env(&[("APP_SHUTDOWN_TIMEOUT", "7s"), ("APP_UNRELATED", "x")]),
+        )
+        .unwrap();
+
+        let nested = AppConfig::load(file("flows: {}\n"), env(&[("APP_WEB__PROT", "1")]))
+            .unwrap_err()
+            .to_string();
+
+        assert!(typo.contains("shutdown_timout"), "{typo}");
+        assert_eq!(loaded.shutdown_timeout, Duration::from_secs(7));
+        assert!(nested.contains("prot"), "{nested}");
+    }
+
+    #[test]
+    fn the_example_app_config_loads() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config.example.yaml");
+        let file = config::File::from(path).format(config::FileFormat::Yaml);
+        AppConfig::load(file, env_source().source(Some(Default::default())))
+            .expect("config.example.yaml loads");
     }
 
     #[test]
@@ -1304,6 +1473,7 @@ mod tests {
                 tasks: vec![],
                 require_leader_election: None,
                 parallel_instances: 1,
+                shutdown_timeout: None,
             },
         };
         let flow_config =
@@ -1327,6 +1497,7 @@ mod tests {
                 tasks: vec![],
                 require_leader_election: None,
                 parallel_instances: 1,
+                shutdown_timeout: None,
             },
         };
 
@@ -1344,6 +1515,7 @@ mod tests {
                 tasks: vec![],
                 require_leader_election: None,
                 parallel_instances: 1,
+                shutdown_timeout: None,
             },
         };
         let config = FlowConfig::from_path(raw, "demo/reader".to_string(), None)
@@ -1363,6 +1535,7 @@ mod tests {
             tasks: vec![],
             require_leader_election: None,
             parallel_instances: 1,
+            shutdown_timeout: None,
         };
 
         assert_eq!(flow.name.as_deref(), Some("test_flow"));
@@ -1381,6 +1554,7 @@ mod tests {
             tasks: vec![task],
             require_leader_election: None,
             parallel_instances: 1,
+            shutdown_timeout: None,
         };
 
         assert_eq!(flow.name.as_deref(), Some("flow_with_tasks"));
@@ -1403,6 +1577,7 @@ mod tests {
             tasks: vec![],
             require_leader_election: None,
             parallel_instances: 1,
+            shutdown_timeout: None,
         };
 
         let serialized = serde_json::to_string(&flow).unwrap();
@@ -1418,6 +1593,7 @@ mod tests {
             tasks: vec![],
             require_leader_election: None,
             parallel_instances: 1,
+            shutdown_timeout: None,
         };
 
         let cloned = flow.clone();
@@ -1459,6 +1635,8 @@ mod tests {
             health: Default::default(),
             retry: None,
             telemetry: None,
+            shutdown_timeout: default_shutdown_timeout(),
+            ai_budget: None,
         };
 
         assert!(app_config.cache.is_some());
@@ -1486,6 +1664,8 @@ mod tests {
             health: Default::default(),
             retry: None,
             telemetry: None,
+            shutdown_timeout: default_shutdown_timeout(),
+            ai_budget: None,
         };
 
         assert!(app_config.cache.is_none());
@@ -1520,6 +1700,8 @@ mod tests {
             health: Default::default(),
             retry: None,
             telemetry: None,
+            shutdown_timeout: default_shutdown_timeout(),
+            ai_budget: None,
         };
 
         let serialized = serde_json::to_string(&app_config).unwrap();
@@ -1553,6 +1735,8 @@ mod tests {
             health: Default::default(),
             retry: None,
             telemetry: None,
+            shutdown_timeout: default_shutdown_timeout(),
+            ai_budget: None,
         };
 
         let cloned = app_config.clone();
@@ -1828,6 +2012,7 @@ flows:
                 ],
                 require_leader_election: None,
                 parallel_instances: 1,
+                shutdown_timeout: None,
             },
         };
         let flow_config =
@@ -1890,6 +2075,8 @@ flows:
             health: Default::default(),
             retry: None,
             telemetry: None,
+            shutdown_timeout: default_shutdown_timeout(),
+            ai_budget: None,
         };
 
         assert!(app_config.http_server.is_some());
@@ -2012,6 +2199,8 @@ flows:
                 service_name: "flowgen".to_string(),
                 metrics_export_interval: Duration::from_secs(60),
             }),
+            shutdown_timeout: default_shutdown_timeout(),
+            ai_budget: None,
         };
 
         assert!(app_config.telemetry.is_some());

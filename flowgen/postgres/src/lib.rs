@@ -49,6 +49,7 @@ impl TaskMeta for query::Query {
 impl TaskMeta for cdc::Cdc {
     const CONNECTOR: Connector = CONNECTOR;
     const RUNS_UNTIL_STOPPED: bool = true;
+    const DRAINS: bool = true;
 
     fn connections(&self) -> Vec<Connection> {
         vec![Connection::new(CONNECTOR, Some(&self.credentials_path))]

@@ -78,6 +78,7 @@ pub type Error = CacheError;
 
 /// Configuration options for cache operations.
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct CacheOptions {
     /// Optional key override for cache insertion operations.
     pub insert_key: Option<String>,

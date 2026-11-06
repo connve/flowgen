@@ -1,5 +1,4 @@
 use clap::Parser;
-use config::Config;
 use flowgen::app::App;
 use flowgen::config::AppConfig;
 use flowgen_core::flow::activity::{MetricsStore, OtlpMetricsStore};
@@ -15,11 +14,68 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 #[derive(Parser)]
-#[command(name = "flowgen", version, about = "Data activation with a blast 💥")]
+#[command(
+    name = "flowgen",
+    version,
+    about = "Data activation with a blast 💥",
+    subcommand_negates_reqs = true
+)]
 struct Cli {
     /// Path to configuration file.
-    #[arg(short, long, env = "CONFIG_PATH")]
-    config: String,
+    #[arg(short, long, env = "CONFIG_PATH", required = true)]
+    config: Option<String>,
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(clap::Subcommand)]
+enum Command {
+    /// Checks the flows and resources of a workspace without running them.
+    Validate {
+        /// The workspace folder, which holds `flows/` and `resources/`.
+        #[arg(default_value = ".")]
+        workspace: std::path::PathBuf,
+        /// Prints the issues as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// Prints the issues of the workspace at `root` and exits with 1 when there are any.
+fn validate(root: &std::path::Path, json: bool) -> ! {
+    let workspace = match flowgen::validation::validate_workspace(root) {
+        Ok(workspace) => workspace,
+        Err(e) => {
+            eprintln!("{e}");
+            process::exit(2);
+        }
+    };
+    match json {
+        true => match serde_json::to_string_pretty(&workspace.issues) {
+            Ok(issues) => println!("{issues}"),
+            Err(e) => {
+                eprintln!("Failed to print the issues: {e}");
+                process::exit(2);
+            }
+        },
+        false => {
+            for issue in &workspace.issues {
+                match &issue.location {
+                    Some(location) => println!("{}: {location}: {}", issue.path, issue.message),
+                    None => println!("{}: {}", issue.path, issue.message),
+                }
+            }
+            println!(
+                "Checked {} files, {} issues",
+                workspace.files,
+                workspace.issues.len()
+            );
+        }
+    }
+    match workspace.issues.is_empty() {
+        true => process::exit(0),
+        false => process::exit(1),
+    }
 }
 
 enum LogFormat {
@@ -84,15 +140,22 @@ async fn main() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let cli = Cli::parse();
+    let config_path = match (cli.command, cli.config) {
+        (Some(Command::Validate { workspace, json }), _) => validate(&workspace, json),
+        (None, Some(config)) => config,
+        (None, None) => {
+            eprintln!("Missing --config: pass the app config file, or a subcommand");
+            process::exit(2);
+        }
+    };
 
     // Config load runs before tracing is up: tracing needs the metrics
     // store, which needs the cache, and the cache is defined in config.
     // Boot-time errors go straight to stderr — the canonical Rust CLI pattern.
-    let config = match Config::builder()
-        .add_source(config::File::with_name(&cli.config))
-        .add_source(flowgen::config::env_source())
-        .build()
-    {
+    let app_config = match AppConfig::load(
+        config::File::with_name(&config_path),
+        flowgen::config::env_source(),
+    ) {
         Ok(config) => config,
         Err(e) => {
             let cwd = env::current_dir()
@@ -105,14 +168,6 @@ async fn main() {
                 .map(|c| c.to_uppercase().to_string() + &msg[c.len_utf8()..])
                 .unwrap_or(msg);
             eprintln!("{msg} (working directory: {cwd})");
-            process::exit(1);
-        }
-    };
-
-    let app_config = match config.try_deserialize::<AppConfig>() {
-        Ok(config) => config,
-        Err(e) => {
-            eprintln!("Failed to deserialize app config: {}", e);
             process::exit(1);
         }
     };

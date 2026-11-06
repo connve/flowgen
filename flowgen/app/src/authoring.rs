@@ -262,7 +262,7 @@ async fn validate_blocking(
 }
 
 /// Issues for every file that has content; deletions are not validated.
-fn validate_files(files: &[api::WorkspaceFile]) -> Vec<api::ValidationIssue> {
+pub(crate) fn validate_files(files: &[api::WorkspaceFile]) -> Vec<api::ValidationIssue> {
     let mut issues = Vec::new();
     for file in files {
         let found = match (locate(&file.path), &file.content) {

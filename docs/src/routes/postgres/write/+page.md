@@ -21,8 +21,8 @@ Writes the rows of each event into a PostgreSQL table with `COPY`: appended, or 
 | `table` | string | required | Table to write to, as `table` or `schema.table`. Supports templating. |
 | `change_type` | string | | `upsert` or `delete`, matched by the table's primary key. Rows are appended when omitted. |
 | `max_connections` | int | 10 | Connection pool size. |
-| `connection_timeout` | duration | `30s` | Timeout to open a connection. |
-| `query_timeout` | duration | `2m` | Longest a statement runs on the server (`statement_timeout`), and timeout to get a connection. |
+| `connection_timeout` | duration | `30s` | Timeout to open a connection. A pooled connection that does not answer a check within half of it is replaced. |
+| `query_timeout` | duration | `2m` | Longest a statement runs on the server (`statement_timeout`) and timeout to get a connection. A write whose server does not answer for twice as long fails and is retried. |
 | `depends_on` | list | | Upstream task names. |
 | `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
 
@@ -76,4 +76,4 @@ To write the rows of a `buffer`, return its `event.data.batch` from a `script` f
 
 ## Behaviour
 
-Each event's rows are written in one transaction, so an event is written completely or not at all. Connection errors, serialization failures and deadlocks are retried; SQL errors such as a type mismatch or a constraint violation fail the event. When the connection breaks while the transaction commits, the rows may already be written, and the retry appends them again; an upsert or delete gives the same result when repeated.
+Each event's rows are written in one transaction, so an event is written completely or not at all. Connection errors, serialization failures and deadlocks are retried; SQL errors such as a type mismatch or a constraint violation fail the event. When the connection breaks or the server stops answering while the transaction commits, the rows may already be written, and the retry appends them again; an upsert or delete gives the same result when repeated.

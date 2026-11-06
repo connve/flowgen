@@ -69,6 +69,8 @@ fn app_config_with_cache(url: String) -> AppConfig {
         health: Default::default(),
         retry: None,
         telemetry: None,
+        shutdown_timeout: flowgen::config::default_shutdown_timeout(),
+        ai_budget: None,
     }
 }
 
@@ -133,4 +135,49 @@ async fn init_cache_falls_back_to_memory_when_cache_is_disabled() {
         &cache.get("probe").await.expect("get").expect("present")[..],
         b"ok"
     );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
+async fn an_ai_budget_count_deleted_by_hand_counts_from_zero() {
+    use flowgen_ai_agent::budget::{Budget, BudgetConfig, Limit, Period, Scope, Usage};
+    let (_nats, url) = start_nats().await;
+    let cache = App::init_cache(&app_config_with_cache(url), Some("flowgen_system"))
+        .await
+        .expect("system cache init");
+    let budget = Budget::new(
+        BudgetConfig {
+            limits: vec![Limit {
+                scope: Scope::Workspace,
+                period: Period::Day,
+                max_tokens: Some(100),
+                max_amount: None,
+            }],
+            prices: Default::default(),
+        },
+        Arc::clone(&cache),
+    );
+    let tokens = |prompt_tokens| Usage {
+        prompt_tokens,
+        completion_tokens: 0,
+    };
+    budget
+        .spend(None, "m", tokens(90))
+        .await
+        .expect("first spend");
+    for key in cache.list_keys("ai.budget").await.expect("list counts") {
+        cache.delete(&key).await.expect("delete count");
+    }
+
+    let respent =
+        tokio::time::timeout(Duration::from_secs(5), budget.spend(None, "m", tokens(90))).await;
+    assert!(matches!(respent, Ok(Ok(()))), "{respent:?}");
+    let under = budget.check(None, "m").await;
+    let spent =
+        tokio::time::timeout(Duration::from_secs(5), budget.spend(None, "m", tokens(10))).await;
+    let over = budget.check(None, "m").await;
+
+    assert!(under.is_ok(), "{under:?}");
+    assert!(matches!(spent, Ok(Ok(()))), "{spent:?}");
+    assert!(over.is_err());
 }

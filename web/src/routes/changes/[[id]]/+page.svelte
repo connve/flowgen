@@ -3,7 +3,10 @@
 	import { afterNavigate, goto, invalidate } from '$app/navigation';
 	import Icon from '@iconify/svelte';
 	import Actor from '$lib/Actor.svelte';
-	import Badge from '$lib/Badge.svelte';
+	import IconButton from '$lib/IconButton.svelte';
+	import Inspector from '$lib/Inspector.svelte';
+	import InspectorSection from '$lib/InspectorSection.svelte';
+	import StatusDot from '$lib/StatusDot.svelte';
 	import StateMessage from '$lib/StateMessage.svelte';
 	import { apiUrl, errorMessage, failure, type Change, type ChangeSummary } from '$lib/api';
 	import { auth } from '$lib/auth.svelte';
@@ -19,6 +22,8 @@
 
 	let { data }: PageProps = $props();
 
+	let previewedId = $state<string | null>(null);
+	let previewed = $derived(data.changes.find((c) => c.id === previewedId) ?? null);
 	let deciding = $state(false);
 	let decideError = $state<string | null>(null);
 	let now = $state(Date.now());
@@ -118,7 +123,7 @@
 
 	type Variant = 'neutral' | 'success' | 'error' | 'warning';
 
-	// One badge for the whole lifecycle: a tracked published change shows its deployment.
+	// One status for the whole lifecycle: a tracked published change shows its deployment.
 	function badge(change: Pick<ChangeSummary, 'status' | 'deployment'>): { label: string; variant: Variant } {
 		switch (change.deployment) {
 			case 'waiting':
@@ -153,19 +158,22 @@
 	<title>{pageTitle(data.change?.title, m.changes_breadcrumb())}</title>
 </svelte:head>
 
-<div class="flex min-h-0 flex-1 flex-col">
-	<div class="shrink-0 border-b border-base-200 bg-base-100 px-6 pb-4 pt-6">
-		<div class="flex items-center gap-1.5 text-sm">
+<div class="flex h-[calc(100vh-4rem)] min-w-0">
+<div class="flex min-h-0 min-w-0 flex-1 flex-col">
+	<div class="shrink-0 bg-base-100 px-6 pb-4 pt-6">
+		<div class="flex items-baseline gap-1.5 text-[0.9375rem] font-semibold">
 			{#if data.change}
-				<a href="{base}/changes" class="text-primary hover:underline">{m.changes_breadcrumb()}</a>
+				<a href="{base}/changes" class="text-xs font-normal text-base-content/50 transition-colors hover:text-base-content"
+					>{m.changes_breadcrumb()}</a
+				>
 			{:else}
 				<span>{m.changes_breadcrumb()}</span>
-				<span class="text-xs opacity-50">· {m.changes_pending_count({ count: pendingCount })}</span>
+				<span class="text-xs font-normal opacity-50">· {m.changes_pending_count({ count: pendingCount })}</span>
 			{/if}
 		</div>
 	</div>
 
-	<div class="flex min-h-0 flex-1 flex-col overflow-y-auto p-6">
+	<div class="flex min-h-0 flex-1 flex-col overflow-y-auto px-6 pb-6">
 		{#if data.change}
 			{@const change = data.change}
 			{@const shown = badge(change)}
@@ -202,26 +210,24 @@
 								{#if editError}
 									<div class="text-sm text-error">{editError}</div>
 								{/if}
-								<div class="flex items-center gap-1">
-									<button type="submit" class="btn btn-primary btn-sm gap-1.5" disabled={savingEdit}>
-										<Icon icon="tabler:check" class="h-4 w-4" />
-										{m.common_save()}
-									</button>
+								<div class="flex items-center justify-end gap-2">
 									<button
 										type="button"
-										class="btn btn-ghost btn-sm gap-1.5"
+										class="btn btn-ghost btn-sm"
 										disabled={savingEdit}
 										onclick={() => (editing = false)}
 									>
-										<Icon icon="tabler:x" class="h-4 w-4" />
 										{m.common_cancel()}
+									</button>
+									<button type="submit" class="btn btn-primary btn-sm" disabled={savingEdit}>
+										{m.common_save()}
 									</button>
 								</div>
 							</form>
 						{:else}
 							<div class="flex items-center gap-2">
-								<h1 class="text-lg font-semibold">{change.title}</h1>
-								<Badge variant={shown.variant}>{shown.label}</Badge>
+								<h1 class="text-[0.9375rem] font-semibold">{change.title}</h1>
+								<span class="text-sm font-normal"><StatusDot variant={shown.variant} label={shown.label} /></span>
 								{#if canEdit}
 									<div class="tooltip tooltip-bottom" data-tip={m.change_edit_details()}>
 										<button
@@ -260,40 +266,31 @@
 						{/if}
 					</div>
 					{#if canApprove}
-						<div class="flex items-center gap-1">
+						<div class="flex items-center gap-2">
 							{#if change.status !== 'publishing'}
-								<div class="tooltip tooltip-bottom" data-tip={m.change_reject()}>
-									<button
-										type="button"
-										class="btn btn-ghost btn-sm btn-circle"
-										aria-label={m.change_reject()}
-										disabled={deciding}
-										onclick={() => decide(change.id, 'reject')}
-									>
-										<Icon icon="tabler:x" class="h-5 w-5" />
-									</button>
-								</div>
+								<button
+									type="button"
+									class="btn btn-ghost btn-sm"
+									disabled={deciding}
+									onclick={() => decide(change.id, 'reject')}
+								>
+									{m.change_reject()}
+								</button>
 							{/if}
 							<div
 								class="tooltip tooltip-bottom"
-								data-tip={change.issues.length > 0
-									? m.change_approve_blocked()
-									: change.status === 'pending'
-										? m.change_approve()
-										: m.common_retry()}
+								data-tip={change.issues.length > 0 ? m.change_approve_blocked() : undefined}
 							>
 								<button
 									type="button"
-									class="btn btn-ghost btn-sm btn-circle"
-									aria-label={change.status === 'pending' ? m.change_approve() : m.common_retry()}
+									class="btn btn-primary btn-sm"
 									disabled={deciding || change.issues.length > 0}
 									onclick={() => decide(change.id, 'approve')}
 								>
 									{#if deciding}
-										<span class="loading loading-spinner loading-sm"></span>
-									{:else}
-										<Icon icon={change.status === 'pending' ? 'tabler:check' : 'tabler:refresh'} class="h-5 w-5" />
+										<span class="loading loading-spinner loading-xs"></span>
 									{/if}
+									{change.status === 'pending' ? m.change_approve() : m.common_retry()}
 								</button>
 							</div>
 						</div>
@@ -319,7 +316,7 @@
 					</div>
 				{/if}
 				{#if change.status === 'published' && Object.keys(change.result ?? {}).length > 0}
-					<div class="rounded-lg border border-base-300 p-3 text-xs">
+					<div class="rounded-lg bg-base-200/50 p-3 text-xs">
 						{#each Object.entries(change.result ?? {}) as [key, value] (key)}
 							<div class="flex gap-2">
 								<span class="w-24 shrink-0 opacity-60">{key}</span>
@@ -342,17 +339,17 @@
 				{/if}
 
 				{#each change.files as file (file.path)}
-					<div class="overflow-hidden rounded-lg border border-base-300">
-						<div class="flex items-center gap-2 border-b border-base-300 bg-base-200/50 px-3 py-2">
+					<div class="overflow-hidden rounded-lg border border-base-200">
+						<div class="flex items-center gap-2 px-3 py-2">
 							<Icon
 								icon={file.content == null ? 'tabler:file-minus' : file.previous == null ? 'tabler:file-plus' : 'tabler:file-diff'}
 								class="h-4 w-4 opacity-70"
 							/>
 							<span class="font-mono text-xs">{file.path}</span>
 							{#if file.content == null}
-								<Badge variant="error">{m.change_file_deleted()}</Badge>
+								<span class="text-xs text-error">{m.change_file_deleted()}</span>
 							{:else if file.previous == null}
-								<Badge variant="success">{m.change_file_new()}</Badge>
+								<span class="text-xs text-primary">{m.change_file_new()}</span>
 							{/if}
 						</div>
 						<pre class="overflow-x-auto text-xs leading-5">{#each file.diff.split('\n') as line, i (i)}<div class="px-3 {lineClass(line)}">{line || ' '}</div>{/each}</pre>
@@ -366,9 +363,9 @@
 				message={m.changes_empty_message()}
 			/>
 		{:else}
-			<div class="shrink-0 overflow-x-auto rounded-lg border border-base-300 bg-base-100">
+			<div class="-mx-6 shrink-0 overflow-x-auto px-6">
 				<table class="table table-sm w-full bg-base-100">
-					<thead class="bg-base-100 text-xs uppercase tracking-wide">
+					<thead class="bg-base-100 text-xs font-medium text-base-content/50">
 						<tr>
 							<th>{m.changes_column_title()}</th>
 							<th>{m.changes_column_status()}</th>
@@ -383,23 +380,26 @@
 						{#each data.changes as item (item.id)}
 							{@const shown = badge(item)}
 							<tr
-								class="cursor-pointer transition-colors hover:bg-base-200"
-								onclick={(e) => {
-									if (!(e.target instanceof Element && e.target.closest('a')))
-										goto(`${base}/changes/${encodeURIComponent(item.id)}`);
+								class="cursor-pointer transition-colors hover:bg-base-200 {previewedId === item.id
+									? 'bg-base-200'
+									: ''}"
+								onclick={() => (previewedId = item.id)}
+								ondblclick={() => goto(`${base}/changes/${encodeURIComponent(item.id)}`)}
+								onkeydown={(e) => {
+									if (e.key === 'Enter' || e.key === ' ') {
+										e.preventDefault();
+										previewedId = item.id;
+									}
 								}}
+								tabindex="0"
+								role="button"
 							>
-								<td>
-									<a
-										href="{base}/changes/{encodeURIComponent(item.id)}"
-										class="font-medium hover:underline"
-									>
-										{item.title}
-									</a>
+								<td class="w-full max-w-0">
+									<div class="truncate font-medium">{item.title}</div>
 								</td>
-								<td><Badge variant={shown.variant}>{shown.label}</Badge></td>
+								<td><StatusDot variant={shown.variant} label={shown.label} /></td>
 								{#if auth.enabled}
-									<td class="text-sm opacity-70"><Actor label={item.proposedBy} /></td>
+									<td class="whitespace-nowrap text-sm opacity-70"><Actor label={item.proposedBy} /></td>
 								{/if}
 								<td class="text-sm tabular-nums opacity-70">{item.fileCount}</td>
 								<td class="whitespace-nowrap text-sm opacity-70">
@@ -412,4 +412,35 @@
 			</div>
 		{/if}
 	</div>
+</div>
+
+{#if previewed && !data.change}
+	{@const shown = badge(previewed)}
+	{@const href = `${base}/changes/${encodeURIComponent(previewed.id)}`}
+	<Inspector title={previewed.title} label={m.change_details()} onclose={() => (previewedId = null)}>
+		{#snippet subtitle()}
+			<StatusDot variant={shown.variant} label={shown.label} />
+		{/snippet}
+		{#snippet actions()}
+			<IconButton icon="tabler:arrow-up-right" label={m.change_open()} {href} />
+		{/snippet}
+		<dl class="grid grid-cols-[max-content_minmax(0,1fr)] gap-x-4 gap-y-1">
+			{#if auth.enabled}
+				<dt class="text-base-content/50">{m.changes_column_proposed_by()}</dt>
+				<dd><Actor label={previewed.proposedBy} /></dd>
+			{/if}
+			<dt class="text-base-content/50">{m.changes_column_created()}</dt>
+			<dd>{formatAbsolute(previewed.createdAt)}</dd>
+			<dt class="text-base-content/50">{m.change_field_target()}</dt>
+			<dd>{previewed.target}</dd>
+		</dl>
+		<InspectorSection title={m.changes_column_files()}>
+			<ul class="space-y-1">
+				{#each previewed.paths as path (path)}
+					<li class="[overflow-wrap:anywhere]">{path}</li>
+				{/each}
+			</ul>
+		</InspectorSection>
+	</Inspector>
+{/if}
 </div>

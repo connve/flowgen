@@ -11,6 +11,7 @@ use futures_util::{StreamExt, TryStreamExt};
 use mongodb::options::FullDocumentType;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 use tracing::{error, info, warn};
@@ -262,6 +263,8 @@ pub struct EventHandler {
     task_type: &'static str,
     /// Task execution context providing metadata and runtime configuration.
     task_context: Arc<flowgen_core::task::context::TaskContext>,
+    /// Whether the change stream returned a batch, which starts the reconnect backoff over.
+    received: AtomicBool,
 }
 
 impl EventHandler {
@@ -477,13 +480,17 @@ impl EventHandler {
 
     /// Watches the MongoDB change stream and sends each change through the
     /// flow, storing its resume token once the flow completes it. Returns
-    /// after an `invalidate` change, since the server closes its stream.
+    /// after an `invalidate` change, since the server closes its stream. Once
+    /// the flow stops reading, the change in flight is finished first.
     #[tracing::instrument(skip(self), name = "task.handle", fields(duration_ms = tracing::field::Empty))]
     async fn handle(&self) -> Result<(), Error> {
         let key = resume_token_key(&self.task_context.flow.id(), &self.config.db_name);
         let cancellation = &self.task_context.cancellation_token;
+        let stopped = self.task_context.stop_reading.cancelled();
+        tokio::pin!(stopped);
         let mut change_stream = tokio::select! {
-            _ = cancellation.cancelled() => return Ok(()),
+            biased;
+            _ = &mut stopped => return Ok(()),
             opened = self.open(&key) => opened?,
         };
         let mut stored = None;
@@ -491,9 +498,11 @@ impl EventHandler {
 
         loop {
             let next = tokio::select! {
-                _ = cancellation.cancelled() => return Ok(()),
+                biased;
+                _ = &mut stopped => return Ok(()),
                 next = change_stream.next_if_any() => next.map_err(|source| Error::MongoDB { source })?,
             };
+            self.received.store(true, Ordering::Relaxed);
 
             let change_event = match next {
                 Some(change_event) => change_event,
@@ -636,6 +645,7 @@ impl flowgen_core::task::runner::Runner for Processor {
             tx: self.tx.clone(),
             task_type: self.task_type,
             task_context: Arc::clone(&self.task_context),
+            received: AtomicBool::new(false),
         })
     }
 
@@ -644,7 +654,7 @@ impl flowgen_core::task::runner::Runner for Processor {
         let retry_config =
             flowgen_core::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
 
-        let mut reconnect_backoff = retry_config.reconnect_strategy();
+        let mut reconnect_backoff = flowgen_core::retry::ReconnectBackoff::new(&retry_config);
 
         // No inner spawn: run() must stay pending for the task's real
         // lifetime so the caller's JoinHandle/abort actually reaches this loop.
@@ -662,29 +672,23 @@ impl flowgen_core::task::runner::Runner for Processor {
                 },
             );
             let initialized = tokio::select! {
-                _ = self.task_context.cancellation_token.cancelled() => return Ok(()),
+                _ = self.task_context.stop_reading.cancelled() => return Ok(()),
                 result = init => result,
             };
             let event_handler = match initialized {
-                Ok(handler) => {
-                    reconnect_backoff = retry_config.reconnect_strategy();
-                    handler
-                }
+                Ok(handler) => handler,
                 Err(e) => {
-                    if self.task_context.cancellation_token.is_cancelled() {
+                    if self.task_context.stop_reading.is_cancelled() {
                         return Ok(());
                     }
-                    let delay = match reconnect_backoff.next() {
-                        Some(d) => d,
-                        None => retry_config.initial_backoff,
-                    };
+                    let delay = reconnect_backoff.next_delay(false);
                     error!(
                         error = %e,
                         delay_ms = %delay.as_millis(),
                         "Change stream reader initialization exhausted retry attempts, will retry after backoff"
                     );
                     tokio::select! {
-                        _ = self.task_context.cancellation_token.cancelled() => return Ok(()),
+                        _ = self.task_context.stop_reading.cancelled() => return Ok(()),
                         _ = tokio::time::sleep(delay) => {}
                     }
                     continue;
@@ -692,7 +696,7 @@ impl flowgen_core::task::runner::Runner for Processor {
             };
 
             match event_handler.handle().await {
-                _ if self.task_context.cancellation_token.is_cancelled() => return Ok(()),
+                _ if self.task_context.stop_reading.is_cancelled() => return Ok(()),
                 Ok(()) => warn!("Change stream ended unexpectedly, reconnecting"),
                 Err(Error::Invalidated) => warn!("Change stream was invalidated, reopening it"),
                 Err(e) => error!(error = %e, "Change stream error, reconnecting"),
@@ -703,12 +707,10 @@ impl flowgen_core::task::runner::Runner for Processor {
                 .remove(&event_handler.client_key)
                 .await;
 
-            let delay = match reconnect_backoff.next() {
-                Some(d) => d,
-                None => retry_config.initial_backoff,
-            };
+            let delay =
+                reconnect_backoff.next_delay(event_handler.received.load(Ordering::Relaxed));
             tokio::select! {
-                _ = self.task_context.cancellation_token.cancelled() => return Ok(()),
+                _ = self.task_context.stop_reading.cancelled() => return Ok(()),
                 _ = tokio::time::sleep(delay) => {}
             }
         }
@@ -1066,6 +1068,7 @@ mod tests {
             tx: Some(_tx),
             task_type: "test_handler",
             task_context: mock_task_context(),
+            received: AtomicBool::new(false),
         };
         assert_eq!(handler.task_id, 1);
         assert_eq!(handler.task_type, "test_handler");
@@ -1127,6 +1130,7 @@ mod tests {
             tx: None,
             task_type: "handle_test",
             task_context: mock_task_context(),
+            received: AtomicBool::new(false),
         };
         let result =
             tokio::time::timeout(std::time::Duration::from_secs(5), handler.handle()).await;

@@ -28,6 +28,7 @@ use crate::config::{FlowConfig, TaskType};
 use flowgen_core::event::Event;
 use flowgen_core::task::context::Services;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::{
     sync::mpsc,
     task::{JoinHandle, JoinSet},
@@ -395,6 +396,8 @@ pub struct Flow {
     system_cache: Arc<dyn flowgen_core::cache::Cache>,
     /// Optional app-level retry configuration, passed in from the main application.
     retry: Option<flowgen_core::retry::RetryConfig>,
+    /// The app's `shutdown_timeout`, used when the flow does not set its own.
+    shutdown_timeout: Duration,
     /// Optional resource loader for loading external files, passed in from the main application.
     resource_loader: Option<flowgen_core::resource::ResourceLoader>,
     /// Shared client registry for deduplicating connections to external services.
@@ -420,7 +423,15 @@ pub struct Flow {
 struct Tenure {
     tasks: JoinSet<Result<(), Error>>,
     cancellation_token: tokio_util::sync::CancellationToken,
+    stop_reading: tokio_util::sync::CancellationToken,
     started: std::time::Instant,
+}
+
+impl Drop for Tenure {
+    fn drop(&mut self) {
+        self.stop_reading.cancel();
+        self.cancellation_token.cancel();
+    }
 }
 
 /// How a run of a flow's tasks ended.
@@ -484,14 +495,27 @@ impl Tenure {
         Exit::Completed
     }
 
-    /// Cancels the tasks, lets them finish what they hold, and aborts the
-    /// ones still running after `FLOW_STOP_TIMEOUT`.
-    async fn drain(&mut self) {
+    /// Stops the sources reading, lets the events in flight finish for `shutdown_timeout`, then `abort`s what still runs.
+    async fn drain(&mut self, shutdown_timeout: Duration) {
+        self.stop_reading.cancel();
+        if self.finished_within(shutdown_timeout).await {
+            return;
+        }
+        warn!(
+            tasks = self.tasks.len(),
+            "Tasks did not finish the events in flight in time, stopping them"
+        );
+        self.abort().await;
+    }
+
+    /// Cancels the tasks, gives them `FLOW_ABORT_GRACE` to hand back what
+    /// they hold, and aborts the ones still running.
+    async fn abort(&mut self) {
+        self.stop_reading.cancel();
         self.cancellation_token.cancel();
-        let finished = async { while self.tasks.join_next().await.is_some() {} };
-        if tokio::time::timeout(crate::reconciler::FLOW_STOP_TIMEOUT, finished)
+        if !self
+            .finished_within(crate::reconciler::FLOW_ABORT_GRACE)
             .await
-            .is_err()
         {
             warn!(
                 tasks = self.tasks.len(),
@@ -501,17 +525,10 @@ impl Tenure {
         }
     }
 
-    /// Cancels the tasks, gives them `FLOW_ABORT_GRACE` to hand back what
-    /// they hold, and aborts the ones still running.
-    async fn abort(&mut self) {
-        self.cancellation_token.cancel();
+    /// Whether every task returned within `timeout`.
+    async fn finished_within(&mut self, timeout: Duration) -> bool {
         let finished = async { while self.tasks.join_next().await.is_some() {} };
-        if tokio::time::timeout(crate::reconciler::FLOW_ABORT_GRACE, finished)
-            .await
-            .is_err()
-        {
-            self.tasks.shutdown().await;
-        }
+        tokio::time::timeout(timeout, finished).await.is_ok()
     }
 }
 
@@ -534,6 +551,14 @@ impl Flow {
     /// Returns a reference to the task manager if initialized.
     pub fn task_manager(&self) -> Option<Arc<flowgen_core::task::manager::TaskManager>> {
         self.task_manager.as_ref().map(Arc::clone)
+    }
+
+    /// How long a stop lets the events in flight finish.
+    pub fn shutdown_timeout(&self) -> Duration {
+        match self.config.flow.shutdown_timeout {
+            Some(shutdown_timeout) => shutdown_timeout,
+            None => self.shutdown_timeout,
+        }
     }
 
     /// Returns the cache backing this flow's leases and coordination state.
@@ -609,8 +634,7 @@ impl Flow {
         Ok(())
     }
 
-    /// Creates a fresh TaskContext with a new cancellation token.
-    /// This is called each time tasks are spawned (e.g., on leadership acquisition).
+    /// Creates a fresh TaskContext each time tasks are spawned; stopping the flow stops its reading.
     fn create_task_context(&self) -> Result<Arc<flowgen_core::task::context::TaskContext>, Error> {
         let task_manager = self
             .task_manager
@@ -618,7 +642,7 @@ impl Flow {
             .ok_or_else(|| Error::TaskManagerNotInitialized)?
             .clone();
 
-        let cancellation_token = self.stop.child_token();
+        let cancellation_token = tokio_util::sync::CancellationToken::new();
 
         // Shared response registry for streaming progress between tasks in this flow.
         let response_registry = Arc::new(flowgen_core::registry::ResponseRegistry::new());
@@ -632,6 +656,7 @@ impl Flow {
             .response_registry(response_registry)
             .resource_loader(self.resource_loader.clone())
             .cancellation_token(cancellation_token)
+            .stop_reading(self.stop.child_token())
             .client_registry(Arc::clone(&self.client_registry))
             .inproc(Arc::clone(&self.inproc))
             .services(self.services.clone());
@@ -671,6 +696,7 @@ impl Flow {
         Ok(Tenure {
             tasks,
             cancellation_token: task_context.cancellation_token.clone(),
+            stop_reading: task_context.stop_reading.clone(),
             started: std::time::Instant::now(),
         })
     }
@@ -762,11 +788,12 @@ impl Flow {
                     return Ok(());
                 }
                 Exit::Stopped => {
-                    running.drain().await;
+                    running.drain(self.shutdown_timeout()).await;
                     return Ok(());
                 }
                 Exit::LostLeadership => {
                     debug!("Lost leadership, stopping tasks");
+                    running.stop_reading.cancel();
                     self.deregister_servers();
                     running.abort().await;
                     task_manager
@@ -775,8 +802,9 @@ impl Flow {
                     leading = false;
                 }
                 Exit::Failed => {
+                    running.stop_reading.cancel();
                     self.deregister_servers();
-                    running.drain().await;
+                    running.drain(self.shutdown_timeout()).await;
                     if running.started.elapsed() >= retry.max_delay() {
                         restart_delays = retry.reconnect_strategy();
                         restarts = 0;
@@ -837,7 +865,7 @@ impl Flow {
     /// pod takes the lead first.
     async fn restart_after(
         &self,
-        delay: std::time::Duration,
+        delay: Duration,
         leadership_rx: &mut mpsc::UnboundedReceiver<
             flowgen_core::task::manager::LeaderElectionResult,
         >,
@@ -896,6 +924,9 @@ fn spawn_task(
     context.leaf_count = task_desc.downstream_leaves;
     context.max_in_flight = flowgen_core::task::runner::max_in_flight(task_type.cpu_intensive());
     context.handles_failed = task_type.handles_failed();
+    if task_desc.input_rx.is_none() && !task_type.drains() {
+        context.cancellation_token = context.stop_reading.clone();
+    }
     if !task_type.starts_at_once() {
         let retry_config = flowgen_core::retry::RetryConfig::merge(&context.retry, &None);
         context.startup_delay = Some(retry_config.startup_jitter());
@@ -923,6 +954,8 @@ pub struct FlowBuilder {
     system_cache: Option<Arc<dyn flowgen_core::cache::Cache>>,
     /// Optional app-level retry configuration.
     retry: Option<flowgen_core::retry::RetryConfig>,
+    /// The app's `shutdown_timeout`.
+    shutdown_timeout: Option<Duration>,
     /// Resource loader for loading external files.
     resource_loader: Option<flowgen_core::resource::ResourceLoader>,
     /// Shared client registry for connection pooling.
@@ -974,6 +1007,12 @@ impl FlowBuilder {
     /// Sets the app-level retry configuration.
     pub fn retry(mut self, retry: flowgen_core::retry::RetryConfig) -> Self {
         self.retry = Some(retry);
+        self
+    }
+
+    /// Sets the app's `shutdown_timeout`.
+    pub fn shutdown_timeout(mut self, shutdown_timeout: Duration) -> Self {
+        self.shutdown_timeout = Some(shutdown_timeout);
         self
     }
 
@@ -1039,6 +1078,10 @@ impl FlowBuilder {
                 .system_cache
                 .ok_or_else(|| Error::MissingBuilderAttribute("system_cache".to_string()))?,
             retry: self.retry,
+            shutdown_timeout: match self.shutdown_timeout {
+                Some(shutdown_timeout) => shutdown_timeout,
+                None => crate::config::default_shutdown_timeout(),
+            },
             resource_loader: self.resource_loader,
             client_registry: match self.client_registry {
                 Some(registry) => registry,
@@ -1062,10 +1105,14 @@ mod tests {
     use crate::config::{Flow, FlowConfig, FlowConfigRaw};
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    const DRAINING: Duration = Duration::from_secs(20);
+
     fn tenure() -> Tenure {
+        let cancellation_token = tokio_util::sync::CancellationToken::new();
         Tenure {
             tasks: JoinSet::new(),
-            cancellation_token: tokio_util::sync::CancellationToken::new(),
+            stop_reading: cancellation_token.child_token(),
+            cancellation_token,
             started: std::time::Instant::now(),
         }
     }
@@ -1137,22 +1184,47 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn draining_lets_cancelled_tasks_finish() {
+    async fn draining_stops_the_source_first_and_the_next_task_ends_with_its_input() {
         let mut running = tenure();
-        let finished = Arc::new(AtomicBool::new(false));
-        let token = running.cancellation_token.clone();
-        let flag = Arc::clone(&finished);
+        let (tx, mut rx) = mpsc::channel::<u8>(1);
+        let stop_reading = running.stop_reading.clone();
         running.tasks.spawn(async move {
-            token.cancelled().await;
-            flag.store(true, Ordering::SeqCst);
+            stop_reading.cancelled().await;
+            tx.send(1).await.expect("send the event in flight");
+            Ok(())
+        });
+        let processed = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&processed);
+        running.tasks.spawn(async move {
+            while rx.recv().await.is_some() {
+                flag.store(true, Ordering::SeqCst);
+            }
             Ok(())
         });
 
         let started = tokio::time::Instant::now();
-        running.drain().await;
+        running.drain(DRAINING).await;
 
-        assert!(finished.load(Ordering::SeqCst));
-        assert!(started.elapsed() < crate::reconciler::FLOW_STOP_TIMEOUT);
+        assert!(processed.load(Ordering::SeqCst));
+        assert!(!running.cancellation_token.is_cancelled());
+        assert!(started.elapsed() < crate::reconciler::FLOW_ABORT_GRACE);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn draining_stops_tasks_that_keep_events_past_the_drain_time() {
+        let mut running = tenure();
+        let token = running.cancellation_token.clone();
+        running.tasks.spawn(async move {
+            token.cancelled().await;
+            Ok(())
+        });
+
+        let started = tokio::time::Instant::now();
+        running.drain(DRAINING).await;
+
+        assert!(running.tasks.is_empty());
+        assert!(started.elapsed() >= DRAINING);
+        assert!(started.elapsed() < DRAINING + crate::reconciler::FLOW_ABORT_GRACE);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1161,11 +1233,11 @@ mod tests {
         let dropped = spawn_stuck(&mut running);
 
         let started = tokio::time::Instant::now();
-        running.drain().await;
+        running.drain(DRAINING).await;
 
         assert!(dropped.load(Ordering::SeqCst));
         assert!(running.tasks.is_empty());
-        assert!(started.elapsed() >= crate::reconciler::FLOW_STOP_TIMEOUT);
+        assert!(started.elapsed() >= DRAINING + crate::reconciler::FLOW_ABORT_GRACE);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1178,7 +1250,7 @@ mod tests {
 
         assert!(dropped.load(Ordering::SeqCst));
         assert!(running.cancellation_token.is_cancelled());
-        assert!(started.elapsed() < crate::reconciler::FLOW_STOP_TIMEOUT);
+        assert!(started.elapsed() < DRAINING);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1189,7 +1261,7 @@ mod tests {
         let flag = Arc::clone(&handed_back);
         running.tasks.spawn(async move {
             token.cancelled().await;
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
             flag.store(true, Ordering::SeqCst);
             Ok(())
         });
@@ -1200,11 +1272,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dropping_a_run_aborts_its_tasks() {
+    async fn dropping_a_run_aborts_its_tasks_and_stops_their_detached_work() {
         let mut running = tenure();
         let dropped = spawn_stuck(&mut running);
+        let token = running.cancellation_token.clone();
 
         drop(running);
+        assert!(token.is_cancelled());
         for _ in 0..100 {
             if dropped.load(Ordering::SeqCst) {
                 break;
@@ -1282,6 +1356,42 @@ mod tests {
     }
 
     #[test]
+    fn a_flow_shutdown_timeout_overrides_the_apps() {
+        let build = |shutdown_timeout| {
+            let config = FlowConfig::from_path(
+                FlowConfigRaw {
+                    flow: Flow {
+                        name: None,
+                        labels: None,
+                        tasks: vec![],
+                        require_leader_election: None,
+                        parallel_instances: 1,
+                        shutdown_timeout,
+                    },
+                },
+                "a".to_string(),
+                None,
+            )
+            .expect("valid identity");
+            let cache: Arc<dyn flowgen_core::cache::Cache> =
+                Arc::new(flowgen_core::cache::memory::MemoryCache::new());
+            FlowBuilder::new()
+                .config(Arc::new(config))
+                .cache(Arc::clone(&cache))
+                .system_cache(cache)
+                .shutdown_timeout(Duration::from_secs(40))
+                .build()
+                .expect("build flow")
+        };
+
+        assert_eq!(build(None).shutdown_timeout(), Duration::from_secs(40));
+        assert_eq!(
+            build(Some(Duration::from_secs(5))).shutdown_timeout(),
+            Duration::from_secs(5)
+        );
+    }
+
+    #[test]
     fn test_flow_builder_config() {
         let flow_config = Arc::new(
             FlowConfig::from_path(
@@ -1292,6 +1402,7 @@ mod tests {
                         tasks: vec![],
                         require_leader_election: None,
                         parallel_instances: 1,
+                        shutdown_timeout: None,
                     },
                 },
                 "test_flow".to_string(),
@@ -1345,6 +1456,7 @@ mod tests {
                         tasks: vec![],
                         require_leader_election: None,
                         parallel_instances: 1,
+                        shutdown_timeout: None,
                     },
                 },
                 "test_flow".to_string(),
@@ -1380,6 +1492,7 @@ mod tests {
                         tasks: vec![],
                         require_leader_election: None,
                         parallel_instances: 1,
+                        shutdown_timeout: None,
                     },
                 },
                 "success_flow".to_string(),
@@ -1434,6 +1547,7 @@ mod tests {
                         ],
                         require_leader_election: None,
                         parallel_instances: 1,
+                        shutdown_timeout: None,
                     },
                 },
                 "test_flow".to_string(),
@@ -1481,6 +1595,7 @@ mod tests {
                         })],
                         require_leader_election: None,
                         parallel_instances: 1,
+                        shutdown_timeout: None,
                     },
                 },
                 "test_flow".to_string(),
@@ -1514,6 +1629,7 @@ mod tests {
                         tasks: vec![],
                         require_leader_election: None,
                         parallel_instances: 1,
+                        shutdown_timeout: None,
                     },
                 },
                 "test_flow".to_string(),
@@ -1553,6 +1669,7 @@ mod tests {
                         ],
                         require_leader_election: None,
                         parallel_instances: 1,
+                        shutdown_timeout: None,
                     },
                 },
                 "test_flow".to_string(),
@@ -1598,6 +1715,7 @@ mod tests {
                         ],
                         require_leader_election: None,
                         parallel_instances: 1,
+                        shutdown_timeout: None,
                     },
                 },
                 "fan_out_fan_in".to_string(),
@@ -1656,6 +1774,7 @@ mod tests {
                         ],
                         require_leader_election: None,
                         parallel_instances: 1,
+                        shutdown_timeout: None,
                     },
                 },
                 "fan_out".to_string(),
@@ -1709,6 +1828,7 @@ mod tests {
                         ],
                         require_leader_election: None,
                         parallel_instances: 1,
+                        shutdown_timeout: None,
                     },
                 },
                 "nested_diamonds".to_string(),
@@ -1770,6 +1890,7 @@ mod tests {
                         ],
                         require_leader_election: None,
                         parallel_instances: 1,
+                        shutdown_timeout: None,
                     },
                 },
                 "mixed".to_string(),
@@ -1828,6 +1949,7 @@ mod tests {
                         ],
                         require_leader_election: None,
                         parallel_instances: 1,
+                        shutdown_timeout: None,
                     },
                 },
                 "linear".to_string(),
@@ -1877,6 +1999,7 @@ mod tests {
                         tasks: vec![mcp_prompt("a"), mcp_prompt("b")],
                         require_leader_election: None,
                         parallel_instances: 1,
+                        shutdown_timeout: None,
                     },
                 },
                 "registration_only".to_string(),
@@ -1937,6 +2060,7 @@ mod tests {
                         tasks: vec![script("first"), mcp_prompt("register"), script("last")],
                         require_leader_election: None,
                         parallel_instances: 1,
+                        shutdown_timeout: None,
                     },
                 },
                 "skip_registration".to_string(),

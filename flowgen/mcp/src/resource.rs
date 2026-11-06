@@ -269,6 +269,7 @@ impl Runner for Processor {
             parameters,
             resource_loader: self.task_context.resource_loader.clone(),
             headers: cfg.headers.clone(),
+            cancellation_token: self.task_context.stop_reading.clone(),
         };
 
         match cfg.is_template() {

@@ -13,9 +13,13 @@ web:               # Web UI (optional).
 health:            # k8s liveness/readiness listener (defaults on).
 retry:             # Default retry policy for every task (optional).
 telemetry:         # OpenTelemetry export (optional).
+shutdown_timeout:  # How long a stopping flow lets its events finish (optional).
+ai_budget:         # Token and amount limits of every ai_completion (optional).
 ```
 
-Only `flows` is required. Every other section has working defaults.
+Only `flows` is required. Every other section has working defaults. A key no setting knows fails the start with an error naming it.
+
+An `APP_` environment variable sets a key that takes a single value, with `__` between levels: `APP_WEB__AUTH__CLIENT_SECRET` sets `web.auth.client_secret`. Lists are set in the file. A variable without `__` that matches no top-level setting is ignored, since the platform may set `APP_` variables of its own; a key inside a section must match a setting.
 
 ## Minimal config
 
@@ -86,6 +90,8 @@ health:
 retry:
   max_attempts: 10
   initial_backoff: "1s"
+
+shutdown_timeout: "20s"
 
 telemetry:
   enabled: true
@@ -276,6 +282,40 @@ Sets the default retry policy for every task. Individual tasks can override via 
 
 See [Retry](/docs/flowgen/concepts/retry) for how events, task startup, subscribers and flow restarts retry.
 
+## `shutdown_timeout`
+
+How long a stopping flow lets its events in flight finish, `20s` by default; a flow can set its own. After it, the tasks get 5 more seconds to hand back what they hold. See [Stopping a flow](/docs/flowgen/concepts/flows#stopping-a-flow).
+
+A pod stops its flows on shutdown, so Kubernetes' `terminationGracePeriodSeconds` must exceed the longest `shutdown_timeout` by at least 15 seconds. Flows called through `inproc_endpoint` stop after the others, so with such flows it must exceed twice the longest `shutdown_timeout` by 25 seconds. The Helm chart sets it to 65, which covers the default `shutdown_timeout` of 20 seconds either way.
+
+## `ai_budget`
+
+Limits on what every `ai_completion` of the workspace uses together, across all models, per calendar day, week or month in UTC:
+
+```yaml
+ai_budget:
+  limits:
+    - scope: workspace
+      period: month
+      max_amount: 500
+    - scope: user
+      period: day
+      max_tokens: 200000
+  prices:
+    kimi-k2.7-code-highspeed: { input: 0.60, output: 2.50 }
+    mistral-medium: { input: 0.40, output: 2.00 }
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `limits[].scope` | string | `workspace` counts every flow together; `user` counts each signed-in user across flows. |
+| `limits[].period` | string | `day`, `week` (ISO) or `month`, after which the count starts over. |
+| `limits[].max_tokens` | int | Prompt and completion tokens per period. |
+| `limits[].max_amount` | number | Amount per period, at `prices`, in their currency. |
+| `prices` | map | Price per million prompt (`input`) and completion (`output`) tokens, by the model name a completion calls. |
+
+Each limit sets exactly one of `max_tokens` and `max_amount`, and no two limits share a scope, a period and a kind. Under an amount limit, a completion of a model without a price fails. Each model call adds what the provider reports to the counts in the system cache, which flow scripts cannot change, also when the run it belongs to fails. Once a count reaches its limit, a completion fails before it calls the model, without a retry, and an AI gateway caller gets the error; a run with tools stops before its next model call. A completion without a signed-in user counts toward the workspace only.
+
 ## `telemetry`
 
 OpenTelemetry providers for metrics, traces, and logs. See [Telemetry](/docs/flowgen/concepts/telemetry).
@@ -301,3 +341,11 @@ flowgen --config /etc/flowgen/config.yaml
 ```
 
 Flowgen validates the config at startup. Any field with a typo, missing required value, or invalid type produces an error before any flow runs.
+
+## Validating a workspace
+
+```bash
+flowgen validate path/to/workspace
+```
+
+Checks every flow under `flows/` and resource under `resources/` of the workspace folder (the current folder by default) without running anything or reading the app config: each flow must parse with known fields, its task names and `depends_on` must form a valid graph and its task settings must be valid, including MCP tool and prompt names; Rhai scripts must compile and JSON files must parse. Like the app, it follows symbolic links, skips hidden files and folders, and reads only `.yaml`, `.yml` and `.json` files under `flows/`. It prints one line per issue, `<file>: <location>: <message>`, or the issues as JSON with `--json`, and exits with `1` when it finds any, `2` when the folder cannot be read, and `0` otherwise, so a CI job or a coding agent can run it before a change is merged.

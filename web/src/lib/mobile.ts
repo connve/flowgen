@@ -6,4 +6,4 @@ export function isMobile(): boolean {
 
 /** Classes that lay an open side pane over the page on mobile. */
 export const PANE_OVER_PAGE =
-	'max-md:absolute max-md:inset-y-0 max-md:left-0 max-md:z-30 max-md:max-w-[85vw] max-md:shadow-xl';
+	'max-md:absolute max-md:inset-y-0 max-md:left-0 max-md:z-30 max-md:w-72! max-md:max-w-[85vw] max-md:shadow-xl';

@@ -801,7 +801,7 @@ impl flowgen_core::task::runner::Runner for Processor {
         let retry_config =
             flowgen_core::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
         let cancellation_token = self.task_context.cancellation_token.clone();
-        let mut reconnect_backoff = retry_config.reconnect_strategy();
+        let mut reconnect_backoff = flowgen_core::retry::ReconnectBackoff::new(&retry_config);
 
         let mut lost_connectivity = false;
 
@@ -831,10 +831,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                         handler
                     }
                     Err(e) => {
-                        let delay = match reconnect_backoff.next() {
-                            Some(d) => d,
-                            None => retry_config.initial_backoff,
-                        };
+                        let delay = reconnect_backoff.next_delay(false);
                         error!(error = %e, delay_ms = %delay.as_millis(), "Subscriber initialization exhausted retry attempts, will retry after backoff");
                         tokio::select! {
                             _ = tokio::time::sleep(delay) => {}
@@ -856,18 +853,13 @@ impl flowgen_core::task::runner::Runner for Processor {
                 },
             }
             lost_connectivity = true;
-            if event_handler.streamed.load(Ordering::Relaxed) {
-                reconnect_backoff = retry_config.reconnect_strategy();
-            }
 
             let registry = &self.task_context.client_registry;
             registry.remove(&event_handler.pubsub.client_key).await;
             registry.remove(&event_handler.pubsub.channel_key).await;
 
-            let delay = match reconnect_backoff.next() {
-                Some(d) => d,
-                None => retry_config.initial_backoff,
-            };
+            let delay =
+                reconnect_backoff.next_delay(event_handler.streamed.load(Ordering::Relaxed));
             warn!(delay_ms = %delay.as_millis(), "Reconnect backoff");
             tokio::select! {
                 _ = tokio::time::sleep(delay) => {}

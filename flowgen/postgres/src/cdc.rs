@@ -6,7 +6,7 @@ use crate::config::Credentials;
 use flowgen_core::config::ConfigExt;
 use flowgen_core::delivery::{Delivered, Delivery};
 use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
-use flowgen_core::retry::RetryConfig;
+use flowgen_core::retry::{ReconnectBackoff, RetryConfig};
 use flowgen_core::task::context::TaskContext;
 use flowgen_core::task::TaskConfig;
 use futures_util::{StreamExt, TryStreamExt};
@@ -498,15 +498,20 @@ impl EventHandler {
     /// transaction, a keepalive moves the position to the server's end of
     /// WAL, so changes to tables outside the publication don't hold WAL back.
     /// A stop first reads the messages already received, so a transaction
-    /// whose changes the flow completed is confirmed.
+    /// whose changes the flow completed is confirmed. Once the flow stops
+    /// reading, the transaction in progress is finished and no other is read.
     async fn handle(mut self) -> Result<(), Error> {
         let mut relations = HashMap::new();
         let mut transaction = PgLsn::from(0);
         let mut in_transaction = false;
         let mut position = 0usize;
         let cancellation = self.task_context.cancellation_token.clone();
+        let stop_reading = self.task_context.stop_reading.clone();
 
         loop {
+            if stop_reading.is_cancelled() && !in_transaction {
+                return Ok(());
+            }
             if Instant::now() >= self.report_due() {
                 report(&mut self.stream, self.flushed, &mut self.last_report).await?;
             }
@@ -515,6 +520,7 @@ impl EventHandler {
                 biased;
                 message = self.stream.next() => message,
                 _ = cancellation.cancelled() => return Ok(()),
+                _ = stop_reading.cancelled(), if !in_transaction => return Ok(()),
                 _ = tokio::time::sleep_until(report_due) => continue,
             };
             let message = match message {
@@ -1066,8 +1072,8 @@ impl flowgen_core::task::runner::Runner for Processor {
     #[tracing::instrument(skip(self), name = "task.run", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn run(self) -> Result<(), Error> {
         let retry_config = RetryConfig::merge(&self.task_context.retry, &self.config.retry);
-        let cancellation = self.task_context.cancellation_token.clone();
-        let mut reconnect_backoff = retry_config.reconnect_strategy();
+        let stop_reading = self.task_context.stop_reading.clone();
+        let mut reconnect_backoff = ReconnectBackoff::new(&retry_config);
         loop {
             let init = tokio_retry::Retry::spawn(
                 retry_config.init_strategy(self.task_context.startup_delay),
@@ -1079,25 +1085,19 @@ impl flowgen_core::task::runner::Runner for Processor {
                 },
             );
             let event_handler = tokio::select! {
-                _ = cancellation.cancelled() => return Ok(()),
+                _ = stop_reading.cancelled() => return Ok(()),
                 result = init => result?,
             };
             let started = Instant::now();
             let handled = event_handler.handle().await;
             match handled {
-                _ if cancellation.is_cancelled() => return Ok(()),
+                _ if stop_reading.is_cancelled() => return Ok(()),
                 Ok(()) => return Ok(()),
                 Err(e) => error!(error = %e, "Reading changes failed, reconnecting"),
             }
-            if started.elapsed() >= retry_config.max_delay() {
-                reconnect_backoff = retry_config.reconnect_strategy();
-            }
-            let delay = match reconnect_backoff.next() {
-                Some(delay) => delay,
-                None => retry_config.initial_backoff,
-            };
+            let delay = reconnect_backoff.next_delay(started.elapsed() >= retry_config.max_delay());
             tokio::select! {
-                _ = cancellation.cancelled() => return Ok(()),
+                _ = stop_reading.cancelled() => return Ok(()),
                 _ = tokio::time::sleep(delay) => {}
             }
         }

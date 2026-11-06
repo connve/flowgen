@@ -44,6 +44,8 @@ pub struct FlowHandle {
     pub cancellation_token: tokio_util::sync::CancellationToken,
     /// Join handle for the flow's background monitor task spawned by `run()`.
     pub join_handle: tokio::task::JoinHandle<()>,
+    /// How long a stop lets the flow's events in flight finish.
+    pub shutdown_timeout: std::time::Duration,
     /// True when the flow was loaded from the filesystem at startup.
     /// Cache-sourced reload events must not overwrite filesystem flows.
     pub from_filesystem: bool,
@@ -1054,6 +1056,7 @@ impl App {
             mcp_server: mcp_server.clone(),
             ai_gateway_server: ai_gateway_server.clone(),
             inproc: Arc::clone(&inproc),
+            ai_budget: crate::reconciler::ai_budget(&app_config, &executor_cache),
         };
 
         // Build all flows from configuration files.
@@ -1069,7 +1072,8 @@ impl App {
                 .inproc(Arc::clone(&inproc))
                 .holder_identity(holder_identity.clone())
                 .peer_registry(Arc::clone(&peer_registry))
-                .servers(servers.clone());
+                .servers(servers.clone())
+                .shutdown_timeout(app_config.shutdown_timeout);
 
             if let Some(server) = http_server {
                 flow_builder = flow_builder.service(server);
@@ -1081,6 +1085,10 @@ impl App {
 
             if let Some(ref server) = ai_gateway_server {
                 flow_builder = flow_builder.service(Arc::clone(server));
+            }
+
+            if let Some(ref budget) = servers.ai_budget {
+                flow_builder = flow_builder.service(Arc::clone(budget));
             }
 
             if let Some(retry_config) = app_config.retry.as_ref() {
@@ -1253,6 +1261,7 @@ impl App {
             let cancellation_token = flow.cancellation_token();
 
             let task_manager = flow.task_manager();
+            let shutdown_timeout = flow.shutdown_timeout();
 
             let join_handle = flow.run();
 
@@ -1271,6 +1280,7 @@ impl App {
                         flow_yaml,
                         cancellation_token,
                         join_handle,
+                        shutdown_timeout,
                         from_filesystem,
                         task_manager,
                     },
@@ -1353,6 +1363,7 @@ impl App {
         // The watcher subscribes to flow key changes and the reconciler applies them.
         let watcher_shutdown = tokio_util::sync::CancellationToken::new();
         let mut reconciler = None;
+        let stopping = Arc::new(RwLock::new(HashMap::new()));
         let runtime_cache = Arc::clone(&cache);
         // Only cache-backed flows have keys to watch.
         if let Some((system_cache_arc, cache_opts)) = &flow_cache {
@@ -1381,6 +1392,7 @@ impl App {
                 holder_identity: holder_identity.clone(),
                 peer_registry: Arc::clone(&peer_registry),
                 shutdown: watcher_shutdown.clone(),
+                stopping: Arc::clone(&stopping),
             };
             reconciler = Some(tokio::spawn(crate::reconciler::run(
                 watch_rx,
@@ -1405,8 +1417,10 @@ impl App {
             handle.abort();
         }
         let _ = futures::future::join_all(background_handles).await;
+        let shutdown_timeout =
+            longest_shutdown_timeout(&flow_registry, &stopping, app_config.shutdown_timeout);
         tokio::join!(
-            finish_reconciler(reconciler),
+            finish_reconciler(reconciler, shutdown_timeout),
             stop_flows(&flow_registry, &servers)
         );
 
@@ -1491,25 +1505,56 @@ async fn load_api_keys(path: &std::path::Path) -> Vec<flowgen_core::credentials:
     }
 }
 
-/// Cancels every registered flow, deregisters it from the shared servers so its
-/// tasks see their input close, and waits up to `timeout` for all of them to stop.
-///
-/// Then releases the leases of every flow, including hot-reloaded ones, so
-/// other pods take them over without waiting for them to expire.
+/// The longest `shutdown_timeout` of the running flows and of those a reload
+/// is stopping, at least `shutdown_timeout`.
+fn longest_shutdown_timeout(
+    flow_registry: &RwLock<HashMap<String, FlowHandle>>,
+    stopping: &RwLock<HashMap<String, std::time::Duration>>,
+    shutdown_timeout: std::time::Duration,
+) -> std::time::Duration {
+    let registry = crate::reconciler::read_lock(flow_registry);
+    let stopping = crate::reconciler::read_lock(stopping);
+    registry
+        .values()
+        .map(|handle| handle.shutdown_timeout)
+        .chain(stopping.values().copied())
+        .fold(shutdown_timeout, std::cmp::max)
+}
+
+/// Stops every registered flow, each within its `shutdown_timeout`: first the
+/// flows no other flow calls in process, then those, so the calls of the first
+/// flows' events in flight reach a running flow.
 async fn stop_flows(
     flow_registry: &RwLock<HashMap<String, FlowHandle>>,
     servers: &crate::reconciler::FlowServers,
 ) {
-    let handles: Vec<(String, FlowHandle)> = match flow_registry.write() {
-        Ok(mut registry) => registry.drain().collect(),
-        Err(poisoned) => poisoned.into_inner().drain().collect(),
-    };
+    let handles: Vec<(String, FlowHandle)> = crate::reconciler::write_lock(flow_registry)
+        .drain()
+        .collect();
+    let (called, calling): (Vec<_>, Vec<_>) = handles
+        .into_iter()
+        .partition(|(flow, _)| servers.inproc.is_registered(flow));
+    let aborted = stop_together(calling, servers).await + stop_together(called, servers).await;
+    if aborted > 0 {
+        warn!(aborted, "Not every flow stopped in time, aborted them");
+    }
+}
+
+/// Cancels `handles` and deregisters them so their tasks see their input close,
+/// then releases their leases for other pods; returns how many had to be aborted.
+async fn stop_together(
+    handles: Vec<(String, FlowHandle)>,
+    servers: &crate::reconciler::FlowServers,
+) -> usize {
     let mut stopping = Vec::with_capacity(handles.len());
-    let mut task_managers = Vec::with_capacity(handles.len());
+    let mut task_managers = Vec::new();
     for (flow, handle) in handles {
         handle.cancellation_token.cancel();
         servers.deregister_flow(&flow);
-        stopping.push(crate::reconciler::join_stopped_flow(handle.join_handle));
+        stopping.push(crate::reconciler::join_stopped_flow(
+            handle.join_handle,
+            handle.shutdown_timeout,
+        ));
         task_managers.extend(handle.task_manager);
     }
     let aborted = futures::future::join_all(stopping)
@@ -1517,23 +1562,24 @@ async fn stop_flows(
         .iter()
         .filter(|stopped| stopped.is_none())
         .count();
-    if aborted > 0 {
-        warn!(aborted, "Not every flow stopped in time, aborted them");
-    }
     for task_manager in task_managers {
         if let Err(e) = task_manager.shutdown().await {
             warn!(error = %e, "Failed to release the leases of a flow");
         }
     }
+    aborted
 }
 
 /// Lets the reconciler finish a reload in progress, which stops the old flow
 /// and releases its lease, and aborts it after the time a flow has to stop.
-async fn finish_reconciler(reconciler: Option<tokio::task::JoinHandle<()>>) {
+async fn finish_reconciler(
+    reconciler: Option<tokio::task::JoinHandle<()>>,
+    shutdown_timeout: std::time::Duration,
+) {
     let Some(mut reconciler) = reconciler else {
         return;
     };
-    let timeout = crate::reconciler::FLOW_STOP_TIMEOUT + crate::reconciler::FLOW_ABORT_GRACE;
+    let timeout = crate::reconciler::stop_time(shutdown_timeout);
     if tokio::time::timeout(timeout, &mut reconciler)
         .await
         .is_err()
@@ -1750,6 +1796,7 @@ mod tests {
             flow_yaml: String::new(),
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             join_handle,
+            shutdown_timeout: crate::config::default_shutdown_timeout(),
             from_filesystem: true,
             task_manager,
         }
@@ -1769,6 +1816,7 @@ mod tests {
                 leaf_count: 1,
                 ack_timeout: None,
                 callers: Vec::new(),
+                cancellation_token: tokio_util::sync::CancellationToken::new(),
             },
         );
         let join_handle = tokio::spawn(async move { while rx.recv().await.is_some() {} });
@@ -1785,6 +1833,64 @@ mod tests {
 
         assert!(stopped.is_ok());
         assert!(flow_registry.read().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_flow_called_in_process_stops_after_the_flows_that_call_it() {
+        let servers = crate::reconciler::FlowServers::default();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<flowgen_core::event::Event>(1);
+        servers.inproc.register(
+            "a/b".to_string(),
+            flowgen_core::task::inproc::registry::Registration {
+                tx,
+                task_name: "on_call".to_string(),
+                task_id: 0,
+                task_type: "inproc_endpoint",
+                leaf_count: 1,
+                ack_timeout: None,
+                callers: Vec::new(),
+                cancellation_token: tokio_util::sync::CancellationToken::new(),
+            },
+        );
+        let called = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        let stop = tokio_util::sync::CancellationToken::new();
+        let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
+        let caller = tokio::spawn({
+            let stop = stop.clone();
+            let servers = servers.clone();
+            async move {
+                stop.cancelled().await;
+                let _ = seen_tx.send(servers.inproc.is_registered("a/b"));
+            }
+        });
+        let mut calling = flow_handle("a/c", false, caller, None);
+        calling.cancellation_token = stop;
+        let flow_registry = RwLock::new(HashMap::from([
+            ("a/b".to_string(), flow_handle("a/b", false, called, None)),
+            ("a/c".to_string(), calling),
+        ]));
+
+        stop_flows(&flow_registry, &servers).await;
+
+        assert_eq!(seen_rx.await, Ok(true));
+        assert!(!servers.inproc.is_registered("a/b"));
+    }
+
+    #[test]
+    fn a_shutdown_waits_for_the_flow_a_reload_is_stopping() {
+        let flow_registry = RwLock::new(HashMap::new());
+        let stopping = RwLock::new(HashMap::from([(
+            "slow".to_string(),
+            std::time::Duration::from_secs(120),
+        )]));
+
+        let timeout = longest_shutdown_timeout(
+            &flow_registry,
+            &stopping,
+            std::time::Duration::from_secs(20),
+        );
+
+        assert_eq!(timeout, std::time::Duration::from_secs(120));
     }
 
     #[tokio::test]

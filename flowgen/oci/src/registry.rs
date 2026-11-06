@@ -34,6 +34,7 @@ impl Error {
 
 /// Registry credentials loaded from the credentials JSON file.
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Credentials {
     /// Registry username. For GHCR with a Personal Access Token, this is
     /// the GitHub username; with a GitHub Actions token, it's the actor.
@@ -165,6 +166,16 @@ struct DockerConfigAuth {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_misspelled_credentials_field_is_rejected() {
+        let error = serde_json::from_str::<Credentials>(
+            r#"{"username": "u", "password": "p", "registry": "r"}"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("unknown field `registry`"), "{error}");
+    }
 
     #[test]
     fn error_display_read_credentials() {

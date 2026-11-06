@@ -17,11 +17,8 @@ flow:
     - generate:
         name: ticker
         interval: "5s"
-        code: |
-          #{
-            message: "hello from flowgen",
-            timestamp: timestamp_now()
-          }
+        payload:
+          message: hello from flowgen
 
     - script:
         name: transform

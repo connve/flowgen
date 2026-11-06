@@ -44,7 +44,7 @@ fn templates(value: &serde_json::Value, found: &mut Vec<String>) {
 
 /// True if `template` might read the event's data: it mentions `data`, or uses
 /// the whole event instead of one of its fields.
-fn reads_event_data(template: &str) -> bool {
+pub(crate) fn reads_event_data(template: &str) -> bool {
     template.contains("data")
         || template
             .match_indices("event")

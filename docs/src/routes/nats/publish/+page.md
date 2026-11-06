@@ -25,7 +25,7 @@ Publishes events to a NATS JetStream subject.
 | `stream.name` | string | required | Stream name. |
 | `stream.subjects` | list | `[]` | Subject patterns for the stream. If empty when creating, defaults to `">"` (all subjects). |
 | `stream.create_or_update` | bool | `false` | Create the stream if it does not exist, or update it to merge subjects and inherit limits. |
-| `stream.retention` | string | | `limits`, `interest`, or `workqueue`. |
+| `stream.retention` | string | | `limits`, `interest`, or `work_queue`. |
 | `stream.discard` | string | | `old` or `new`. What to do when a stream limit is reached. |
 | `stream.max_messages` | int | | Maximum number of messages in the **entire stream** across all subjects. If you want a cap per subject, use `max_messages_per_subject` instead. |
 | `stream.discard_new_per_subject` | bool | | When `true` and `discard: new`, rejects new messages for a subject that has reached `max_messages_per_subject`. Without it, `discard: new` evicts old messages instead. |

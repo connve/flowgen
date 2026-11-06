@@ -2,17 +2,18 @@
 	import { onMount } from 'svelte';
 	import { SvelteSet } from 'svelte/reactivity';
 	import { base } from '$app/paths';
-	import { goto, pushState } from '$app/navigation';
+	import { goto, pushState, replaceState } from '$app/navigation';
 	import { page } from '$app/state';
 	import ResourceViewer from '$lib/ResourceViewer.svelte';
-	import Badge from '$lib/Badge.svelte';
 	import CopyButton from '$lib/CopyButton.svelte';
+	import Inspector from '$lib/Inspector.svelte';
 	import StateMessage from '$lib/StateMessage.svelte';
 	import Icon from '@iconify/svelte';
 	import { m } from '$lib/paraglide/messages.js';
-	import PaneResizer from '$lib/PaneResizer.svelte';
-	import { PaneWidth } from '$lib/paneWidth.svelte';
-	import { isMobile, PANE_OVER_PAGE } from '$lib/mobile';
+	import FolderTree from '$lib/FolderTree.svelte';
+	import ListHeader from '$lib/ListHeader.svelte';
+	import SidePane from '$lib/SidePane.svelte';
+	import { isMobile } from '$lib/mobile';
 	import { pageTitle } from '$lib/pageTitle';
 	import {
 		apiUrl,
@@ -24,8 +25,8 @@
 		type ResourceSummary as Resource,
 		type ResourceContent
 	} from '$lib/api';
-	import { buildTree, type TreeNode } from '$lib/tree';
-	import EditButton from '$lib/EditButton.svelte';
+	import { buildTree } from '$lib/tree';
+	import IconButton from '$lib/IconButton.svelte';
 	import {
 		authoringEnabled,
 		authoringTargets,
@@ -46,16 +47,13 @@
 	let expandedFolders = $state(new SvelteSet<string>());
 	let selectedFolder = $state<string | null>(null);
 	let foldersPaneOpen = $state(true);
-	const paneWidth = new PaneWidth('resources');
 
 	let selected = $state<string | null>(null);
 	let selectedContent = $state<ResourceContent | null>(null);
 	let selectedLoading = $state(false);
 	let selectedError = $state<string | null>(null);
 
-	// Modal breadcrumb parts derived from `selected`.
 	let selectedSegments = $derived(selected ? selected.split('/') : []);
-	let selectedFolderSegments = $derived(selectedSegments.slice(0, -1));
 	let selectedLeaf = $derived(selectedSegments[selectedSegments.length - 1] ?? '');
 
 	onMount(async () => {
@@ -110,10 +108,6 @@
 		localStorage.setItem('flowgen-resources-pane', foldersPaneOpen ? '1' : '0');
 	}
 
-	function hasSubfolders(node: TreeNode<Resource>): boolean {
-		return (node.children ?? []).some((c) => c.isFolder);
-	}
-
 
 	let sidebarTree = $derived(buildTree<Resource>(resources, (r) => r.key));
 
@@ -123,16 +117,14 @@
 		return resources.filter((r) => r.key.startsWith(prefix));
 	});
 
-	// Same anti-flash pattern as the flows page: only surface the modal once
-	// we actually have content, keep a cache so repeats paint instantly, and
-	// tag each fetch with `pending` so stale responses can't overwrite the
-	// current selection.
+	// A cache paints repeats instantly; `pending` keeps stale responses from overwriting the selection.
 	const contentCache = new Map<string, ResourceContent>();
 	let pendingResource: string | null = null;
 
 	async function openResource(key: string) {
 		pendingResource = key;
-		pushState(`${base}/resources/${encodePath(key)}`, { resource: key });
+		const show = page.state.resource ? replaceState : pushState;
+		show(`${base}/resources/${encodePath(key)}`, { resource: key });
 		const cached = contentCache.get(key);
 		if (cached) {
 			selected = key;
@@ -198,178 +190,44 @@
 <svelte:window on:keydown={onKeydown} />
 
 <section class="relative flex h-[calc(100vh-4rem)]">
-	{#if foldersPaneOpen}
-		<div class="absolute inset-0 z-20 bg-black/30 md:hidden" aria-hidden="true" onclick={closePaneOnMobile}></div>
-	{/if}
-	<aside
-		class="relative flex shrink-0 flex-col border-r border-base-300 bg-base-100 {paneWidth.dragging
-			? ''
-			: 'transition-[width] duration-200 ease-out'} {foldersPaneOpen ? PANE_OVER_PAGE : 'w-16'}"
-		style:width={foldersPaneOpen ? `${paneWidth.width}px` : undefined}
+	<SidePane
+		open={foldersPaneOpen}
+		title={m.resources_folders()}
+		collapseLabel={m.resources_collapse_folders()}
+		expandLabel={m.resources_expand_folders()}
+		ontoggle={toggleFoldersPane}
+		onclose={closePaneOnMobile}
 	>
-		{#if foldersPaneOpen}
-			<PaneResizer pane={paneWidth} />
-		{/if}
-		{#if !foldersPaneOpen}
-			<div class="flex flex-1 flex-col items-center py-2">
-				<div class="tooltip tooltip-right" data-tip={m.resources_folders()}>
-					<button
-						type="button"
-						aria-label={m.resources_expand_folders()}
-						class="relative flex h-10 w-10 items-center justify-center rounded-md bg-base-200 text-primary transition-colors hover:bg-base-200"
-						onclick={toggleFoldersPane}
-					>
-						<span class="absolute -left-1 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r bg-primary"></span>
-						<Icon icon="tabler:layout-list" class="h-5 w-5 shrink-0" />
-					</button>
-				</div>
-			</div>
-		{:else}
-			<div class="flex-1 overflow-y-auto px-3 py-2">
-				<ul class="space-y-0.5 text-sm">
-					<li>
-						<button
-							type="button"
-							class="relative flex w-full items-center gap-1.5 h-10 rounded-md px-2 text-left transition-colors {selectedFolder === null
-								? 'bg-base-200 font-medium text-primary'
-								: 'hover:bg-base-200'}"
-							onclick={() => selectFolder(null)}
-						>
-							{#if selectedFolder === null}
-								<span class="absolute -left-1 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r bg-primary"></span>
-							{/if}
-							<Icon icon="tabler:layout-list" class="h-5 w-5 shrink-0 opacity-70" />
-							<span>{m.resources_all()}</span>
-							<span class="ml-auto text-xs opacity-50">{resources.length}</span>
-						</button>
-					</li>
-					{#snippet sidebarNodes(nodes: TreeNode<Resource>[])}
-						{#each nodes as node (node.fullPath)}
-							{#if node.isFolder}
-								{@const isOpen = expandedFolders.has(node.fullPath)}
-								{@const isSelected = selectedFolder === node.fullPath}
-								{@const canExpand = hasSubfolders(node)}
-								<li>
-									<div class="flex items-center gap-0.5">
-										{#if canExpand}
-											<button
-												type="button"
-												class="flex h-6 w-6 shrink-0 items-center justify-center rounded hover:bg-base-200"
-												aria-label={isOpen ? m.resources_collapse_folder() : m.resources_expand_folder()}
-												onclick={() => toggleFolder(node.fullPath)}
-											>
-												<Icon
-													icon={isOpen ? 'tabler:chevron-down' : 'tabler:chevron-right'}
-													class="h-3.5 w-3.5 opacity-70"
-												/>
-											</button>
-										{:else}
-											<span class="h-6 w-6 shrink-0"></span>
-										{/if}
-										<button
-											type="button"
-											class="relative flex flex-1 items-center gap-1.5 h-10 rounded-md px-2 text-left transition-colors {isSelected
-												? 'bg-base-200 font-medium text-primary'
-												: 'hover:bg-base-200'}"
-											style="padding-left: {node.depth * 0.75 + 0.375}rem"
-											onclick={() => selectFolder(node.fullPath)}
-										>
-											{#if isSelected}
-												<span class="absolute -left-1 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r bg-primary"></span>
-											{/if}
-											<Icon
-												icon={isOpen && canExpand ? 'tabler:folder-open' : 'tabler:folder'}
-												class="h-5 w-5 shrink-0 opacity-70"
-											/>
-											<span class="truncate">{node.name}</span>
-											<span class="ml-auto text-xs opacity-50">{node.fileCount}</span>
-										</button>
-									</div>
-									{#if isOpen && canExpand && node.children}
-										<ul class="space-y-0.5">
-											{@render sidebarNodes(node.children)}
-										</ul>
-									{/if}
-								</li>
-							{/if}
-						{/each}
-					{/snippet}
-					{@render sidebarNodes(sidebarTree)}
-				</ul>
-			</div>
-		{/if}
-		<div
-			class="flex h-12 shrink-0 items-center border-t border-base-200 {foldersPaneOpen
-				? 'justify-end px-3'
-				: 'justify-center'}"
-		>
-			<button
-				type="button"
-				aria-label={foldersPaneOpen ? m.resources_collapse_folders() : m.resources_expand_folders()}
-				data-tip={foldersPaneOpen ? m.resources_collapse_folders() : m.resources_expand_folders()}
-				class="tooltip {foldersPaneOpen
-					? 'tooltip-top'
-					: 'tooltip-right'} flex h-10 w-10 items-center justify-center rounded-md text-base-content/70 transition-colors hover:bg-base-200 hover:text-base-content"
-				onclick={toggleFoldersPane}
-			>
-				<Icon
-					icon={foldersPaneOpen ? 'tabler:chevron-left' : 'tabler:chevron-right'}
-					class="h-5 w-5"
-				/>
-			</button>
+		<div class="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
+			<FolderTree
+				tree={sidebarTree}
+				selected={selectedFolder}
+				expanded={expandedFolders}
+				allLabel={m.resources_all()}
+				allIcon="tabler:layout-list"
+				allCount={resources.length}
+				expandLabel={() => m.resources_expand_folder()}
+				collapseLabel={() => m.resources_collapse_folder()}
+				onselect={selectFolder}
+				ontoggle={toggleFolder}
+			/>
 		</div>
-	</aside>
+	</SidePane>
 
-	<div class="flex min-w-0 flex-1 flex-col">
-		<div class="shrink-0 space-y-3 border-b border-base-200 bg-base-100 px-6 pb-4 pt-6">
-			<div class="flex min-h-8 items-center justify-between gap-2">
-				<div class="flex items-center gap-1.5 text-sm">
-					{#if selectedFolder}
-						{@const segments = selectedFolder.split('/')}
-						<button
-							type="button"
-							class="text-primary hover:underline"
-							onclick={() => selectFolder(null)}
-						>{m.resources_all()}</button>
-						{#each segments as segment, i}
-							<span class="opacity-40">/</span>
-							{#if i < segments.length - 1}
-								<button
-									type="button"
-									class="font-mono text-primary hover:underline"
-									onclick={() => selectFolder(segments.slice(0, i + 1).join('/'))}
-								>{segment}</button>
-							{:else}
-								<span class="font-mono">{segment}</span>
-							{/if}
-						{/each}
-					{:else}
-						<span>{m.resources_all()}</span>
-					{/if}
-					<span class="text-xs opacity-50">· {m.resources_item_count({ count: visibleResources.length })}</span>
-				</div>
-				{#if authoring}
-					<div class="flex items-center gap-2">
-						<a
-							href="{base}/changes"
-							class="btn btn-ghost btn-sm gap-1.5 {pending.length > 0 ? 'text-attention' : ''}"
-						>
-							<Icon icon="tabler:git-pull-request" class="h-4 w-4" />
-							{m.resources_pending_changes({ count: pending.length })}
-						</a>
-						<a
-							href="{base}/edit?new=resource{selectedFolder ? `&folder=${encodePath(selectedFolder)}` : ''}"
-							class="btn btn-primary btn-sm gap-1.5"
-						>
-							<Icon icon="tabler:plus" class="h-4 w-4" />
-							{m.common_new()}
-						</a>
-					</div>
-				{/if}
-			</div>
+	<div class="@container flex min-w-0 flex-1 flex-col">
+		<div class="shrink-0 space-y-3 bg-base-100 px-6 pb-4 pt-6">
+			<ListHeader
+				allLabel={m.resources_all()}
+				folder={selectedFolder}
+				onselect={selectFolder}
+				count={m.resources_item_count({ count: visibleResources.length })}
+				pending={authoring ? pending.length : null}
+				pendingLabel={m.resources_pending_changes({ count: pending.length })}
+				newHref="{base}/edit?new=resource{selectedFolder ? `&folder=${encodePath(selectedFolder)}` : ''}"
+			/>
 		</div>
 
-		<div class="flex min-h-0 flex-1 flex-col overflow-y-auto p-6">
+		<div class="flex min-h-0 flex-1 flex-col overflow-y-auto px-6 pb-6">
 		{#if loading}
 			<div class="flex justify-center py-12">
 				<span class="loading loading-spinner loading-lg text-primary"></span>
@@ -383,9 +241,9 @@
 				message={authoring ? m.resources_empty_message_authoring() : m.resources_empty_message()}
 			/>
 		{:else}
-			<div class="shrink-0 overflow-x-auto rounded-lg border border-base-300 bg-base-100">
+			<div class="-mx-6 shrink-0 overflow-x-auto px-6">
 				<table class="table table-sm w-full bg-base-100">
-					<thead class="bg-base-100 text-xs uppercase tracking-wide">
+					<thead class="bg-base-100 text-xs font-medium text-base-content/50">
 						<tr>
 							<th>{m.resources_column_key()}</th>
 							<th>{m.resources_column_type()}</th>
@@ -395,7 +253,9 @@
 					<tbody>
 						{#each visibleResources as resource (resource.key)}
 							<tr
-								class="cursor-pointer transition-colors hover:bg-base-200"
+								class="cursor-pointer transition-colors hover:bg-base-200 {selected === resource.key
+									? 'bg-base-200'
+									: ''}"
 								onclick={() => openResource(resource.key)}
 								ondblclick={() => goto(`${base}/resources/${encodePath(resource.key)}`)}
 								onkeydown={(e) => {
@@ -404,10 +264,10 @@
 								tabindex="0"
 								role="button"
 							>
-								<td class="font-mono text-xs">{resource.key}</td>
+								<td class="w-full max-w-0"><div class="truncate">{resource.key}</div></td>
 								<td>
 									{#if resource.extension}
-										<Badge>{resource.extension}</Badge>
+										<span class="text-xs text-base-content/50">{resource.extension}</span>
 									{:else}
 										<span class="opacity-50">—</span>
 									{/if}
@@ -423,89 +283,36 @@
 		{/if}
 		</div>
 	</div>
+
+	{#if selected}
+		{@const key = selected}
+		<Inspector title={selectedLeaf} label={m.resource_viewer_label()} onclose={closeResource}>
+			{#snippet subtitle()}
+				<span class="truncate">{key}</span>
+			{/snippet}
+			{#snippet actions()}
+				<CopyButton text={selectedContent?.content} label={m.common_copy()} tooltip="bottom" />
+				{#if targetOf(targets, `resources/${key}`)}
+					<IconButton icon="tabler:pencil" label={m.common_edit()} href={editUrl(base, `resources/${key}`)} />
+				{/if}
+				<IconButton
+					icon="tabler:arrow-up-right"
+					label={m.resource_open_full_page()}
+					href="{base}/resources/{encodePath(key)}"
+				/>
+			{/snippet}
+			{#if selectedLoading}
+				<div class="flex justify-center py-12">
+					<span class="loading loading-spinner loading-md text-primary"></span>
+				</div>
+			{:else if selectedError}
+				<StateMessage tone="oops" title={m.resource_load_failed()} message={selectedError} />
+			{:else if selectedContent}
+				<div class="-mx-6 overflow-auto bg-base-200 text-xs">
+					<ResourceViewer content={selectedContent.content} extension={selectedContent.extension} />
+				</div>
+			{/if}
+		</Inspector>
+	{/if}
 </section>
 
-{#if selected}
-	<div
-		class="fixed inset-0 z-40 flex items-center justify-center bg-black/70 p-4"
-		role="dialog"
-		aria-modal="true"
-		aria-label={m.resource_viewer_label()}
-		onclick={(e) => {
-			if (e.target === e.currentTarget) closeResource();
-		}}
-		onkeydown={(e) => {
-			if (e.key === 'Escape') closeResource();
-		}}
-		tabindex="-1"
-	>
-		<div
-			class="flex max-h-[90vh] w-full max-w-4xl flex-col overflow-hidden rounded-lg border border-base-300 bg-base-100 shadow-2xl ring-1 ring-base-content/10"
-		>
-			<div class="flex items-start justify-between border-b border-base-200 px-4 py-3">
-				<div class="min-w-0 flex-1">
-					<div class="mb-0.5 flex items-center gap-1.5 text-xs">
-						<span class="opacity-60">{m.resources_breadcrumb()}</span>
-						{#each selectedFolderSegments as segment}
-							<span class="opacity-40">/</span>
-							<span class="font-mono opacity-70">{segment}</span>
-						{/each}
-						<span class="opacity-40">/</span>
-						<span class="font-mono">{selectedLeaf}</span>
-					</div>
-					<div class="text-sm font-medium">{selectedLeaf}</div>
-				</div>
-				<div class="flex items-center gap-1">
-					{#if selected}
-						{#if targetOf(targets, `resources/${selected}`)}
-							<EditButton href={editUrl(base, `resources/${selected}`)} tooltip="left" />
-						{/if}
-						<div class="tooltip tooltip-left" data-tip={m.resource_open_full_page()}>
-							<a
-								href="{base}/resources/{encodePath(selected)}"
-								class="btn btn-ghost btn-sm btn-circle"
-								aria-label={m.resource_open_full_page()}
-							>
-								<Icon icon="tabler:external-link" class="h-5 w-5" />
-							</a>
-						</div>
-					{/if}
-					<div class="tooltip tooltip-left" data-tip={m.common_close()}>
-						<button
-							type="button"
-							class="btn btn-ghost btn-sm btn-circle"
-							aria-label={m.common_close()}
-							onclick={closeResource}
-						>
-							<Icon icon="tabler:x" class="h-5 w-5" />
-						</button>
-					</div>
-				</div>
-			</div>
-			<div class="flex h-10 shrink-0 items-center justify-between border-b border-base-200 bg-base-100 px-4">
-				<span class="text-xs font-medium uppercase opacity-70">
-					{selectedContent?.extension ?? m.resource_file_type_fallback()}
-				</span>
-				<CopyButton text={selectedContent?.content} label={m.common_copy()} />
-			</div>
-			<div class="flex min-h-0 flex-1 flex-col overflow-hidden bg-base-200">
-				{#if selectedLoading}
-					<div class="flex items-center justify-center py-12">
-						<span class="loading loading-spinner loading-md text-primary"></span>
-					</div>
-				{:else if selectedError}
-					<div class="flex-1">
-						<StateMessage tone="oops" title={m.resource_load_failed()} message={selectedError} />
-					</div>
-				{:else if selectedContent}
-					<div class="min-h-0 flex-1 overflow-auto">
-						<ResourceViewer
-							content={selectedContent.content}
-							extension={selectedContent.extension}
-						/>
-					</div>
-				{/if}
-			</div>
-		</div>
-	</div>
-{/if}

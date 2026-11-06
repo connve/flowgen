@@ -36,7 +36,7 @@ An invalid configuration, such as a script that doesn't compile, fails the task 
 
 ## Flow restarts
 
-When a task fails, the whole flow restarts. The other tasks are stopped first and get up to 30 seconds to finish what they hold. The delay starts at `initial_backoff` and doubles up to 5 minutes; it resets after the flow has run for 5 minutes. A flow whose tasks all finish, such as a run-once `generate`, is not restarted.
+When a task fails, the whole flow restarts. The other tasks are stopped first, as described in [Stopping a flow](/docs/flowgen/concepts/flows#stopping-a-flow). The delay starts at `initial_backoff` and doubles up to 5 minutes; it resets after the flow has run for 5 minutes. A flow whose tasks all finish, such as a run-once `generate`, is not restarted.
 
 ## Startup jitter
 

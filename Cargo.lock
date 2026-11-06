@@ -2281,7 +2281,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen"
-version = "0.153.0"
+version = "0.154.0"
 dependencies = [
  "arrow",
  "async-nats",
@@ -2323,6 +2323,7 @@ dependencies = [
  "rustls",
  "secrecy",
  "serde",
+ "serde_ignored",
  "serde_json",
  "serde_yaml",
  "sha2 0.10.9",
@@ -2345,7 +2346,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen-chart-tests"
-version = "0.153.0"
+version = "0.154.0"
 dependencies = [
  "serde",
  "serde_yaml",
@@ -2353,7 +2354,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_ai_agent"
-version = "0.153.0"
+version = "0.154.0"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
@@ -2377,6 +2378,7 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 1.0.69",
  "tokio",
  "tokio-retry2",
@@ -2389,7 +2391,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_braze"
-version = "0.153.0"
+version = "0.154.0"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
@@ -2406,7 +2408,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_client"
-version = "0.153.0"
+version = "0.154.0"
 dependencies = [
  "bytes",
  "chrono",
@@ -2423,7 +2425,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_core"
-version = "0.153.0"
+version = "0.154.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -2474,7 +2476,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_gcp"
-version = "0.153.0"
+version = "0.154.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -2504,7 +2506,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_git"
-version = "0.153.0"
+version = "0.154.0"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
@@ -2528,7 +2530,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_html"
-version = "0.153.0"
+version = "0.154.0"
 dependencies = [
  "async-trait",
  "flowgen_core",
@@ -2543,7 +2545,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_http"
-version = "0.153.0"
+version = "0.154.0"
 dependencies = [
  "arrow-json",
  "async-trait",
@@ -2570,7 +2572,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_kafka"
-version = "0.153.0"
+version = "0.154.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -2598,7 +2600,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_klaviyo"
-version = "0.153.0"
+version = "0.154.0"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
@@ -2615,7 +2617,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_macros"
-version = "0.153.0"
+version = "0.154.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2624,7 +2626,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_mcp"
-version = "0.153.0"
+version = "0.154.0"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
@@ -2654,7 +2656,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_mongodb"
-version = "0.153.0"
+version = "0.154.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -2685,7 +2687,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_mssql"
-version = "0.153.0"
+version = "0.154.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -2710,7 +2712,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_nats"
-version = "0.153.0"
+version = "0.154.0"
 dependencies = [
  "arrow",
  "async-nats",
@@ -2740,7 +2742,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_object_store"
-version = "0.153.0"
+version = "0.154.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -2765,7 +2767,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_oci"
-version = "0.153.0"
+version = "0.154.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2789,7 +2791,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_postgres"
-version = "0.153.0"
+version = "0.154.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -2820,7 +2822,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_salesforce"
-version = "0.153.0"
+version = "0.154.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -7510,6 +7512,7 @@ dependencies = [
  "once_cell",
  "rhai_codegen",
  "serde",
+ "serde_json",
  "smallvec",
  "smartstring",
  "thin-vec",
@@ -8438,6 +8441,16 @@ dependencies = [
  "indexmap 2.13.0",
  "itoa",
  "ryu",
+ "serde_core",
+]
+
+[[package]]
+name = "serde_ignored"
+version = "0.1.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "115dffd5f3853e06e746965a20dcbae6ee747ae30b543d91b0e089668bb07798"
+dependencies = [
+ "serde",
  "serde_core",
 ]
 

@@ -20,7 +20,7 @@ use tokio::{
 };
 use tracing::error;
 
-/// `http_request` task config.
+/// `http_request` task config; unknown fields are rejected by the transparent inner `Processor`.
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, TaskConfig)]
 #[serde(transparent)]
 pub struct Request(pub super::config::Processor);
@@ -42,6 +42,22 @@ fn error_chain<E: std::error::Error + ?Sized>(err: &E) -> String {
         current = cause.source();
     }
     out
+}
+
+/// A flat payload with its numbers as text, which `arbitrary_precision` would serialize as maps.
+fn numbers_as_text(payload: &Value) -> Value {
+    match payload {
+        Value::Object(fields) => Value::Object(
+            fields
+                .iter()
+                .map(|(name, value)| match value {
+                    Value::Number(number) => (name.clone(), Value::String(number.to_string())),
+                    other => (name.clone(), other.clone()),
+                })
+                .collect(),
+        ),
+        other => other.clone(),
+    }
 }
 
 /// Errors that can occur during HTTP request processing.
@@ -124,6 +140,23 @@ pub enum Error {
     },
 }
 
+impl Error {
+    /// Whether retrying might help: not for a client error status other than 429, nor for a request that cannot be built.
+    fn is_retryable(&self) -> bool {
+        match self {
+            Self::HttpError { status, .. } => !(400..500).contains(status) || *status == 429,
+            Self::Reqwest { source, .. } => !source.is_builder(),
+            Self::ReqwestInvalidHeaderName { .. }
+            | Self::ReqwestInvalidHeaderValue { .. }
+            | Self::ConfigRender { .. }
+            | Self::SerdeJson { .. }
+            | Self::PayloadConfig
+            | Self::MissingEventData => false,
+            _ => true,
+        }
+    }
+}
+
 /// Event handler for processing HTTP requests.
 #[derive(Debug)]
 pub struct EventHandler {
@@ -152,10 +185,7 @@ impl flowgen_core::task::runner::Handler for EventHandler {
     }
 
     fn is_retryable(&self, error: &Error) -> bool {
-        !matches!(
-            error,
-            Error::HttpError { status, .. } if (400..500).contains(status) && *status != 429
-        )
+        error.is_retryable()
     }
 
     /// Processes an event by making an HTTP request.
@@ -230,8 +260,12 @@ impl flowgen_core::task::runner::Handler for EventHandler {
 
                 client = match payload.send_as {
                     crate::config::PayloadSendAs::Json => client.json(&event_data),
-                    crate::config::PayloadSendAs::UrlEncoded => client.form(&event_data),
-                    crate::config::PayloadSendAs::QueryParams => client.query(&event_data),
+                    crate::config::PayloadSendAs::UrlEncoded => {
+                        client.form(&numbers_as_text(event_data))
+                    }
+                    crate::config::PayloadSendAs::QueryParams => {
+                        client.query(&numbers_as_text(event_data))
+                    }
                 };
             }
 
@@ -621,6 +655,64 @@ mod tests {
         let json_error = serde_json::from_str::<serde_json::Value>("invalid json").unwrap_err();
         let error = Error::SerdeJson { source: json_error };
         assert!(matches!(error, Error::SerdeJson { .. }));
+    }
+
+    #[test]
+    fn a_query_or_form_takes_numbers() {
+        let payload = serde_json::json!({ "q": "a b", "count": 10, "ratio": 0.5 });
+        let client = reqwest::Client::new();
+
+        let query = client
+            .get("https://example.com/search")
+            .query(&numbers_as_text(&payload))
+            .build()
+            .unwrap();
+        let form = client
+            .post("https://example.com/search")
+            .form(&numbers_as_text(&payload))
+            .build()
+            .unwrap();
+
+        let pairs = |encoded: &str| {
+            let mut pairs: Vec<String> = encoded.split('&').map(String::from).collect();
+            pairs.sort();
+            pairs
+        };
+        let form_body = form.body().and_then(|body| body.as_bytes()).unwrap();
+        let expected = ["count=10", "q=a+b", "ratio=0.5"];
+
+        assert_eq!(pairs(query.url().query().unwrap()), expected);
+        assert_eq!(pairs(std::str::from_utf8(form_body).unwrap()), expected);
+    }
+
+    #[test]
+    fn a_request_that_cannot_be_built_is_not_retried() {
+        let source = reqwest::Client::new()
+            .get("https://example.com")
+            .query(&serde_json::json!({ "nested": { "a": 1 } }))
+            .build()
+            .unwrap_err();
+        let unbuildable = Error::Reqwest {
+            endpoint: "https://example.com".to_string(),
+            method: "GET".to_string(),
+            source,
+        };
+        let status = |status| Error::HttpError {
+            endpoint: String::new(),
+            method: String::new(),
+            status,
+            body: String::new(),
+        };
+
+        let bad_input = Error::SerdeJson {
+            source: serde_json::from_str::<Value>("{").unwrap_err(),
+        };
+
+        assert!(!unbuildable.is_retryable());
+        assert!(!bad_input.is_retryable());
+        assert!(!status(404).is_retryable());
+        assert!(status(429).is_retryable());
+        assert!(status(503).is_retryable());
     }
 
     #[tokio::test]

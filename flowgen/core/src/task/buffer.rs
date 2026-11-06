@@ -212,6 +212,8 @@ pub struct Processor {
     task_context: Arc<crate::task::context::TaskContext>,
     /// Task type for event categorization and logging.
     task_type: &'static str,
+    /// The compiled `partition_key`.
+    partition_key: Option<PartitionKey>,
 }
 
 /// The `iterate` array an event came from.
@@ -236,19 +238,65 @@ fn take_iterate_array(meta: &mut Option<Map<String, Value>>) -> Option<IterateAr
     }
 }
 
-/// Renders `template` for `event` as text, so a key like `{{a}}.{{b}}` keeps
-/// its digits as written. An empty key, from a missing or null field, fails.
-fn partition_key(template: &str, event: &Event) -> Result<String, Error> {
-    let event_value =
-        crate::event::template_value(event, true).map_err(|source| Error::Render {
-            source: crate::config::Error::Event {
-                source: Box::new(source),
-            },
+/// The `partition_key` template, compiled once.
+#[derive(Debug)]
+struct PartitionKey {
+    handlebars: handlebars::Handlebars<'static>,
+    with_data: bool,
+    env: Option<Value>,
+}
+
+impl PartitionKey {
+    /// Compiles `template`, with the process environment when it reads `env`.
+    fn new(template: &str) -> Result<Self, Error> {
+        let mut handlebars = handlebars::Handlebars::new();
+        handlebars.register_escape_fn(handlebars::no_escape);
+        handlebars
+            .register_template_string("partition_key", template)
+            .map_err(|source| Error::Render {
+                source: crate::config::Error::Render {
+                    source: source.into(),
+                },
+            })?;
+        let env = match template.contains("env") {
+            true => Some(Value::Object(
+                std::env::vars()
+                    .map(|(k, v)| (k, Value::String(v)))
+                    .collect(),
+            )),
+            false => None,
+        };
+        Ok(Self {
+            handlebars,
+            with_data: crate::config::reads_event_data(template),
+            env,
+        })
+    }
+
+    /// Renders the key for `event` as text, so `{{a}}.{{b}}` keeps its digits
+    /// as written. An empty key, from a missing or null field, fails.
+    fn render(&self, event: &Event) -> Result<String, Error> {
+        let mut value = crate::event::template_value(event, self.with_data).map_err(|source| {
+            Error::Render {
+                source: crate::config::Error::Event {
+                    source: Box::new(source),
+                },
+            }
         })?;
-    match crate::config::render_template(template, &event_value) {
-        Ok(key) if key.is_empty() => Err(Error::MissingPartitionKey),
-        Ok(key) => Ok(key),
-        Err(source) => Err(Error::Render { source }),
+        if let (Some(env), Value::Object(map)) = (&self.env, &mut value) {
+            map.insert("env".to_string(), env.clone());
+        }
+        let context = handlebars::Context::from(value);
+        match self
+            .handlebars
+            .render_with_context("partition_key", &context)
+        {
+            Ok(key) if key.is_empty() => Err(Error::MissingPartitionKey),
+            Ok(key) => Ok(key),
+            Err(source) => Err(Error::Render {
+                source: crate::config::Error::Render { source },
+            }),
+        }
     }
 }
 
@@ -332,13 +380,16 @@ impl Batches {
 
     /// Time until the earliest batch or array progress times out.
     fn until_timeout(&self, timeout: Duration) -> Duration {
-        self.open
+        let earliest = self
+            .open
             .values()
             .map(|batch| batch.started)
             .chain(self.arrays.values().map(|progress| progress.last_received))
-            .map(|since| timeout.saturating_sub(since.elapsed()))
-            .min()
-            .unwrap_or(timeout)
+            .min();
+        match earliest {
+            Some(since) => timeout.saturating_sub(since.elapsed()),
+            None => timeout,
+        }
     }
 
     /// Removes the batch under `key`.
@@ -376,6 +427,11 @@ impl Batches {
         self.open
             .extract_if(|_, batch| batch.started.elapsed() >= timeout)
             .collect()
+    }
+
+    /// Removes every open batch.
+    fn take_all(&mut self) -> Vec<(BatchKey, Batch)> {
+        self.open.drain().collect()
     }
 }
 
@@ -527,12 +583,18 @@ impl Processor {
     /// 2. Timeout expiration to flush partial batches
     /// 3. Shutdown signal to flush remaining events
     ///
+    /// Once the flow stops reading, every batch is flushed whenever no event waits.
+    ///
     /// Each partition, and with `flush_on_completion` each `iterate` array,
     /// has its own batch with independent size and timeout tracking. Returns
     /// an error once a flush fails, since the next task no longer takes events.
     async fn process_events(&mut self) -> Result<(), Error> {
         let timeout = self.config.timeout.unwrap_or(Duration::from_secs(30));
         let mut batches = Batches::default();
+        let stop_reading = self.task_context.stop_reading.clone();
+        let stopped = stop_reading.cancelled();
+        tokio::pin!(stopped);
+        let mut stopping = false;
 
         loop {
             if self.task_context.cancellation_token.is_cancelled() {
@@ -542,12 +604,18 @@ impl Processor {
             let until_timeout = batches.until_timeout(timeout);
             tokio::select! {
                 result = self.rx.recv() => match result {
-                    Some(event) => self.receive(&mut batches, event).await?,
-                    None => {
-                        let remaining = batches.open.drain().collect();
-                        return self.flush_all(remaining, FlushReason::Shutdown).await;
+                    Some(event) => {
+                        self.receive(&mut batches, event).await?;
+                        if stopping && self.rx.is_empty() && !batches.open.is_empty() {
+                            self.flush_all(batches.take_all(), FlushReason::Shutdown).await?;
+                        }
                     }
+                    None => return self.flush_all(batches.take_all(), FlushReason::Shutdown).await,
                 },
+                _ = &mut stopped, if !stopping => {
+                    stopping = true;
+                    self.flush_all(batches.take_all(), FlushReason::Shutdown).await?;
+                }
                 _ = sleep(until_timeout), if !batches.is_empty() => {
                     let expired = batches.take_expired(timeout);
                     self.flush_all(expired, FlushReason::Timeout).await?;
@@ -603,8 +671,8 @@ impl Processor {
     /// Renders the event's partition key and takes its JSON data, leaving
     /// any other data in place.
     fn batch_entry(&self, event: &mut Event) -> Result<(Option<String>, Value), Error> {
-        let partition = match &self.config.partition_key {
-            Some(template) => Some(partition_key(template, event)?),
+        let partition = match &self.partition_key {
+            Some(partition_key) => Some(partition_key.render(event)?),
             None => None,
         };
         let data = match &mut event.data {
@@ -734,10 +802,16 @@ impl ProcessorBuilder {
     }
 
     pub async fn build(self) -> Result<Processor, Error> {
+        let config = self
+            .config
+            .ok_or_else(|| Error::MissingBuilderAttribute("config".to_string()))?;
+        let partition_key = match &config.partition_key {
+            Some(template) => Some(PartitionKey::new(template)?),
+            None => None,
+        };
         Ok(Processor {
-            config: self
-                .config
-                .ok_or_else(|| Error::MissingBuilderAttribute("config".to_string()))?,
+            config,
+            partition_key,
             rx: self
                 .rx
                 .ok_or_else(|| Error::MissingBuilderAttribute("receiver".to_string()))?,
@@ -1330,6 +1404,13 @@ mod tests {
     }
 
     async fn spawn_buffer(config: Buffer) -> (mpsc::Sender<Event>, mpsc::Receiver<Event>) {
+        spawn_buffer_with(config, create_mock_task_context()).await
+    }
+
+    async fn spawn_buffer_with(
+        config: Buffer,
+        context: Arc<crate::task::context::TaskContext>,
+    ) -> (mpsc::Sender<Event>, mpsc::Receiver<Event>) {
         let (downstream_tx, downstream_rx) = mpsc::channel(100);
         let (upstream_tx, upstream_rx) = mpsc::channel(100);
         let processor = ProcessorBuilder::new()
@@ -1338,7 +1419,7 @@ mod tests {
             .receiver(upstream_rx)
             .task_id(1)
             .task_type("buffer")
-            .task_context(create_mock_task_context())
+            .task_context(context)
             .build()
             .await
             .unwrap();
@@ -1856,6 +1937,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_buffer_sends_what_it_holds_once_the_flow_stops_reading() {
+        use serde_json::json;
+        let context = create_mock_task_context();
+        let stop_reading = context.stop_reading.clone();
+        let (upstream_tx, mut downstream_rx) =
+            spawn_buffer_with(buffer_config(100, None, false), context).await;
+
+        upstream_tx
+            .send(event_with(EventData::Json(json!({ "i": 1 }))))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        stop_reading.cancel();
+        let held = next_flush(&mut downstream_rx).await;
+        upstream_tx
+            .send(event_with(EventData::Json(json!({ "i": 2 }))))
+            .await
+            .unwrap();
+        let late = next_flush(&mut downstream_rx).await;
+
+        assert_eq!(held.data_as_json().unwrap()["batch"], json!([{ "i": 1 }]));
+        assert_eq!(held.data_as_json().unwrap()["flush_reason"], "shutdown");
+        assert_eq!(late.data_as_json().unwrap()["batch"], json!([{ "i": 2 }]));
+    }
+
+    #[tokio::test]
+    async fn events_waiting_together_after_the_stop_leave_in_one_batch() {
+        use serde_json::json;
+        let context = create_mock_task_context();
+        let stop_reading = context.stop_reading.clone();
+        let (upstream_tx, mut downstream_rx) =
+            spawn_buffer_with(buffer_config(100, None, false), context).await;
+
+        stop_reading.cancel();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        for i in 1..=3 {
+            upstream_tx
+                .send(event_with(EventData::Json(json!({ "i": i }))))
+                .await
+                .unwrap();
+        }
+        let batch = next_flush(&mut downstream_rx).await;
+
+        assert_eq!(
+            batch.data_as_json().unwrap()["batch"],
+            json!([{ "i": 1 }, { "i": 2 }, { "i": 3 }])
+        );
+    }
+
+    #[tokio::test]
     async fn partition_keys_keep_their_digits_as_written() {
         use serde_json::json;
         let (upstream_tx, mut downstream_rx) = spawn_buffer(buffer_config(
@@ -1897,6 +2028,29 @@ mod tests {
 
         assert_eq!(batch.data_as_json().unwrap()["partition_key"], "7");
         assert_eq!(failed.error, Some(Error::MissingPartitionKey.to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_partition_key_from_meta_and_a_broken_template() {
+        use serde_json::json;
+        let (upstream_tx, mut downstream_rx) =
+            spawn_buffer(buffer_config(1, Some("{{event.meta.lane}}"), false)).await;
+        let mut event = event_with(EventData::Json(json!({ "i": 1 })));
+        event.meta = Some(Map::from_iter([("lane".to_string(), json!("a"))]));
+        upstream_tx.send(event).await.unwrap();
+        let batch = next_flush(&mut downstream_rx).await;
+
+        let (_tx, rx) = mpsc::channel(1);
+        let broken = ProcessorBuilder::new()
+            .config(Arc::new(buffer_config(1, Some("{{#if}}"), false)))
+            .receiver(rx)
+            .task_type("buffer")
+            .task_context(create_mock_task_context())
+            .build()
+            .await;
+
+        assert_eq!(batch.data_as_json().unwrap()["partition_key"], "a");
+        assert!(matches!(broken, Err(Error::Render { .. })));
     }
 
     #[tokio::test]

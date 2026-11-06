@@ -50,12 +50,20 @@ fn mcp_server(
 impl TaskMeta for tool::Tool {
     const CONNECTOR: Connector = CONNECTOR;
     const REGISTERS: bool = true;
+
+    fn validate(&self) -> Result<(), TaskError> {
+        Ok(server::validate_name(&self.name)?)
+    }
 }
 
 impl TaskMeta for prompt::Prompt {
     const CONNECTOR: Connector = CONNECTOR;
     const PIPELINE_IO: bool = false;
     const REGISTERS: bool = true;
+
+    fn validate(&self) -> Result<(), TaskError> {
+        Ok(server::validate_name(&self.name)?)
+    }
 }
 
 impl TaskMeta for resource::Resource {

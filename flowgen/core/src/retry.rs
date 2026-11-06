@@ -134,6 +134,33 @@ impl RetryConfig {
     }
 }
 
+/// Subscriber reconnect delays, grown across connections that fail before the server answers.
+pub struct ReconnectBackoff {
+    retry: RetryConfig,
+    delays: Box<dyn Iterator<Item = Duration> + Send>,
+}
+
+impl ReconnectBackoff {
+    /// Delays starting at `initial_backoff`.
+    pub fn new(retry: &RetryConfig) -> Self {
+        Self {
+            retry: retry.clone(),
+            delays: retry.reconnect_strategy(),
+        }
+    }
+
+    /// The delay before the next reconnect, starting over when the last connection received from the server.
+    pub fn next_delay(&mut self, received: bool) -> Duration {
+        if received {
+            self.delays = self.retry.reconnect_strategy();
+        }
+        match self.delays.next() {
+            Some(delay) => delay,
+            None => self.retry.initial_backoff,
+        }
+    }
+}
+
 fn default_initial_backoff() -> Duration {
     DEFAULT_INITIAL_BACKOFF
 }
@@ -328,6 +355,24 @@ mod tests {
         let mut with = config.init_strategy(Some(delay));
         assert_eq!(with.next(), Some(delay));
         assert!(with.next().is_some_and(|d| d > Duration::ZERO));
+    }
+
+    #[test]
+    fn test_reconnect_backoff_grows_until_a_connection_receives() {
+        let config = RetryConfig {
+            max_attempts: Some(3),
+            initial_backoff: Duration::from_millis(100),
+        };
+        let mut backoff = ReconnectBackoff::new(&config);
+        let failing: Vec<Duration> = (0..5).map(|_| backoff.next_delay(false)).collect();
+        assert!(failing[0] <= Duration::from_millis(150), "{failing:?}");
+        assert!(failing[4] >= Duration::from_millis(800), "{failing:?}");
+
+        let after_receiving = backoff.next_delay(true);
+        assert!(
+            after_receiving <= Duration::from_millis(150),
+            "{after_receiving:?}"
+        );
     }
 
     #[test]

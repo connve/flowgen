@@ -41,6 +41,8 @@ Watches a MongoDB database through a change stream and emits each change documen
 
 ## Behaviour
 
+When the flow stops, the task drains: it stores the resume token of the change in flight once the flow completes it, and stops.
+
 The change stream watches the entire database and emits every change. `event.data` is the changed document for an insert or a replacement, and the current version of the document for an update, looked up when the change is read; an update to a document deleted before the lookup carries `null`. For a delete it is the deleted document's key (`{"_id": ...}`), and for a collection or database change such as a drop it is `null`. Route on `event.meta.operation_type` to handle each kind.
 
 Changes go through the flow one at a time. When the flow completes a change, its resume token is stored in the cache. When no change arrives for 60 seconds, the stream's current position is stored as well, so the stored token stays within the oplog on a quiet database. After a reconnection or restart the stream continues after the stored token, so a change the flow did not complete is emitted again. Without a stored token the stream starts at the current point in the oplog, after the [initial copy](#initial-copy) when it is enabled. When the oplog no longer holds the stored position, the changes since then are lost: the task logs an error and starts the same way.
@@ -49,7 +51,7 @@ Dropping the watched database emits a `drop` change per collection, a `dropDatab
 
 A change the flow fails to complete, or does not complete within `ack_timeout`, is delivered again after the [redelivery delay](/docs/flowgen/concepts/retry#redelivery), and the next change waits for it. With `max_deliver`, the change is skipped after that many failed deliveries and logged with its event ID.
 
-The stream reconnects automatically on connection loss using an infinite retry loop with exponential backoff and jitter.
+When the stream breaks, the task reconnects with the [reconnect backoff](/docs/flowgen/concepts/retry#infinite-reconnect-subscribers). The delay resets to `initial_backoff` once the new stream returns a batch, empty or not, so a stream that fails before its first batch, such as one on a server that is not a replica set, keeps backing off.
 
 ## Initial copy
 

@@ -34,8 +34,7 @@ use tracing::{error, info};
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, TaskConfig)]
 #[serde(deny_unknown_fields)]
 pub struct Tool {
-    /// Unique tool name. Combined with flow name for the full tool identifier:
-    /// `{flow_name}.{name}` (e.g., `crm_welcome_flow.send_welcome`).
+    /// Tool name as clients list and call it, unique on the server.
     pub name: String,
     /// Human-readable description shown to LLMs for tool selection.
     pub description: String,
@@ -44,7 +43,7 @@ pub struct Tool {
     #[serde(default)]
     pub input_schema: serde_json::Value,
     /// Optional path to credentials file for this specific tool.
-    /// Overrides the global `worker.mcp_server.credentials_path` if set.
+    /// Overrides the app config's `mcp_server.credentials_path` if set.
     pub credentials_path: Option<PathBuf>,
     /// HTTP headers a request must carry, with matching values, for this
     /// tool to be visible on `tools/list` and callable at all. All declared
@@ -250,6 +249,7 @@ impl Runner for Processor {
                     .unwrap_or(false),
                 leaf_count: self.task_context.leaf_count,
                 headers: event_handler.config.headers.clone(),
+                cancellation_token: self.task_context.stop_reading.clone(),
             },
         )
         .map_err(|source| Error::ToolRegistration { source })?;

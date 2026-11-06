@@ -3,7 +3,7 @@
 # response, and the result is returned to the client.
 #
 # Required:
-#   - MCP server enabled in worker config (worker.mcp_server.enabled: true)
+#   - MCP server enabled in the app config (mcp_server.enabled: true)
 flow:
   labels:
     display_name: "MCP Tool"

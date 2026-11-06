@@ -10,6 +10,7 @@ use tracing::info;
 
 /// OIDC provider configuration.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct OidcConfig {
     /// OIDC issuer URL (e.g., "https://auth.example.com/realms/myapp").
     /// The discovery document is fetched from `{issuer_url}/.well-known/openid-configuration`.

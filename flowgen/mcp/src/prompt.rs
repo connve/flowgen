@@ -296,6 +296,7 @@ impl Runner for Processor {
             messages,
             resource_loader: self.task_context.resource_loader.clone(),
             headers: cfg.headers.clone(),
+            cancellation_token: self.task_context.stop_reading.clone(),
         };
 
         crate::server::register_prompt(self.mcp_server.as_ref(), cfg.name.clone(), registration)
