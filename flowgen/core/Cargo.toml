@@ -45,6 +45,8 @@ tokio-retry = { workspace = true }
 croner = { workspace = true }
 humantime-serde = { workspace = true }
 dashmap = { workspace = true }
+redb = { workspace = true }
+keyring-core = { workspace = true }
 tokio-stream = { workspace = true }
 axum = { workspace = true }
 opentelemetry = { workspace = true }
@@ -60,7 +62,17 @@ reqwest = { workspace = true }
 serde_yaml = { workspace = true }
 base64 = { workspace = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-native-keyring-store = { workspace = true }
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+zbus-secret-service-keyring-store = { workspace = true }
+
 [dev-dependencies]
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

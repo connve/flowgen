@@ -2,6 +2,9 @@
 //!
 //! Scripts can return objects, arrays, or null to control event emission.
 
+/// Running a script on sample events, for `flowgen test`.
+pub mod samples;
+
 use crate::event::{Event, EventBuilder, EventData, EventExt};
 use crate::task::TaskConfig;
 use chrono::{Datelike, Timelike};

@@ -18,7 +18,6 @@ flow:
     description: "Consumes Account query results from NATS, casts them to an Arrow schema, and fans out to an object-store archive and a BigQuery upsert table."
     tags: ["salesforce", "bulk-api", "bigquery", "object-store", "example"]
   tasks:
-
     - nats_jetstream_subscribe:
         name: start_subscription
         credentials_path: /etc/nats/credentials.json

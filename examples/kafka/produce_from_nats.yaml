@@ -9,7 +9,6 @@ flow:
     description: "Subscribes to a NATS JetStream stream and produces each event as a message to a Kafka topic."
     tags: ["kafka", "nats", "producer", "example"]
   tasks:
-
     - nats_jetstream_subscribe:
         name: consume_events
         credentials_path: /etc/nats/credentials.json

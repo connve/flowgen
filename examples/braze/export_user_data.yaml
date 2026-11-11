@@ -12,7 +12,6 @@ flow:
     description: "Receives user IDs over an HTTP webhook, exports those users' profiles from Braze, and logs them."
     tags: ["braze", "export", "webhook", "example"]
   tasks:
-
     # POST /api/flowgen/workers/v1/braze/users
     - http_endpoint:
         name: receive_requests

@@ -5,7 +5,7 @@
 	import FlowInspector from '$lib/flow/FlowInspector.svelte';
 	import FlowDetails from '$lib/flow/FlowDetails.svelte';
 	import type { Activity } from '$lib/flow/ActivityDetails.svelte';
-	import EditButton from '$lib/EditButton.svelte';
+	import { EditButton } from '@connve/ui';
 	import PendingChanges from '$lib/PendingChanges.svelte';
 	import { activitiesFor, releaseFlowSubscription } from '$lib/activityStore.svelte';
 	import { editUrl, flowFilePath, targetOf } from '$lib/changes';

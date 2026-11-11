@@ -12,7 +12,6 @@ flow:
     tags: ["bigquery", "gcp", "storage-write", "nats", "example"]
   require_leader_election: true
   tasks:
-
     # Concurrent NATS consumer with durable state.
     - nats_jetstream_subscribe:
         name: consume_events

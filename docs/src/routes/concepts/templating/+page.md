@@ -56,11 +56,12 @@ A task's static YAML thus becomes a per-event configuration. Connectors that loa
 **Composing a key prefix from event data:**
 
 ```yaml
-- nats_kv_store:
+- kv_store:
     name: cache_user
+    url: "{{env.NATS_URL}}"
+    bucket: users
     operation: put
     key: "users.{{event.data.id}}"
-    value: "{{event.data}}"
 ```
 
 ## Type preservation for object and array values

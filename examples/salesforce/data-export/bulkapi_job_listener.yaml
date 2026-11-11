@@ -16,7 +16,6 @@ flow:
     tags: ["salesforce", "bulk-api", "export", "nats", "example"]
   require_leader_election: true
   tasks:
-
     - salesforce_pubsubapi_subscribe:
         name: listen_job_events
         credentials_path: /etc/sfdc/credentials.json

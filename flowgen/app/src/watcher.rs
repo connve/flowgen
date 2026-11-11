@@ -1,11 +1,13 @@
 //! Hot-reload watcher for cache-sourced flows.
 //!
 //! Subscribes to key changes under the flow prefix in the system cache bucket and
-//! forwards `WatchEvent`s to the reconciler. Reconnects automatically on stream
-//! errors so transient NATS disconnects do not permanently disable hot-reload.
+//! forwards `WatchEvent`s to the reconciler. Reconnects automatically when the
+//! stream fails or ends, and reads the keys again on each subscribe, so a lost
+//! connection or a watch the cache ended for falling behind misses nothing.
 
 use flowgen_core::cache::{Cache, WatchEvent};
 use futures_util::StreamExt;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -28,6 +30,13 @@ pub enum Error {
         #[source]
         source: flowgen_core::cache::Error,
     },
+    /// The keys under the prefix could not be read again after subscribing.
+    #[error("Failed to read the keys under prefix '{prefix}' after subscribing: {source}")]
+    Resync {
+        prefix: String,
+        #[source]
+        source: flowgen_core::cache::Error,
+    },
     /// The watch stream ended unexpectedly; the caller will reconnect.
     #[error("Watch stream for prefix '{prefix}' ended unexpectedly")]
     WatchStreamEnded { prefix: String },
@@ -46,8 +55,9 @@ pub fn spawn(
     shutdown: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        let mut known = HashSet::new();
         loop {
-            match run_watch_loop(&cache, &prefix, &tx, &shutdown).await {
+            match run_watch_loop(&cache, &prefix, &tx, &shutdown, &mut known).await {
                 Ok(()) => break,
                 Err(e) => {
                     error!(error = %e);
@@ -71,6 +81,7 @@ async fn run_watch_loop(
     prefix: &str,
     tx: &tokio::sync::mpsc::Sender<WatchEvent>,
     shutdown: &CancellationToken,
+    known: &mut HashSet<String>,
 ) -> Result<(), Error> {
     let mut stream = cache
         .watch(prefix, false)
@@ -81,6 +92,9 @@ async fn run_watch_loop(
         })?;
 
     info!(prefix = %prefix, "Hot-reload watcher subscribed");
+    if !resync(cache, prefix, tx, known).await? {
+        return Ok(());
+    }
 
     loop {
         tokio::select! {
@@ -98,7 +112,10 @@ async fn run_watch_loop(
                         });
                     }
                     Some(Ok(ev)) => {
-                        // If the receiver is gone the reconciler has shut down; exit cleanly.
+                        match &ev {
+                            WatchEvent::Put { key, .. } => known.insert(key.clone()),
+                            WatchEvent::Delete { key } => known.remove(key),
+                        };
                         if tx.send(ev).await.is_err() {
                             return Ok(());
                         }
@@ -107,6 +124,47 @@ async fn run_watch_loop(
             }
         }
     }
+}
+
+/// Sends a `Put` for every key under `prefix` and a `Delete` for each of
+/// `known` that is gone, so changes made while no watch was open are not
+/// missed; `known` becomes the keys read. Returns false once the reconciler
+/// has shut down.
+async fn resync(
+    cache: &Arc<dyn Cache>,
+    prefix: &str,
+    tx: &tokio::sync::mpsc::Sender<WatchEvent>,
+    known: &mut HashSet<String>,
+) -> Result<bool, Error> {
+    let failed = |source| Error::Resync {
+        prefix: prefix.to_string(),
+        source,
+    };
+    let keys: HashSet<String> = cache
+        .list_keys(prefix)
+        .await
+        .map_err(failed)?
+        .into_iter()
+        .collect();
+    let mut events = Vec::with_capacity(keys.len());
+    for key in known.difference(&keys) {
+        events.push(WatchEvent::Delete { key: key.clone() });
+    }
+    for key in &keys {
+        if let Some(value) = cache.get(key).await.map_err(failed)? {
+            events.push(WatchEvent::Put {
+                key: key.clone(),
+                value,
+            });
+        }
+    }
+    *known = keys;
+    for event in events {
+        if tx.send(event).await.is_err() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -189,6 +247,42 @@ mod tests {
         }
 
         shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn a_resubscribe_sends_what_changed_while_no_watch_was_open() {
+        let cache = Arc::new(MemoryCache::new()) as Arc<dyn Cache>;
+        cache
+            .put("flows.b", bytes::Bytes::from("b2"), None)
+            .await
+            .unwrap();
+        cache
+            .put("flows.c", bytes::Bytes::from("c"), None)
+            .await
+            .unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let mut known = HashSet::from(["flows.a".to_string(), "flows.b".to_string()]);
+
+        assert!(resync(&cache, "flows.", &tx, &mut known).await.unwrap());
+
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(match event {
+                WatchEvent::Put { key, value } => {
+                    format!("put {key} {}", String::from_utf8_lossy(&value))
+                }
+                WatchEvent::Delete { key } => format!("delete {key}"),
+            });
+        }
+        events.sort();
+        assert_eq!(
+            events,
+            vec!["delete flows.a", "put flows.b b2", "put flows.c c"]
+        );
+        assert_eq!(
+            known,
+            HashSet::from(["flows.b".to_string(), "flows.c".to_string()])
+        );
     }
 
     #[tokio::test]

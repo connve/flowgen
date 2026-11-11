@@ -14,7 +14,6 @@ flow:
     tags: ["salesforce", "bulk-api", "incremental", "cron", "example"]
   require_leader_election: true
   tasks:
-
     - generate:
         name: trigger
         cron: "*/5 * * * *"

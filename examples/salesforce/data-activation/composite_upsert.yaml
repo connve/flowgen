@@ -13,7 +13,6 @@ flow:
     description: "Consumes events from NATS and batch-upserts up to 200 Contact records into Salesforce via the Composite API with all-or-none transactional guarantees."
     tags: ["salesforce", "upsert", "nats", "composite-api", "example"]
   tasks:
-
     - nats_jetstream_subscribe:
         name: start_subscription
         credentials_path: /etc/nats/credentials.json

@@ -1,0 +1,37 @@
+# Flowgen Agent tool: proposes a change for a person to approve.
+flow:
+  labels:
+    display_name: "Propose Change"
+    description: "Records a workspace change as pending for review in the Changes page; the agent cannot approve it."
+    tags: ["mcp", "agent", "flowgen"]
+  tasks:
+    - mcp_tool:
+        name: propose_change
+        description: "Propose files to add, change, or delete (content null) for review. Returns the change id."
+        input_schema:
+          type: object
+          properties:
+            title:
+              type: string
+              description: "One line, used as the commit message."
+            description:
+              type: string
+            files:
+              type: array
+              items:
+                type: object
+                properties:
+                  path:
+                    type: string
+                  content:
+                    type: [string, "null"]
+                required: [path, content]
+          required: [title, files]
+
+    - http_request:
+        name: propose
+        endpoint: "{{env.FLOWGEN_URL}}/api/changes"
+        method: POST
+        payload:
+          from_event: true
+          send_as: json

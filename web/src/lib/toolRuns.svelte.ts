@@ -3,9 +3,10 @@
 // chat shows what the flow did and how long it took, as the flow measured it.
 
 import { browser } from '$app/environment';
-import { apiUrl, type LogRecord } from '$lib/api';
+import { listLogs, type LogLevel, type LogRecord } from '$lib/api';
+import { logsStream } from '$lib/urls';
 import { LOGS_LIMIT_DEFAULT } from '$lib/logsLimit';
-import type { ToolStep } from '$lib/conversations';
+import type { ToolStep } from '$lib/sessions';
 import { extractSpanSummary, timestampMs, type ActivityLevel } from '$lib/logRecord';
 
 /** One task of a run; repeated handling (e.g. per iterated item) folds into `count`. */
@@ -63,9 +64,7 @@ function toRunRecord(record: LogRecord): [string, RunRecord] | null {
 	];
 }
 
-function levelsQuery(): string {
-	return 'levels=info&levels=warn&levels=error';
-}
+const RUN_LEVELS: LogLevel[] = ['info', 'warn', 'error'];
 
 function recordKey(record: RunRecord): string {
 	return `${record.ts_ms}|${record.task}|${record.level}|${record.duration_ms}`;
@@ -87,14 +86,9 @@ function merge(run: string, found: RunRecord[]) {
 
 async function fetchFlow(flow: string) {
 	try {
-		const res = await fetch(
-			apiUrl(
-				`api/logs?flow=${encodeURIComponent(flow)}&limit=${LOGS_LIMIT_DEFAULT}&${levelsQuery()}`
-			)
-		);
-		if (!res.ok) return;
+		const { data } = await listLogs({ query: { flow, limit: LOGS_LIMIT_DEFAULT, levels: RUN_LEVELS } });
 		const found: Record<string, RunRecord[]> = {};
-		for (const record of (await res.json()) as LogRecord[]) {
+		for (const record of data) {
 			const hit = toRunRecord(record);
 			if (!hit || !watched.get(flow)?.has(hit[0])) continue;
 			(found[hit[0]] ??= []).push(hit[1]);
@@ -111,9 +105,7 @@ function follow(flow: string | null) {
 	liveSource = null;
 	liveFlow = flow;
 	if (!flow) return;
-	const source = new EventSource(
-		apiUrl(`api/logs/stream?flow=${encodeURIComponent(flow)}&${levelsQuery()}`)
-	);
+	const source = new EventSource(logsStream({ flow, levels: RUN_LEVELS }));
 	liveSource = source;
 	source.addEventListener('open', () => void fetchFlow(flow));
 	source.addEventListener('log', (e) => {
@@ -130,7 +122,7 @@ function follow(flow: string | null) {
 }
 
 /**
- * Loads the runs of a conversation's tool steps, keyed by flow, and follows
+ * Loads the runs of a session's tool steps, keyed by flow, and follows
  * `live` (the flow of a call still running) until it is null.
  */
 export function watchToolRuns(runs: Array<{ flow: string; run: string }>, live: string | null) {

@@ -8,7 +8,6 @@ flow:
     description: "Watches the sales database for document changes and publishes each as a NATS event."
     tags: ["mongo", "cdc", "example"]
   tasks:
-
     - mongodb_cdc:
         name: watch_sales
         credentials_path: /etc/mongodb/credentials.json

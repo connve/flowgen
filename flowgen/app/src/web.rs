@@ -31,7 +31,7 @@ pub const DEFAULT_WEB_PATH: &str = "/";
 /// Base path the SvelteKit bundle was compiled with (`PUBLIC_BASE`
 /// in `web/svelte.config.js`). `serve_embedded` rewrites this to
 /// whatever `web.path` was configured.
-const BUILT_BASE_PATH: &str = "/flowgen";
+pub const BUILT_BASE_PATH: &str = "/flowgen";
 
 /// SSE event name carrying `FlowMetricsSnapshot` payloads on `/api/flows/stream`.
 const SSE_EVENT_SNAPSHOT: &str = "snapshot";
@@ -90,14 +90,14 @@ pub struct WebState {
     /// Running application configuration, surfaced read-only by the
     /// config viewer. Secrets serialize as `"***"` (see `JwtConfig`).
     pub app_config: Arc<crate::config::AppConfig>,
-    /// Cache backing the built-in Agents conversation history — the store our
+    /// Cache backing the built-in Agents session history — the store our
     /// UI reads and writes; a persistence flow can later copy it into a
     /// database. This is the **system** cache (`flowgen_system`), which is out
     /// of flow-script reach, so chats are not exposed to `ctx.cache`. Proxy
-    /// traffic stays stateless: conversations are our UI's domain, not the
+    /// traffic stays stateless: sessions are our UI's domain, not the
     /// gateway's.
-    pub conversation_cache: Arc<dyn flowgen_core::cache::Cache>,
-    /// Whether a dedicated system bucket actually backs `conversation_cache`.
+    pub session_cache: Arc<dyn flowgen_core::cache::Cache>,
+    /// Whether a dedicated system bucket actually backs `session_cache`.
     /// False in single-binary/in-memory mode, where it falls back to the
     /// runtime cache that flow scripts can reach — `start_web_server` warns
     /// once at startup so operators know.
@@ -119,13 +119,15 @@ pub struct WebState {
     pub api_keys: Vec<flowgen_core::credentials::ApiKey>,
     /// From `web.authoring`; `None` disables `/api/changes`.
     pub authoring: Option<crate::config::AuthoringOptions>,
-    /// Flows callable in-process; approved changes are published through one.
+    /// Flows callable in-process; approved changes are committed through one.
     pub inproc: Arc<flowgen_core::task::inproc::registry::InprocRegistry>,
     /// Bucket the synced flow sources are read from, when flows load from the
     /// cache (`flows.cache`).
     pub flows_cache: Option<Arc<dyn flowgen_core::cache::Cache>>,
     /// Agent replies this pod is writing.
     pub replies: Arc<crate::agent_reply::Replies>,
+    /// The newest flowgen release, when newer than this one.
+    pub latest_release: crate::releases::Latest,
 }
 
 /// Who an `/api/*` request authenticated as, when `web.auth` is set.
@@ -157,7 +159,7 @@ impl Caller {
 pub(crate) const MIN_API_KEY_LEN: usize = 32;
 
 /// Routes a machine key may call: reading flows, resources, logs and changes,
-/// validating files, and proposing and editing changes; the authoring handlers
+/// validating files, testing scripts, and proposing and editing changes; the authoring handlers
 /// let a key edit only the changes it proposed.
 fn key_may_call(api_prefix: &str, method: &axum::http::Method, path: &str) -> bool {
     let route = match path.strip_prefix(api_prefix) {
@@ -181,6 +183,7 @@ fn key_may_call(api_prefix: &str, method: &axum::http::Method, path: &str) -> bo
         axum::http::Method::POST => {
             route == "/changes"
                 || route == "/workspace/validate"
+                || route == "/workspace/test"
                 || matches!(change.and_then(|rest| rest.strip_suffix("/files")), Some(id) if single(id))
         }
         axum::http::Method::PATCH => matches!(change, Some(id) if single(id)),
@@ -235,25 +238,34 @@ type AuthJar = axum_extra::extract::cookie::PrivateCookieJar<CookieKey>;
 /// The server mounts the embedded UI at `path` and exposes `GET /api/flows`
 /// alongside it. All other requests fall back to `index.html` so the SvelteKit
 /// client-side router can handle them.
-pub async fn start_web_server(port: u16, path: &str, state: WebState) -> Result<(), Error> {
-    // Without a dedicated system cache bucket, conversation history shares the
+pub async fn start_web_server(
+    host: &str,
+    port: u16,
+    path: &str,
+    state: WebState,
+    ready: Option<tokio::sync::oneshot::Sender<()>>,
+) -> Result<(), Error> {
+    // Without a dedicated system cache bucket, session history shares the
     // runtime cache that flow scripts can read and write via `ctx.cache`. Warn
     // once at startup so operators know to configure a system bucket when that
     // access matters.
-    let warn_conversations_in_runtime_cache =
-        state.agents.is_some() && !state.system_bucket_present;
+    let warn_sessions_in_runtime_cache = state.agents.is_some() && !state.system_bucket_present;
 
     let app = router(path, state);
 
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
+    let listener = tokio::net::TcpListener::bind((host, port))
         .await
         .map_err(|source| Error::BindListener { port, source })?;
+    let app = flowgen_core::http_server::local_only(app, &listener);
 
-    info!(port, path = %path, "Starting web server");
+    info!(host, port, path = %path, "Starting web server");
+    if let Some(ready) = ready {
+        let _ = ready.send(());
+    }
 
-    if warn_conversations_in_runtime_cache {
+    if warn_sessions_in_runtime_cache {
         warn!(
-            "Agents conversation history is stored in the runtime cache (no system cache bucket \
+            "Agents session history is stored in the runtime cache (no system cache bucket \
              configured), which flow scripts can read and write via ctx.cache"
         );
     }
@@ -287,30 +299,27 @@ fn router(path: &str, mut state: WebState) -> Router {
             &format!("{api_prefix}/agents/tools"),
             get(crate::connections::list_agent_tools),
         )
+        .route(&format!("{api_prefix}/agents/sessions"), get(list_sessions))
         .route(
-            &format!("{api_prefix}/agents/conversations"),
-            get(list_conversations),
+            &format!("{api_prefix}/agents/sessions/stream"),
+            get(stream_sessions),
         )
         .route(
-            &format!("{api_prefix}/agents/conversations/stream"),
-            get(stream_conversations),
+            &format!("{api_prefix}/agents/sessions/{{id}}"),
+            get(get_session)
+                .put(put_session)
+                .patch(update_session)
+                .delete(delete_session),
         )
         .route(
-            &format!("{api_prefix}/agents/conversations/{{id}}"),
-            get(get_conversation)
-                .put(put_conversation)
-                .patch(update_conversation)
-                .delete(delete_conversation),
-        )
-        .route(
-            &format!("{api_prefix}/agents/conversations/{{id}}/reply"),
+            &format!("{api_prefix}/agents/sessions/{{id}}/reply"),
             post(crate::agent_reply::start_reply)
                 .get(crate::agent_reply::follow_reply)
                 .delete(crate::agent_reply::stop_reply),
         )
         .route(
-            &format!("{api_prefix}/agents/conversations/{{id}}/read"),
-            axum::routing::put(mark_conversation_read).delete(mark_conversation_unread),
+            &format!("{api_prefix}/agents/sessions/{{id}}/read"),
+            axum::routing::put(mark_session_read).delete(mark_session_unread),
         )
         .route_layer(axum::middleware::from_fn_with_state(
             Arc::clone(&state),
@@ -352,12 +361,25 @@ fn router(path: &str, mut state: WebState) -> Router {
             post(crate::authoring::validate_workspace),
         )
         .route(
+            &format!("{api_prefix}/workspace/test"),
+            post(crate::authoring::test_script),
+        )
+        .route(&format!("{api_prefix}/hubs"), get(crate::hubs::list_hubs))
+        .route(
+            &format!("{api_prefix}/hubs/{{hub}}/templates"),
+            get(crate::hubs::list_templates),
+        )
+        .route(
             &format!("{api_prefix}/workspace/file"),
             get(crate::authoring::workspace_file),
         )
         .route(
             &format!("{api_prefix}/changes"),
             get(crate::authoring::list_changes).post(crate::authoring::propose_change),
+        )
+        .route(
+            &format!("{api_prefix}/changes/stream"),
+            get(crate::authoring::stream_deployments),
         )
         .route(
             &format!("{api_prefix}/changes/{{id}}"),
@@ -994,7 +1016,7 @@ fn ms_to_datetime(ms: u64) -> Option<chrono::DateTime<chrono::Utc>> {
     chrono::DateTime::<chrono::Utc>::from_timestamp(secs, nsecs)
 }
 
-/// Current wall-clock time in epoch milliseconds, for stamping conversation
+/// Current wall-clock time in epoch milliseconds, for stamping session
 /// writes. Saturates to 0 before the epoch, which never happens in practice.
 pub(crate) fn now_millis() -> i64 {
     std::time::SystemTime::now()
@@ -1358,10 +1380,11 @@ async fn regenerate_cluster_token(
     }
 }
 
-/// Returns the running flowgen version so the UI can render it in the sidebar.
-async fn get_version() -> Json<api::VersionInfo> {
+/// Returns the running flowgen version, and a newer released one, for the sidebar.
+async fn get_version(State(state): State<Arc<WebState>>) -> Json<api::VersionInfo> {
     Json(api::VersionInfo {
-        version: env!("CARGO_PKG_VERSION").to_string(),
+        version: crate::releases::CURRENT_VERSION.to_string(),
+        latest: state.latest_release.borrow().clone(),
     })
 }
 
@@ -1425,9 +1448,8 @@ pub(crate) fn gateway_base_url(state: &WebState) -> Option<String> {
 }
 
 /// Builds the outbound headers sent with every proxied request to the AI
-/// gateway, from `web.headers`. Used to identify this web server to
-/// `llm_proxy`/`mcp_tool` `headers` scoping (e.g. `X-Flowgen-Client:
-/// flowgen-ui`). Entries that aren't valid header names/values are skipped.
+/// gateway, from `web.headers`. Entries that aren't valid header names/values
+/// are skipped.
 fn outbound_gateway_headers(state: &WebState) -> reqwest::header::HeaderMap {
     let mut headers = reqwest::header::HeaderMap::new();
     let Some(web) = state.app_config.web.as_ref() else {
@@ -1514,15 +1536,15 @@ async fn proxy_models(State(state): State<Arc<WebState>>) -> axum::response::Res
 }
 
 // Persistence for the web UI's Agents chat. The gateway proxy stays
-// stateless; conversation memory is our UI's domain and lives in the
-// configured system cache (see `WebState::conversation_cache`), out of
+// stateless; session memory is our UI's domain and lives in the
+// configured system cache (see `WebState::session_cache`), out of
 // user-script reach. A persistence flow can later copy these into a database.
-// Types (`api::Conversation`, etc.) are generated from openapi.yaml.
+// Types (`api::Session`, etc.) are generated from openapi.yaml.
 
 /// What a key under `web.agents.cache_prefix` holds.
 #[derive(Clone, Copy)]
 pub(crate) enum AgentsKeys {
-    Conversations,
+    Sessions,
     Reads,
     Folders,
 }
@@ -1533,7 +1555,7 @@ pub(crate) fn key_prefix(state: &WebState, keys: AgentsKeys) -> String {
         None => crate::config::default_agents_cache_prefix(),
     };
     let segment = match keys {
-        AgentsKeys::Conversations => "conversations",
+        AgentsKeys::Sessions => "sessions",
         AgentsKeys::Reads => "reads",
         AgentsKeys::Folders => "folders",
     };
@@ -1554,11 +1576,11 @@ pub(crate) fn reply_idle_timeout(state: &WebState) -> Duration {
     }
 }
 
-/// Validates a client-supplied conversation id: `[A-Za-z0-9_-]+`, non-empty.
+/// Validates a client-supplied session id: `[A-Za-z0-9_-]+`, non-empty.
 /// Anything else is rejected rather than silently sanitized — the id is the
 /// client's own handle, and `.` would break the dotted KV key namespace.
-/// `stream` is taken by the route of the conversation stream.
-pub(crate) fn valid_conversation_id(id: &str) -> bool {
+/// `stream` is taken by the route of the session stream.
+pub(crate) fn valid_session_id(id: &str) -> bool {
     !id.is_empty()
         && id != "stream"
         && id
@@ -1569,21 +1591,21 @@ pub(crate) fn valid_conversation_id(id: &str) -> bool {
 /// The signed-in user's key segment: the hex SHA-256 of their id, so a flow
 /// can derive it from `event.meta.auth.user_id` with the script `sha256` and
 /// keys don't show who the user is. Without `web.auth`, or for a machine key,
-/// there is none and conversations are shared.
-pub(crate) fn conversation_owner(
+/// there is none and sessions are shared.
+pub(crate) fn session_owner(
     user: Option<&axum::Extension<flowgen_core::auth::UserContext>>,
 ) -> Option<String> {
     use sha2::Digest;
     user.map(|axum::Extension(user)| format!("{:x}", sha2::Sha256::digest(&user.user_id)))
 }
 
-/// `agents.conversations.<owner>.<id>` for a user's own conversation, and
-/// `agents.conversations.<id>` for a shared one, such as a thread a flow opened.
-pub(crate) fn conversation_key(state: &WebState, owner: Option<&str>, id: &str) -> String {
-    user_key(&key_prefix(state, AgentsKeys::Conversations), owner, id)
+/// `agents.sessions.<owner>.<id>` for a user's own session, and
+/// `agents.sessions.<id>` for a shared one, such as a thread a flow opened.
+pub(crate) fn session_key(state: &WebState, owner: Option<&str>, id: &str) -> String {
+    user_key(&key_prefix(state, AgentsKeys::Sessions), owner, id)
 }
 
-/// Whether a stored conversation is the caller's own or shared.
+/// Whether a stored session is the caller's own or shared.
 fn visible_to(prefix: &str, owner: Option<&str>, key: &str) -> bool {
     match key.strip_prefix(prefix).map(|rest| rest.split_once('.')) {
         Some(None) => true,
@@ -1592,23 +1614,23 @@ fn visible_to(prefix: &str, owner: Option<&str>, key: &str) -> bool {
     }
 }
 
-/// Conversation `id` as the caller sees it: their own, else the shared one.
-pub(crate) async fn find_conversation(
+/// Session `id` as the caller sees it: their own, else the shared one.
+pub(crate) async fn find_session(
     state: &WebState,
     owner: Option<&str>,
     id: &str,
 ) -> Result<Option<(String, bytes::Bytes)>, flowgen_core::cache::Error> {
-    let own = owner.map(|owner| conversation_key(state, Some(owner), id));
-    for key in own.into_iter().chain([conversation_key(state, None, id)]) {
-        if let Some(bytes) = state.conversation_cache.get(&key).await? {
+    let own = owner.map(|owner| session_key(state, Some(owner), id));
+    for key in own.into_iter().chain([session_key(state, None, id)]) {
+        if let Some(bytes) = state.session_cache.get(&key).await? {
             return Ok(Some((key, bytes)));
         }
     }
     Ok(None)
 }
 
-/// The conversation id in a stored key, without the prefix and owner.
-fn conversation_id_of<'a>(prefix: &str, key: &'a str) -> Option<&'a str> {
+/// The session id in a stored key, without the prefix and owner.
+fn session_id_of<'a>(prefix: &str, key: &'a str) -> Option<&'a str> {
     let rest = key.strip_prefix(prefix)?;
     match rest.split_once('.') {
         Some((_, id)) => Some(id),
@@ -1625,7 +1647,7 @@ fn user_key(prefix: &str, owner: Option<&str>, id: &str) -> String {
     }
 }
 
-/// Read state lives apart from the conversation, so reading it doesn't
+/// Read state lives apart from the session, so reading it doesn't
 /// change it for anyone else.
 fn read_key(state: &WebState, owner: Option<&str>, id: &str) -> String {
     user_key(&key_prefix(state, AgentsKeys::Reads), owner, id)
@@ -1635,7 +1657,7 @@ fn folder_key(state: &WebState, owner: Option<&str>, id: &str) -> String {
     user_key(&key_prefix(state, AgentsKeys::Folders), owner, id)
 }
 
-/// The conversation id in a per-user key of `owner`, if the key is theirs.
+/// The session id in a per-user key of `owner`, if the key is theirs.
 fn user_key_id<'a>(prefix: &str, owner: Option<&str>, key: &'a str) -> Option<&'a str> {
     let rest = key.strip_prefix(prefix)?;
     match (owner, rest.split_once('.')) {
@@ -1646,18 +1668,18 @@ fn user_key_id<'a>(prefix: &str, owner: Option<&str>, key: &'a str) -> Option<&'
 }
 
 async fn user_value(state: &WebState, key: &str) -> Option<String> {
-    match state.conversation_cache.get(key).await {
+    match state.session_cache.get(key).await {
         Ok(Some(bytes)) => String::from_utf8(bytes.to_vec()).ok(),
         Ok(None) => None,
         Err(source) => {
-            warn!(key = %key, error = %source, "Failed to read conversation state");
+            warn!(key = %key, error = %source, "Failed to read session state");
             None
         }
     }
 }
 
-/// The conversation's `updatedAt` when the reader last read it; `0` marks it
-/// unread, none falls back to the conversation's own `unread`.
+/// The session's `updatedAt` when the reader last read it; `0` marks it
+/// unread, none falls back to the session's own `unread`.
 async fn read_at(state: &WebState, owner: Option<&str>, id: &str) -> Option<i64> {
     user_value(state, &read_key(state, owner, id))
         .await?
@@ -1665,7 +1687,7 @@ async fn read_at(state: &WebState, owner: Option<&str>, id: &str) -> Option<i64>
         .ok()
 }
 
-/// The folder the user filed the conversation in; empty means none, and
+/// The folder the user filed the session in; empty means none, and
 /// missing falls back to the folder a flow gave it.
 async fn folder_of(state: &WebState, owner: Option<&str>, id: &str) -> Option<String> {
     user_value(state, &folder_key(state, owner, id)).await
@@ -1681,11 +1703,11 @@ fn normalize_folder(folder: &str) -> String {
         .join("/")
 }
 
-/// How long conversations and their read state live, from `web.agents`.
-pub(crate) fn conversation_ttl(state: &WebState) -> Option<u64> {
+/// How long sessions and their read state live, from `web.agents`.
+pub(crate) fn session_ttl(state: &WebState) -> Option<u64> {
     match &state.agents {
         Some(crate::config::AgentsOptions {
-            conversation_history_ttl: Some(ttl),
+            session_history_ttl: Some(ttl),
             ..
         }) if ttl.as_secs() > 0 => Some(ttl.as_secs()),
         _ => None,
@@ -1699,44 +1721,44 @@ pub(crate) async fn write_read_at(
     at: i64,
 ) -> Result<(), flowgen_core::cache::Error> {
     state
-        .conversation_cache
+        .session_cache
         .put(
             &read_key(state, owner, id),
             at.to_string().into(),
-            conversation_ttl(state),
+            session_ttl(state),
         )
         .await
 }
 
-/// A stored conversation as the reader sees it: unread when it changed since
+/// A stored session as the reader sees it: unread when it changed since
 /// they last read it. A corrupt entry is skipped, not fatal.
-pub(crate) async fn conversation_for(
+pub(crate) async fn session_for(
     state: &WebState,
     owner: Option<&str>,
     key: &str,
     bytes: &[u8],
-) -> Option<api::Conversation> {
-    let mut conversation = match serde_json::from_slice::<api::Conversation>(bytes) {
-        Ok(conversation) => conversation,
+) -> Option<api::Session> {
+    let mut session = match serde_json::from_slice::<api::Session>(bytes) {
+        Ok(session) => session,
         Err(source) => {
-            warn!(key = %key, error = %source, "Skipping unparseable conversation");
+            warn!(key = %key, error = %source, "Skipping unparseable session");
             return None;
         }
     };
-    let unread = match read_at(state, owner, &conversation.id).await {
-        Some(at) => at < conversation.updated_at,
-        None => conversation.unread == Some(true),
+    let unread = match read_at(state, owner, &session.id).await {
+        Some(at) => at < session.updated_at,
+        None => session.unread == Some(true),
     };
-    conversation.unread = unread.then_some(true);
-    if let Some(folder) = folder_of(state, owner, &conversation.id).await {
-        conversation.folder = Some(folder).filter(|folder| !folder.is_empty());
+    session.unread = unread.then_some(true);
+    if let Some(folder) = folder_of(state, owner, &session.id).await {
+        session.folder = Some(folder).filter(|folder| !folder.is_empty());
     }
-    crate::agent_reply::settle_interrupted(&mut conversation, reply_save_interval(state));
-    Some(conversation)
+    crate::agent_reply::settle_interrupted(&mut session, reply_save_interval(state));
+    Some(session)
 }
 
-fn summary_of(c: api::Conversation) -> api::ConversationSummary {
-    api::ConversationSummary {
+fn summary_of(c: api::Session) -> api::SessionSummary {
+    api::SessionSummary {
         id: c.id,
         title: c.title,
         updated_at: c.updated_at,
@@ -1747,143 +1769,148 @@ fn summary_of(c: api::Conversation) -> api::ConversationSummary {
     }
 }
 
-/// The caller's own and the shared conversations, newest first.
-async fn conversation_summaries(
+/// The caller's own and the shared sessions, newest first.
+async fn session_summaries(
     state: &WebState,
     owner: Option<&str>,
-) -> Result<Vec<api::ConversationSummary>, flowgen_core::cache::Error> {
-    let prefix = key_prefix(state, AgentsKeys::Conversations);
-    let keys = state.conversation_cache.list_keys(&prefix).await?;
+) -> Result<Vec<api::SessionSummary>, flowgen_core::cache::Error> {
+    let prefix = key_prefix(state, AgentsKeys::Sessions);
+    let keys = state.session_cache.list_keys(&prefix).await?;
     let mut summaries = Vec::with_capacity(keys.len());
     for key in keys
         .into_iter()
         .filter(|key| visible_to(&prefix, owner, key))
     {
-        match state.conversation_cache.get(&key).await {
+        match state.session_cache.get(&key).await {
             Ok(Some(bytes)) => summaries.extend(
-                conversation_for(state, owner, &key, &bytes)
+                session_for(state, owner, &key, &bytes)
                     .await
                     .map(summary_of),
             ),
             Ok(None) => {}
-            Err(source) => warn!(key = %key, error = %source, "Failed to read conversation"),
+            Err(source) => warn!(key = %key, error = %source, "Failed to read session"),
         }
     }
     summaries.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
     Ok(summaries)
 }
 
-/// Lists the caller's own and the shared conversations (summaries only),
+/// Lists the caller's own and the shared sessions (summaries only),
 /// newest first.
-async fn list_conversations(
+async fn list_sessions(
     State(state): State<Arc<WebState>>,
     user: Option<axum::Extension<flowgen_core::auth::UserContext>>,
 ) -> axum::response::Response {
-    let owner = conversation_owner(user.as_ref());
-    match conversation_summaries(&state, owner.as_deref()).await {
-        Ok(summaries) => Json(serde_json::json!({ "conversations": summaries })).into_response(),
+    let owner = session_owner(user.as_ref());
+    match session_summaries(&state, owner.as_deref()).await {
+        Ok(summaries) => Json(serde_json::json!({ "sessions": summaries })).into_response(),
         Err(source) => {
-            warn!(error = %source, "Failed to list conversations from cache");
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Conversation store unavailable",
-            )
-                .into_response()
+            warn!(error = %source, "Failed to list sessions from cache");
+            (StatusCode::SERVICE_UNAVAILABLE, "Session store unavailable").into_response()
         }
     }
 }
 
-/// Streams the caller's own and the shared conversations: the list on
+/// `streams` merged into one that ends as soon as any of them ends, so a
+/// client reconnects and reads again instead of missing what a lost watch
+/// would have told it.
+pub(crate) fn until_any_ends<T: Send + 'static>(
+    streams: Vec<futures_util::stream::BoxStream<'static, T>>,
+) -> futures_util::stream::BoxStream<'static, T> {
+    let marked = streams.into_iter().map(|stream| {
+        stream
+            .map(Some)
+            .chain(futures_util::stream::once(async { None }))
+            .boxed()
+    });
+    futures_util::stream::select_all(marked)
+        .take_while(|item| std::future::ready(item.is_some()))
+        .filter_map(std::future::ready)
+        .boxed()
+}
+
+/// Streams the caller's own and the shared sessions: the list on
 /// connect, then each change. The watch starts before the list is read, so
-/// no change is missed; one may arrive twice.
-async fn stream_conversations(
+/// no change is missed; one may arrive twice. The stream ends when a watch
+/// ends, and the client's reconnect reads the list again.
+async fn stream_sessions(
     State(state): State<Arc<WebState>>,
     user: Option<axum::Extension<flowgen_core::auth::UserContext>>,
 ) -> axum::response::Response {
-    let owner = conversation_owner(user.as_ref());
-    let conversations = key_prefix(&state, AgentsKeys::Conversations);
+    let owner = session_owner(user.as_ref());
+    let sessions = key_prefix(&state, AgentsKeys::Sessions);
     let reads = key_prefix(&state, AgentsKeys::Reads);
     let folders = key_prefix(&state, AgentsKeys::Folders);
     let watch = |prefix: String| {
         let state = Arc::clone(&state);
         async move {
             match state
-                .conversation_cache
+                .session_cache
                 .watch(prefix.trim_end_matches('.'), false)
                 .await
             {
                 Ok(stream) => stream,
                 Err(source) => {
-                    warn!(error = %source, "Conversation watch subscription failed");
+                    warn!(error = %source, "Session watch subscription failed");
                     futures_util::stream::empty().boxed()
                 }
             }
         }
     };
-    let live = futures_util::stream::select_all([
-        watch(conversations.clone()).await,
+    let live = until_any_ends(vec![
+        watch(sessions.clone()).await,
         watch(reads.clone()).await,
         watch(folders.clone()).await,
     ]);
-    let initial = match conversation_summaries(&state, owner.as_deref()).await {
-        Ok(summaries) => SseEvent::default()
-            .event("conversations")
-            .json_data(&summaries),
+    let initial = match session_summaries(&state, owner.as_deref()).await {
+        Ok(summaries) => SseEvent::default().event("sessions").json_data(&summaries),
         Err(source) => {
-            warn!(error = %source, "Failed to list conversations from cache");
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Conversation store unavailable",
-            )
-                .into_response();
+            warn!(error = %source, "Failed to list sessions from cache");
+            return (StatusCode::SERVICE_UNAVAILABLE, "Session store unavailable").into_response();
         }
     };
 
     let changes = live.filter_map(move |event| {
         let owner = owner.clone();
         let state = Arc::clone(&state);
-        let (conversations, reads, folders) =
-            (conversations.clone(), reads.clone(), folders.clone());
+        let (sessions, reads, folders) = (sessions.clone(), reads.clone(), folders.clone());
         async move {
             let event = match event {
                 Ok(event) => event,
                 Err(source) => {
-                    warn!(error = %source, "Conversation watch failed");
+                    warn!(error = %source, "Session watch failed");
                     return None;
                 }
             };
             let owner = owner.as_deref();
-            let changed = |summary: api::ConversationSummary| {
-                SseEvent::default()
-                    .event("conversation")
-                    .json_data(&summary)
+            let changed = |summary: api::SessionSummary| {
+                SseEvent::default().event("session").json_data(&summary)
             };
-            let conversation_key = |key: &str| {
-                key.starts_with(&conversations) && visible_to(&conversations, owner, key)
-            };
+            let session_key =
+                |key: &str| key.starts_with(&sessions) && visible_to(&sessions, owner, key);
             match event {
-                flowgen_core::cache::WatchEvent::Put { key, value } if conversation_key(&key) => {
-                    let conversation = conversation_for(&state, owner, &key, &value).await?;
-                    Some(changed(summary_of(conversation)))
+                flowgen_core::cache::WatchEvent::Put { key, value } if session_key(&key) => {
+                    let session = session_for(&state, owner, &key, &value).await?;
+                    Some(changed(summary_of(session)))
                 }
-                flowgen_core::cache::WatchEvent::Delete { key } if conversation_key(&key) => {
-                    let id = conversation_id_of(&conversations, &key)?;
+                flowgen_core::cache::WatchEvent::Delete { key } if session_key(&key) => {
+                    let id = session_id_of(&sessions, &key)?;
                     Some(Ok(SseEvent::default().event("removed").data(id)))
                 }
                 flowgen_core::cache::WatchEvent::Put { key, .. }
                 | flowgen_core::cache::WatchEvent::Delete { key } => {
                     let id = user_key_id(&reads, owner, &key)
                         .or_else(|| user_key_id(&folders, owner, &key))?;
-                    let (key, bytes) = match find_conversation(&state, owner, id).await {
+                    let (key, bytes) = match find_session(&state, owner, id).await {
                         Ok(Some(found)) => found,
                         Ok(None) => return None,
                         Err(source) => {
-                            warn!(id = %id, error = %source, "Failed to read conversation from cache");
+                            warn!(id = %id, error = %source, "Failed to read session from cache");
                             return None;
                         }
                     };
-                    let conversation = conversation_for(&state, owner, &key, &bytes).await?;
-                    Some(changed(summary_of(conversation)))
+                    let session = session_for(&state, owner, &key, &bytes).await?;
+                    Some(changed(summary_of(session)))
                 }
             }
         }
@@ -1899,70 +1926,60 @@ async fn stream_conversations(
         .into_response()
 }
 
-/// Returns a single conversation with its full message history.
-async fn get_conversation(
+/// Returns a single session with its full message history.
+async fn get_session(
     State(state): State<Arc<WebState>>,
     AxumPath(id): AxumPath<String>,
     user: Option<axum::Extension<flowgen_core::auth::UserContext>>,
 ) -> axum::response::Response {
-    if !valid_conversation_id(&id) {
-        return (StatusCode::BAD_REQUEST, "Invalid conversation id").into_response();
+    if !valid_session_id(&id) {
+        return (StatusCode::BAD_REQUEST, "Invalid session id").into_response();
     }
-    let owner = conversation_owner(user.as_ref());
-    match find_conversation(&state, owner.as_deref(), &id).await {
-        Ok(Some((key, bytes))) => {
-            match conversation_for(&state, owner.as_deref(), &key, &bytes).await {
-                Some(c) => Json(c).into_response(),
-                None => (StatusCode::INTERNAL_SERVER_ERROR, "Corrupt conversation").into_response(),
-            }
-        }
-        Ok(None) => (StatusCode::NOT_FOUND, "Conversation not found").into_response(),
+    let owner = session_owner(user.as_ref());
+    match find_session(&state, owner.as_deref(), &id).await {
+        Ok(Some((key, bytes))) => match session_for(&state, owner.as_deref(), &key, &bytes).await {
+            Some(c) => Json(c).into_response(),
+            None => (StatusCode::INTERNAL_SERVER_ERROR, "Corrupt session").into_response(),
+        },
+        Ok(None) => (StatusCode::NOT_FOUND, "Session not found").into_response(),
         Err(source) => {
-            warn!(id = %id, error = %source, "Failed to read conversation from cache");
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Conversation store unavailable",
-            )
-                .into_response()
+            warn!(id = %id, error = %source, "Failed to read session from cache");
+            (StatusCode::SERVICE_UNAVAILABLE, "Session store unavailable").into_response()
         }
     }
 }
 
-/// Creates or overwrites a conversation. The path id is authoritative and the
+/// Creates or overwrites a session. The path id is authoritative and the
 /// `updated_at` is server-stamped; the TTL is refreshed on every write, so the
 /// expiry window counts from the last activity. An existing shared
-/// conversation stays shared; a new one is the signed-in user's own. The
+/// session stays shared; a new one is the signed-in user's own. The
 /// writer has read it; for everyone else it is unread if a flow marked it so.
-async fn put_conversation(
+async fn put_session(
     State(state): State<Arc<WebState>>,
     AxumPath(id): AxumPath<String>,
     user: Option<axum::Extension<flowgen_core::auth::UserContext>>,
-    Json(body): Json<api::ConversationUpsert>,
+    Json(body): Json<api::SessionUpsert>,
 ) -> axum::response::Response {
-    if !valid_conversation_id(&id) {
-        return (StatusCode::BAD_REQUEST, "Invalid conversation id").into_response();
+    if !valid_session_id(&id) {
+        return (StatusCode::BAD_REQUEST, "Invalid session id").into_response();
     }
-    let owner = conversation_owner(user.as_ref());
-    let (key, stored) = match find_conversation(&state, owner.as_deref(), &id).await {
-        Ok(Some((key, bytes))) => match serde_json::from_slice::<api::Conversation>(&bytes) {
+    let owner = session_owner(user.as_ref());
+    let (key, stored) = match find_session(&state, owner.as_deref(), &id).await {
+        Ok(Some((key, bytes))) => match serde_json::from_slice::<api::Session>(&bytes) {
             Ok(stored) => (key, Some(stored)),
             Err(source) => {
-                warn!(id = %id, error = %source, "Overwriting an unparseable conversation");
+                warn!(id = %id, error = %source, "Overwriting an unparseable session");
                 (key, None)
             }
         },
-        Ok(None) => (conversation_key(&state, owner.as_deref(), &id), None),
+        Ok(None) => (session_key(&state, owner.as_deref(), &id), None),
         Err(source) => {
-            warn!(id = %id, error = %source, "Failed to read conversation from cache");
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Conversation store unavailable",
-            )
-                .into_response();
+            warn!(id = %id, error = %source, "Failed to read session from cache");
+            return (StatusCode::SERVICE_UNAVAILABLE, "Session store unavailable").into_response();
         }
     };
 
-    let conversation = api::Conversation {
+    let session = api::Session {
         id: id.clone(),
         title: body.title,
         messages: body.messages,
@@ -1972,106 +1989,84 @@ async fn put_conversation(
         folder: stored.and_then(|c| c.folder),
         updated_at: now_millis(),
     };
-    if let Err(source) = write_read_at(&state, owner.as_deref(), &id, conversation.updated_at).await
-    {
-        warn!(id = %id, error = %source, "Failed to mark the conversation read");
+    if let Err(source) = write_read_at(&state, owner.as_deref(), &id, session.updated_at).await {
+        warn!(id = %id, error = %source, "Failed to mark the session read");
     }
-    let bytes = match serde_json::to_vec(&conversation) {
+    let bytes = match serde_json::to_vec(&session) {
         Ok(bytes) => bytes,
         Err(source) => {
-            warn!(id = %id, error = %source, "Failed to serialize conversation");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to store conversation",
-            )
-                .into_response();
+            warn!(id = %id, error = %source, "Failed to serialize session");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to store session").into_response();
         }
     };
 
     match state
-        .conversation_cache
-        .put(&key, bytes.into(), conversation_ttl(&state))
+        .session_cache
+        .put(&key, bytes.into(), session_ttl(&state))
         .await
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(source) => {
-            warn!(id = %id, error = %source, "Failed to write conversation to cache");
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Conversation store unavailable",
-            )
-                .into_response()
+            warn!(id = %id, error = %source, "Failed to write session to cache");
+            (StatusCode::SERVICE_UNAVAILABLE, "Session store unavailable").into_response()
         }
     }
 }
 
-/// Renames a conversation or moves it to one of the caller's folders,
+/// Renames a session or moves it to one of the caller's folders,
 /// keeping `updated_at`, so it neither moves up the list nor turns unread
 /// for anyone.
-async fn update_conversation(
+async fn update_session(
     State(state): State<Arc<WebState>>,
     AxumPath(id): AxumPath<String>,
     user: Option<axum::Extension<flowgen_core::auth::UserContext>>,
-    Json(body): Json<api::ConversationUpdate>,
+    Json(body): Json<api::SessionUpdate>,
 ) -> axum::response::Response {
     let title = body.title.as_deref().map(str::trim);
-    if !valid_conversation_id(&id) || title == Some("") {
-        return (StatusCode::BAD_REQUEST, "Invalid conversation id or title").into_response();
+    if !valid_session_id(&id) || title == Some("") {
+        return (StatusCode::BAD_REQUEST, "Invalid session id or title").into_response();
     }
-    let owner = conversation_owner(user.as_ref());
-    let (key, bytes) = match find_conversation(&state, owner.as_deref(), &id).await {
+    let owner = session_owner(user.as_ref());
+    let (key, bytes) = match find_session(&state, owner.as_deref(), &id).await {
         Ok(Some(found)) => found,
-        Ok(None) => return (StatusCode::NOT_FOUND, "Conversation not found").into_response(),
+        Ok(None) => return (StatusCode::NOT_FOUND, "Session not found").into_response(),
         Err(source) => {
-            warn!(id = %id, error = %source, "Failed to read conversation from cache");
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Conversation store unavailable",
-            )
-                .into_response();
+            warn!(id = %id, error = %source, "Failed to read session from cache");
+            return (StatusCode::SERVICE_UNAVAILABLE, "Session store unavailable").into_response();
         }
     };
-    let mut conversation = match serde_json::from_slice::<api::Conversation>(&bytes) {
-        Ok(conversation) => conversation,
-        Err(_) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Corrupt conversation").into_response()
-        }
+    let mut session = match serde_json::from_slice::<api::Session>(&bytes) {
+        Ok(session) => session,
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "Corrupt session").into_response(),
     };
     let unavailable = |source: flowgen_core::cache::Error| {
-        warn!(id = %id, error = %source, "Failed to write conversation to cache");
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Conversation store unavailable",
-        )
-            .into_response()
+        warn!(id = %id, error = %source, "Failed to write session to cache");
+        (StatusCode::SERVICE_UNAVAILABLE, "Session store unavailable").into_response()
     };
     if let Some(folder) = &body.folder {
         let key = folder_key(&state, owner.as_deref(), &id);
         let folder = normalize_folder(folder);
         if let Err(source) = state
-            .conversation_cache
-            .put(&key, folder.into(), conversation_ttl(&state))
+            .session_cache
+            .put(&key, folder.into(), session_ttl(&state))
             .await
         {
             return unavailable(source);
         }
     }
     if let Some(title) = title {
-        conversation.title = title.to_string();
-        let bytes = match serde_json::to_vec(&conversation) {
+        session.title = title.to_string();
+        let bytes = match serde_json::to_vec(&session) {
             Ok(bytes) => bytes,
             Err(source) => {
-                warn!(id = %id, error = %source, "Failed to serialize conversation");
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Failed to store conversation",
-                )
+                warn!(id = %id, error = %source, "Failed to serialize session");
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to store session")
                     .into_response();
             }
         };
         if let Err(source) = state
-            .conversation_cache
-            .put(&key, bytes.into(), conversation_ttl(&state))
+            .session_cache
+            .put(&key, bytes.into(), session_ttl(&state))
             .await
         {
             return unavailable(source);
@@ -2080,22 +2075,22 @@ async fn update_conversation(
     StatusCode::NO_CONTENT.into_response()
 }
 
-/// Deletes a conversation with the caller's read state and folder, and with
+/// Deletes a session with the caller's read state and folder, and with
 /// everyone's for a shared one. Idempotent — deleting a missing id still
 /// succeeds.
-async fn delete_conversation(
+async fn delete_session(
     State(state): State<Arc<WebState>>,
     AxumPath(id): AxumPath<String>,
     user: Option<axum::Extension<flowgen_core::auth::UserContext>>,
 ) -> axum::response::Response {
-    if !valid_conversation_id(&id) {
-        return (StatusCode::BAD_REQUEST, "Invalid conversation id").into_response();
+    if !valid_session_id(&id) {
+        return (StatusCode::BAD_REQUEST, "Invalid session id").into_response();
     }
-    let owner = conversation_owner(user.as_ref());
-    let (deleted, shared) = match find_conversation(&state, owner.as_deref(), &id).await {
+    let owner = session_owner(user.as_ref());
+    let (deleted, shared) = match find_session(&state, owner.as_deref(), &id).await {
         Ok(Some((key, _))) => (
-            state.conversation_cache.delete(&key).await,
-            key == conversation_key(&state, None, &id),
+            state.session_cache.delete(&key).await,
+            key == session_key(&state, None, &id),
         ),
         Ok(None) => (Ok(()), false),
         Err(source) => (Err(source), false),
@@ -2109,14 +2104,14 @@ async fn delete_conversation(
             key_prefix(&state, AgentsKeys::Reads),
             key_prefix(&state, AgentsKeys::Folders),
         ] {
-            match state.conversation_cache.list_keys(&prefix).await {
+            match state.session_cache.list_keys(&prefix).await {
                 Ok(found) => keys.extend(
                     found
                         .into_iter()
-                        .filter(|key| conversation_id_of(&prefix, key) == Some(id.as_str())),
+                        .filter(|key| session_id_of(&prefix, key) == Some(id.as_str())),
                 ),
                 Err(source) => {
-                    warn!(prefix = %prefix, error = %source, "Failed to list conversation state")
+                    warn!(prefix = %prefix, error = %source, "Failed to list session state")
                 }
             }
         }
@@ -2124,66 +2119,58 @@ async fn delete_conversation(
     keys.sort();
     keys.dedup();
     for key in keys {
-        if let Err(source) = state.conversation_cache.delete(&key).await {
-            warn!(key = %key, error = %source, "Failed to delete conversation state");
+        if let Err(source) = state.session_cache.delete(&key).await {
+            warn!(key = %key, error = %source, "Failed to delete session state");
         }
     }
     match deleted {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(source) => {
-            warn!(id = %id, error = %source, "Failed to delete conversation from cache");
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Conversation store unavailable",
-            )
-                .into_response()
+            warn!(id = %id, error = %source, "Failed to delete session from cache");
+            (StatusCode::SERVICE_UNAVAILABLE, "Session store unavailable").into_response()
         }
     }
 }
 
-/// Marks a conversation read for the caller only.
-async fn mark_conversation_read(
+/// Marks a session read for the caller only.
+async fn mark_session_read(
     State(state): State<Arc<WebState>>,
     AxumPath(id): AxumPath<String>,
     user: Option<axum::Extension<flowgen_core::auth::UserContext>>,
 ) -> axum::response::Response {
-    set_conversation_read(&state, &id, user.as_ref(), true).await
+    set_session_read(&state, &id, user.as_ref(), true).await
 }
 
-/// Marks a conversation unread for the caller only.
-async fn mark_conversation_unread(
+/// Marks a session unread for the caller only.
+async fn mark_session_unread(
     State(state): State<Arc<WebState>>,
     AxumPath(id): AxumPath<String>,
     user: Option<axum::Extension<flowgen_core::auth::UserContext>>,
 ) -> axum::response::Response {
-    set_conversation_read(&state, &id, user.as_ref(), false).await
+    set_session_read(&state, &id, user.as_ref(), false).await
 }
 
-async fn set_conversation_read(
+async fn set_session_read(
     state: &WebState,
     id: &str,
     user: Option<&axum::Extension<flowgen_core::auth::UserContext>>,
     read: bool,
 ) -> axum::response::Response {
-    if !valid_conversation_id(id) {
-        return (StatusCode::BAD_REQUEST, "Invalid conversation id").into_response();
+    if !valid_session_id(id) {
+        return (StatusCode::BAD_REQUEST, "Invalid session id").into_response();
     }
-    let owner = conversation_owner(user);
-    let updated_at = match find_conversation(state, owner.as_deref(), id).await {
-        Ok(Some((_, bytes))) => match serde_json::from_slice::<api::Conversation>(&bytes) {
+    let owner = session_owner(user);
+    let updated_at = match find_session(state, owner.as_deref(), id).await {
+        Ok(Some((_, bytes))) => match serde_json::from_slice::<api::Session>(&bytes) {
             Ok(c) => c.updated_at,
             Err(_) => {
-                return (StatusCode::INTERNAL_SERVER_ERROR, "Corrupt conversation").into_response()
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Corrupt session").into_response()
             }
         },
-        Ok(None) => return (StatusCode::NOT_FOUND, "Conversation not found").into_response(),
+        Ok(None) => return (StatusCode::NOT_FOUND, "Session not found").into_response(),
         Err(source) => {
-            warn!(id = %id, error = %source, "Failed to read conversation from cache");
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Conversation store unavailable",
-            )
-                .into_response();
+            warn!(id = %id, error = %source, "Failed to read session from cache");
+            return (StatusCode::SERVICE_UNAVAILABLE, "Session store unavailable").into_response();
         }
     };
     let at = match read {
@@ -2193,12 +2180,8 @@ async fn set_conversation_read(
     match write_read_at(state, owner.as_deref(), id, at).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(source) => {
-            warn!(id = %id, error = %source, "Failed to mark the conversation read");
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Conversation store unavailable",
-            )
-                .into_response()
+            warn!(id = %id, error = %source, "Failed to mark the session read");
+            (StatusCode::SERVICE_UNAVAILABLE, "Session store unavailable").into_response()
         }
     }
 }
@@ -2311,10 +2294,7 @@ pub(crate) mod tests {
     pub(crate) fn test_state() -> WebState {
         let app_config = Arc::new(crate::config::AppConfig {
             cache: None,
-            flows: crate::config::FlowOptions {
-                path: None,
-                cache: None,
-            },
+            flows: crate::config::FlowOptions::default(),
             resources: None,
             http_server: None,
             mcp_server: None,
@@ -2324,6 +2304,7 @@ pub(crate) mod tests {
             retry: None,
             telemetry: None,
             shutdown_timeout: crate::config::default_shutdown_timeout(),
+            host: crate::config::default_host(),
             ai_budget: None,
         });
         let flow_registry = Arc::new(RwLock::new(HashMap::new()));
@@ -2337,7 +2318,7 @@ pub(crate) mod tests {
             this_pod: "test-pod".to_string(),
             running_flows: Arc::new(crate::app::RegistryFlows(flow_registry)),
             app_config,
-            conversation_cache: Arc::new(flowgen_core::cache::memory::MemoryCache::new()),
+            session_cache: Arc::new(flowgen_core::cache::memory::MemoryCache::new()),
             system_bucket_present: false,
             agents: None,
             login_client: None,
@@ -2348,6 +2329,7 @@ pub(crate) mod tests {
             inproc: Arc::new(flowgen_core::task::inproc::registry::InprocRegistry::new()),
             flows_cache: None,
             replies: Default::default(),
+            latest_release: Default::default(),
         }
     }
 
@@ -2584,6 +2566,7 @@ pub(crate) mod tests {
             (Method::POST, "/f/api/changes/abc/files"),
             (Method::PATCH, "/f/api/changes/abc"),
             (Method::POST, "/f/api/workspace/validate"),
+            (Method::POST, "/f/api/workspace/test"),
         ];
         let refused = [
             (Method::POST, "/f/api/changes/abc/approve"),
@@ -2591,7 +2574,7 @@ pub(crate) mod tests {
             (Method::PATCH, "/f/api/changes/abc/approve"),
             (Method::PATCH, "/f/api/flows/a"),
             (Method::POST, "/f/api/cluster/token"),
-            (Method::GET, "/f/api/agents/conversations"),
+            (Method::GET, "/f/api/agents/sessions"),
             (Method::GET, "/f/api/config"),
             (Method::GET, "/f/api/flowsx"),
         ];
@@ -2694,14 +2677,14 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn approving_a_change_runs_the_publish_flow_and_records_its_result() {
+    async fn an_approved_change_is_committed_released_and_deployed() {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<flowgen_core::event::Event>(1);
         let inproc = Arc::new(flowgen_core::task::inproc::registry::InprocRegistry::new());
         inproc.register(
-            "system/publish_workspace".to_string(),
+            "system/commit_workspace".to_string(),
             flowgen_core::task::inproc::registry::Registration {
                 tx,
-                task_name: "on_publish".to_string(),
+                task_name: "on_approve".to_string(),
                 task_id: 0,
                 task_type: "inproc_endpoint",
                 leaf_count: 1,
@@ -2710,7 +2693,7 @@ pub(crate) mod tests {
                 cancellation_token: tokio_util::sync::CancellationToken::new(),
             },
         );
-        let published = tokio::spawn(async move {
+        let committed = tokio::spawn(async move {
             let event = rx.recv().await.unwrap();
             let data = event.data_as_json().unwrap();
             event
@@ -2725,6 +2708,9 @@ pub(crate) mod tests {
         state.resource_loader = Some(flowgen_core::resource::ResourceLoader::new(Some(
             resources.path().to_path_buf(),
         )));
+        let system: Arc<dyn flowgen_core::cache::Cache> =
+            Arc::new(flowgen_core::cache::MemoryCache::new());
+        state.flows_cache = Some(Arc::clone(&system));
         state.authoring = Some(crate::config::AuthoringOptions {
             enabled: true,
             targets: vec![authoring_target("workspace", &["flows/", "resources/"])],
@@ -2762,9 +2748,9 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        assert_eq!(approved.status, api::ChangeStatus::Published);
+        assert_eq!(approved.status, api::ChangeStatus::Committed);
         assert_eq!(approved.result["commit"], "abc");
-        let sent = published.await.unwrap();
+        let sent = committed.await.unwrap();
         assert_eq!(sent["title"], "Add script");
         assert_eq!(
             sent["files"],
@@ -2814,6 +2800,18 @@ pub(crate) mod tests {
             }
         };
         assert_eq!(deployment(None).await, Some(api::ChangeDeployment::Waiting));
+        system
+            .put(
+                &format!("{}.abc", crate::authoring::RELEASES_PREFIX),
+                "sha256:a".into(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            deployment(None).await,
+            Some(api::ChangeDeployment::Released)
+        );
         assert_eq!(
             deployment(Some("event\n")).await,
             Some(api::ChangeDeployment::Deployed)
@@ -2922,7 +2920,7 @@ pub(crate) mod tests {
         crate::config::AuthoringTarget {
             name: name.to_string(),
             paths: paths.iter().map(|path| path.to_string()).collect(),
-            publish_flow: "system/publish_workspace".to_string(),
+            commit_flow: "system/commit_workspace".to_string(),
             approver_groups: Vec::new(),
             track_deployment: true,
         }
@@ -3003,7 +3001,7 @@ pub(crate) mod tests {
             authoring_target("workspace", &["flows/", "resources/"]),
             authoring_target("platform", &["flows/platform/"]),
         ]));
-        let cache = Arc::clone(&state.conversation_cache);
+        let cache = Arc::clone(&state.session_cache);
         let base = serve(router("/flowgen", state)).await;
         let client = reqwest::Client::new();
         let proposed: api::Change = client
@@ -3047,14 +3045,14 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn a_change_rewritten_while_publishing_keeps_the_newer_record() {
+    async fn a_change_rewritten_while_committing_keeps_the_newer_record() {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<flowgen_core::event::Event>(1);
         let inproc = Arc::new(flowgen_core::task::inproc::registry::InprocRegistry::new());
         inproc.register(
-            "system/publish_workspace".to_string(),
+            "system/commit_workspace".to_string(),
             flowgen_core::task::inproc::registry::Registration {
                 tx,
-                task_name: "on_publish".to_string(),
+                task_name: "on_approve".to_string(),
                 task_id: 0,
                 task_type: "inproc_endpoint",
                 leaf_count: 1,
@@ -3069,7 +3067,7 @@ pub(crate) mod tests {
             &["flows/", "resources/"],
         )]));
         state.inproc = inproc;
-        let cache = Arc::clone(&state.conversation_cache);
+        let cache = Arc::clone(&state.session_cache);
         tokio::spawn(async move {
             let event = rx.recv().await.unwrap();
             let id = event.data_as_json().unwrap()["id"]
@@ -3128,7 +3126,7 @@ pub(crate) mod tests {
             .unwrap();
 
         assert_eq!(stored.title, "Newer");
-        assert_eq!(stored.status, api::ChangeStatus::Publishing);
+        assert_eq!(stored.status, api::ChangeStatus::Committing);
     }
 
     #[tokio::test]
@@ -3150,7 +3148,7 @@ pub(crate) mod tests {
     fn agents_options() -> crate::config::AgentsOptions {
         crate::config::AgentsOptions {
             enabled: true,
-            conversation_history_ttl: None,
+            session_history_ttl: None,
             on_behalf_of_user: false,
             cache_prefix: crate::config::default_agents_cache_prefix(),
             reply_save_interval: crate::config::default_reply_save_interval(),
@@ -3190,7 +3188,7 @@ pub(crate) mod tests {
         let on = serve(router("/flowgen", state)).await;
 
         let status = |base: String| async move {
-            reqwest::get(format!("{base}/flowgen/api/agents/conversations"))
+            reqwest::get(format!("{base}/flowgen/api/agents/sessions"))
                 .await
                 .unwrap()
                 .status()
@@ -3206,8 +3204,8 @@ pub(crate) mod tests {
         }))
     }
 
-    fn upsert(title: &str) -> Json<api::ConversationUpsert> {
-        Json(api::ConversationUpsert {
+    fn upsert(title: &str) -> Json<api::SessionUpsert> {
+        Json(api::SessionUpsert {
             title: title.to_string(),
             messages: Vec::new(),
             model: None,
@@ -3225,9 +3223,9 @@ pub(crate) mod tests {
             "updatedAt": 1
         });
         state
-            .conversation_cache
+            .session_cache
             .put(
-                &conversation_key(state, None, id),
+                &session_key(state, None, id),
                 serde_json::to_vec(&written_by_flow).unwrap().into(),
                 None,
             )
@@ -3239,15 +3237,15 @@ pub(crate) mod tests {
         state: &Arc<WebState>,
         user: Option<axum::Extension<flowgen_core::auth::UserContext>>,
     ) -> serde_json::Value {
-        let listed = listed_conversations(state, user).await;
-        listed["conversations"][0]["unread"].clone()
+        let listed = listed_sessions(state, user).await;
+        listed["sessions"][0]["unread"].clone()
     }
 
-    async fn listed_conversations(
+    async fn listed_sessions(
         state: &Arc<WebState>,
         user: Option<axum::Extension<flowgen_core::auth::UserContext>>,
     ) -> serde_json::Value {
-        let response = list_conversations(State(Arc::clone(state)), user).await;
+        let response = list_sessions(State(Arc::clone(state)), user).await;
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
@@ -3258,8 +3256,8 @@ pub(crate) mod tests {
         state: &Arc<WebState>,
         user: Option<axum::Extension<flowgen_core::auth::UserContext>>,
     ) -> Vec<String> {
-        let listed = listed_conversations(state, user).await;
-        let mut titles: Vec<String> = listed["conversations"]
+        let listed = listed_sessions(state, user).await;
+        let mut titles: Vec<String> = listed["sessions"]
             .as_array()
             .unwrap()
             .iter()
@@ -3270,23 +3268,23 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn signed_in_users_see_their_own_and_the_shared_conversations() {
+    async fn signed_in_users_see_their_own_and_the_shared_sessions() {
         let state = Arc::new(test_state());
-        put_conversation(
+        put_session(
             State(Arc::clone(&state)),
             AxumPath("s".into()),
             None,
             upsert("shared"),
         )
         .await;
-        put_conversation(
+        put_session(
             State(Arc::clone(&state)),
             AxumPath("a".into()),
             signed_in("ann"),
             upsert("ann's"),
         )
         .await;
-        put_conversation(
+        put_session(
             State(Arc::clone(&state)),
             AxumPath("b".into()),
             signed_in("bob"),
@@ -3295,7 +3293,7 @@ pub(crate) mod tests {
         .await;
 
         let ann = listed_titles(&state, signed_in("ann")).await;
-        let bob_opens_ann = get_conversation(
+        let bob_opens_ann = get_session(
             State(Arc::clone(&state)),
             AxumPath("a".into()),
             signed_in("bob"),
@@ -3307,9 +3305,9 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn a_reply_to_a_shared_conversation_keeps_it_shared() {
+    async fn a_reply_to_a_shared_session_keeps_it_shared() {
         let state = Arc::new(test_state());
-        put_conversation(
+        put_session(
             State(Arc::clone(&state)),
             AxumPath("s".into()),
             None,
@@ -3317,7 +3315,7 @@ pub(crate) mod tests {
         )
         .await;
 
-        put_conversation(
+        put_session(
             State(Arc::clone(&state)),
             AxumPath("s".into()),
             signed_in("ann"),
@@ -3332,11 +3330,11 @@ pub(crate) mod tests {
     }
 
     async fn move_to(state: &Arc<WebState>, user: &str, folder: &str) {
-        update_conversation(
+        update_session(
             State(Arc::clone(state)),
             AxumPath("a1".into()),
             signed_in(user),
-            Json(api::ConversationUpdate {
+            Json(api::SessionUpdate {
                 title: None,
                 folder: Some(folder.to_string()),
             }),
@@ -3345,11 +3343,11 @@ pub(crate) mod tests {
     }
 
     async fn folder_for(state: &Arc<WebState>, user: &str) -> serde_json::Value {
-        listed_conversations(state, signed_in(user)).await["conversations"][0]["folder"].clone()
+        listed_sessions(state, signed_in(user)).await["sessions"][0]["folder"].clone()
     }
 
     #[tokio::test]
-    async fn each_user_files_a_shared_conversation_in_their_own_folder() {
+    async fn each_user_files_a_shared_session_in_their_own_folder() {
         let state = Arc::new(test_state());
         write_flow_thread(&state, "a1").await;
 
@@ -3365,42 +3363,42 @@ pub(crate) mod tests {
         let state = Arc::new(test_state());
         write_flow_thread(&state, "a1").await;
 
-        update_conversation(
+        update_session(
             State(Arc::clone(&state)),
             AxumPath("a1".into()),
             None,
-            Json(api::ConversationUpdate {
+            Json(api::SessionUpdate {
                 title: None,
                 folder: Some("a".to_string()),
             }),
         )
         .await;
 
-        let listed = listed_conversations(&state, None).await;
-        assert_eq!(listed["conversations"][0]["folder"], "a");
+        let listed = listed_sessions(&state, None).await;
+        assert_eq!(listed["sessions"][0]["folder"], "a");
     }
 
     #[tokio::test]
-    async fn renaming_keeps_the_conversation_where_it_was() {
+    async fn renaming_keeps_the_session_where_it_was() {
         let state = Arc::new(test_state());
         write_flow_thread(&state, "a1").await;
 
-        let renamed = update_conversation(
+        let renamed = update_session(
             State(Arc::clone(&state)),
             AxumPath("a1".into()),
             signed_in("ann"),
-            Json(api::ConversationUpdate {
+            Json(api::SessionUpdate {
                 title: Some("  b ".to_string()),
                 folder: None,
             }),
         )
         .await;
 
-        let listed = listed_conversations(&state, signed_in("bob")).await;
+        let listed = listed_sessions(&state, signed_in("bob")).await;
         assert_eq!(renamed.status(), StatusCode::NO_CONTENT);
-        assert_eq!(listed["conversations"][0]["title"], "b");
-        assert_eq!(listed["conversations"][0]["updatedAt"], 1);
-        assert_eq!(listed["conversations"][0]["unread"], true);
+        assert_eq!(listed["sessions"][0]["title"], "b");
+        assert_eq!(listed["sessions"][0]["updatedAt"], 1);
+        assert_eq!(listed["sessions"][0]["unread"], true);
     }
 
     #[tokio::test]
@@ -3408,7 +3406,7 @@ pub(crate) mod tests {
         let state = Arc::new(test_state());
         write_flow_thread(&state, "a1").await;
 
-        mark_conversation_read(
+        mark_session_read(
             State(Arc::clone(&state)),
             AxumPath("a1".into()),
             signed_in("ann"),
@@ -3431,9 +3429,9 @@ pub(crate) mod tests {
             "id": "a1", "title": "a", "messages": [], "updatedAt": 1
         });
         state
-            .conversation_cache
+            .session_cache
             .put(
-                &conversation_key(&state, Some(&ann), "a1"),
+                &session_key(&state, Some(&ann), "a1"),
                 serde_json::to_vec(&thread).unwrap().into(),
                 None,
             )
@@ -3449,7 +3447,7 @@ pub(crate) mod tests {
         let state = Arc::new(test_state());
         write_flow_thread(&state, "a1").await;
         for user in ["ann", "bob"] {
-            mark_conversation_read(
+            mark_session_read(
                 State(Arc::clone(&state)),
                 AxumPath("a1".into()),
                 signed_in(user),
@@ -3457,7 +3455,7 @@ pub(crate) mod tests {
             .await;
         }
 
-        mark_conversation_unread(
+        mark_session_unread(
             State(Arc::clone(&state)),
             AxumPath("a1".into()),
             signed_in("ann"),
@@ -3476,7 +3474,7 @@ pub(crate) mod tests {
         let state = Arc::new(test_state());
         write_flow_thread(&state, "a1").await;
         for user in ["ann", "bob"] {
-            mark_conversation_read(
+            mark_session_read(
                 State(Arc::clone(&state)),
                 AxumPath("a1".into()),
                 signed_in(user),
@@ -3484,7 +3482,7 @@ pub(crate) mod tests {
             .await;
         }
 
-        put_conversation(
+        put_session(
             State(Arc::clone(&state)),
             AxumPath("a1".into()),
             signed_in("ann"),
@@ -3500,12 +3498,12 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn without_auth_everyone_reads_a_conversation_as_one() {
+    async fn without_auth_everyone_reads_a_session_as_one() {
         let state = Arc::new(test_state());
         write_flow_thread(&state, "a1").await;
         let before = unread_for(&state, None).await;
 
-        mark_conversation_read(State(Arc::clone(&state)), AxumPath("a1".into()), None).await;
+        mark_session_read(State(Arc::clone(&state)), AxumPath("a1".into()), None).await;
 
         assert_eq!(before, true);
         assert_eq!(unread_for(&state, None).await, serde_json::Value::Null);
@@ -3538,7 +3536,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_reply_runs_on_the_server_and_lands_in_the_conversation() {
+    async fn a_reply_runs_on_the_server_and_lands_in_the_session() {
         let mut state = test_state();
         let mut config = (*state.app_config).clone();
         config.web = Some(
@@ -3553,7 +3551,7 @@ pub(crate) mod tests {
         let base = serve(router("/f", state)).await;
 
         let started = reqwest::Client::new()
-            .post(format!("{base}/f/api/agents/conversations/c1/reply"))
+            .post(format!("{base}/f/api/agents/sessions/c1/reply"))
             .json(&serde_json::json!({"content": "hi", "model": "agent/model"}))
             .send()
             .await
@@ -3561,45 +3559,45 @@ pub(crate) mod tests {
         let mut done = None;
         for _ in 0..50 {
             tokio::time::sleep(Duration::from_millis(50)).await;
-            let conversation: serde_json::Value =
-                reqwest::get(format!("{base}/f/api/agents/conversations/c1"))
+            let session: serde_json::Value =
+                reqwest::get(format!("{base}/f/api/agents/sessions/c1"))
                     .await
                     .unwrap()
                     .json()
                     .await
                     .unwrap();
-            if conversation["messages"][1]["pending"].is_null() {
-                done = Some(conversation);
+            if session["messages"][1]["pending"].is_null() {
+                done = Some(session);
                 break;
             }
         }
 
         assert_eq!(started.status(), StatusCode::ACCEPTED);
-        let conversation = done.expect("the reply ends");
-        assert_eq!(conversation["title"], "hi");
-        assert_eq!(conversation["messages"][0]["content"], "hi");
-        assert_eq!(conversation["messages"][1]["content"], "Checking.\n\nDone.");
-        assert_eq!(conversation["messages"][1]["steps"][0]["name"], "tool");
+        let session = done.expect("the reply ends");
+        assert_eq!(session["title"], "hi");
+        assert_eq!(session["messages"][0]["content"], "hi");
+        assert_eq!(session["messages"][1]["content"], "Checking.\n\nDone.");
+        assert_eq!(session["messages"][1]["steps"][0]["name"], "tool");
     }
 
     #[tokio::test]
-    async fn the_conversation_stream_sends_the_list_then_each_change() {
+    async fn the_session_stream_sends_the_list_then_each_change() {
         let mut state = test_state();
         state.agents = Some(agents_options());
-        let cache = Arc::clone(&state.conversation_cache);
-        let key = conversation_key(&state, None, "a1");
-        let conversation = |title: &str| {
+        let cache = Arc::clone(&state.session_cache);
+        let key = session_key(&state, None, "a1");
+        let session = |title: &str| {
             serde_json::to_vec(&serde_json::json!({
                 "id": "a1", "title": title, "messages": [], "updatedAt": 1
             }))
             .unwrap()
         };
         cache
-            .put(&key, conversation("first").into(), None)
+            .put(&key, session("first").into(), None)
             .await
             .unwrap();
         let base = serve(router("/flowgen", state)).await;
-        let response = reqwest::get(format!("{base}/flowgen/api/agents/conversations/stream"))
+        let response = reqwest::get(format!("{base}/flowgen/api/agents/sessions/stream"))
             .await
             .unwrap();
         let mut body = response.bytes_stream();
@@ -3617,15 +3615,47 @@ pub(crate) mod tests {
 
         read_until("\"first\"").await;
         cache
-            .put(&key, conversation("second").into(), None)
+            .put(&key, session("second").into(), None)
             .await
             .unwrap();
         read_until("\"second\"").await;
         cache.delete(&key).await.unwrap();
         read_until("event: removed\ndata: a1").await;
 
-        assert!(received.starts_with("event: conversations\n"));
-        assert!(received.contains("event: conversation\n"));
+        assert!(received.starts_with("event: sessions\n"));
+        assert!(received.contains("event: session\n"));
+    }
+
+    #[tokio::test]
+    async fn a_flow_written_to_the_cache_is_sent_as_deployed() {
+        let mut state = test_state();
+        let mut app_config = (*state.app_config).clone();
+        app_config.flows.cache = Some(crate::config::FlowCacheOptions { enabled: true });
+        let prefix = crate::config::FLOWS_CACHE_PREFIX;
+        state.app_config = Arc::new(app_config);
+        let cache: Arc<dyn flowgen_core::cache::Cache> =
+            Arc::new(flowgen_core::cache::MemoryCache::new());
+        state.flows_cache = Some(Arc::clone(&cache));
+        let base = serve(router("/flowgen", state)).await;
+        let response = reqwest::get(format!("{base}/flowgen/api/changes/stream"))
+            .await
+            .unwrap();
+        let mut body = response.bytes_stream();
+
+        cache
+            .put(&format!("{prefix}.a"), "flow".into(), None)
+            .await
+            .unwrap();
+
+        let mut received = String::new();
+        while !received.contains("event: deployment\ndata: {}") {
+            let chunk = tokio::time::timeout(Duration::from_secs(5), body.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            received.push_str(&String::from_utf8_lossy(&chunk));
+        }
     }
 
     #[derive(Debug)]
@@ -3686,21 +3716,21 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn the_conversation_stream_answers_503_while_the_store_is_unavailable() {
+    async fn the_session_stream_answers_503_while_the_store_is_unavailable() {
         let mut state = test_state();
         state.agents = Some(agents_options());
-        state.conversation_cache = Arc::new(UnavailableCache);
+        state.session_cache = Arc::new(UnavailableCache);
 
-        let response = stream_conversations(State(Arc::new(state)), None).await;
+        let response = stream_sessions(State(Arc::new(state)), None).await;
 
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[test]
-    fn stream_is_not_a_conversation_id() {
-        assert!(valid_conversation_id("a1"));
-        assert!(!valid_conversation_id("stream"));
-        assert!(!valid_conversation_id("a.b"));
+    fn stream_is_not_a_session_id() {
+        assert!(valid_session_id("a1"));
+        assert!(!valid_session_id("stream"));
+        assert!(!valid_session_id("a.b"));
     }
 
     async fn fed_gateway() -> (String, tokio::sync::mpsc::UnboundedSender<bytes::Bytes>) {
@@ -3767,15 +3797,15 @@ pub(crate) mod tests {
         .status()
     }
 
-    async fn stored(state: &WebState, id: &str) -> Option<api::Conversation> {
-        let (_, bytes) = find_conversation(state, None, id).await.unwrap()?;
+    async fn stored(state: &WebState, id: &str) -> Option<api::Session> {
+        let (_, bytes) = find_session(state, None, id).await.unwrap()?;
         Some(serde_json::from_slice(&bytes).unwrap())
     }
 
-    async fn reply_ended(state: &WebState, id: &str) -> api::ConversationMessage {
+    async fn reply_ended(state: &WebState, id: &str) -> api::SessionMessage {
         for _ in 0..100 {
             let last = match stored(state, id).await {
-                Some(conversation) => conversation.messages.last().cloned(),
+                Some(session) => session.messages.last().cloned(),
                 None => None,
             };
             if let Some(last) = last.filter(|last| last.pending.is_none()) {
@@ -3787,7 +3817,7 @@ pub(crate) mod tests {
     }
 
     async fn store_pending(state: &WebState, id: &str, updated_at: i64) {
-        let conversation = serde_json::json!({
+        let session = serde_json::json!({
             "id": id,
             "title": "a",
             "messages": [
@@ -3797,10 +3827,10 @@ pub(crate) mod tests {
             "updatedAt": updated_at
         });
         state
-            .conversation_cache
+            .session_cache
             .put(
-                &conversation_key(state, None, id),
-                serde_json::to_vec(&conversation).unwrap().into(),
+                &session_key(state, None, id),
+                serde_json::to_vec(&session).unwrap().into(),
                 None,
             )
             .await
@@ -3911,7 +3941,7 @@ pub(crate) mod tests {
         let (gateway, frames) = fed_gateway().await;
         let writing = Arc::new(replying_state(&gateway));
         let mut other = replying_state(&gateway);
-        other.conversation_cache = Arc::clone(&writing.conversation_cache);
+        other.session_cache = Arc::clone(&writing.session_cache);
         let other = Arc::new(other);
         let stop = || {
             crate::agent_reply::stop_reply(
@@ -3969,7 +3999,7 @@ pub(crate) mod tests {
         for _ in 0..50 {
             if stored(&state, "a1")
                 .await
-                .and_then(|conversation| conversation.messages.last().cloned())
+                .and_then(|session| session.messages.last().cloned())
                 .is_some_and(|last| last.content == "b")
             {
                 stopped = crate::agent_reply::stop_reply(
@@ -4019,13 +4049,13 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn deleting_a_shared_conversation_removes_everyones_read_state_and_folder() {
+    async fn deleting_a_shared_session_removes_everyones_read_state_and_folder() {
         let state = Arc::new(test_state());
         write_flow_thread(&state, "a1").await;
         write_flow_thread(&state, "a2").await;
         for user in ["ann", "bob"] {
             for id in ["a1", "a2"] {
-                mark_conversation_read(
+                mark_session_read(
                     State(Arc::clone(&state)),
                     AxumPath(id.into()),
                     signed_in(user),
@@ -4035,7 +4065,7 @@ pub(crate) mod tests {
             move_to(&state, user, "f").await;
         }
 
-        let deleted = delete_conversation(
+        let deleted = delete_session(
             State(Arc::clone(&state)),
             AxumPath("a1".into()),
             signed_in("ann"),
@@ -4046,7 +4076,7 @@ pub(crate) mod tests {
         for keys in [AgentsKeys::Reads, AgentsKeys::Folders] {
             left.extend(
                 state
-                    .conversation_cache
+                    .session_cache
                     .list_keys(&key_prefix(&state, keys))
                     .await
                     .unwrap(),
@@ -4080,6 +4110,87 @@ pub(crate) mod tests {
 
         let keys: Vec<&str> = resources.iter().map(|r| r.key.as_str()).collect();
         assert_eq!(keys, vec!["a.txt", "nested/b.txt"]);
+    }
+
+    #[tokio::test]
+    async fn merged_watches_end_when_one_ends() {
+        let ended = futures_util::stream::iter([1]).boxed();
+        let open = futures_util::stream::pending().boxed();
+
+        let merged: Vec<i32> = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            until_any_ends(vec![ended, open]).collect(),
+        )
+        .await
+        .expect("The merged stream ends with the first that ends");
+
+        assert_eq!(merged, vec![1]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_script_test_imports_draft_resources_before_deployed_ones() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("scripts")).unwrap();
+        std::fs::write(root.path().join("scripts/add.rhai"), "fn add(x) { x + 1 }").unwrap();
+        std::fs::write(
+            root.path().join("scripts/scale.rhai"),
+            "fn scale(x) { x * 2 }",
+        )
+        .unwrap();
+        let mut state = test_state();
+        state.resource_loader = Some(flowgen_core::resource::ResourceLoader::new(Some(
+            root.path().to_path_buf(),
+        )));
+        let state = Arc::new(state);
+        let test = |samples: Vec<serde_json::Value>| {
+            api::ScriptTest {
+            script: "import \"scripts/add\" as a;\nimport \"scripts/scale\" as s;\nif event.data.n < 0 { throw \"negative\"; }\nevent.data.n = s::scale(a::add(event.data.n));\nevent".to_string(),
+            samples,
+            files: vec![
+                api::WorkspaceFile {
+                    path: "resources/scripts/scale.rhai".to_string(),
+                    content: Some("fn scale(x) { x * 10 }".to_string()),
+                },
+                api::WorkspaceFile {
+                    path: "flows/a.yaml".to_string(),
+                    content: Some("flow: {}".to_string()),
+                },
+            ],
+        }
+        };
+        let sample = |n: i64| {
+            let mut data = serde_json::Map::new();
+            data.insert("n".to_string(), n.into());
+            serde_json::Value::Object(data)
+        };
+
+        let Json(result) = crate::authoring::test_script(
+            State(Arc::clone(&state)),
+            Json(test(vec![sample(1), sample(-1)])),
+        )
+        .await
+        .unwrap();
+        let empty =
+            crate::authoring::test_script(State(Arc::clone(&state)), Json(test(Vec::new()))).await;
+        let many = crate::authoring::test_script(
+            State(state),
+            Json(test(std::iter::repeat_n(sample(1), 101).collect())),
+        )
+        .await;
+
+        assert_eq!(result.outcomes.len(), 2);
+        assert_eq!(result.outcomes[0].events, vec![sample(20)]);
+        assert_eq!(result.outcomes[0].error, None);
+        assert!(result.outcomes[1].events.is_empty());
+        assert!(result.outcomes[1]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("negative")));
+        assert!(matches!(empty, Err(crate::authoring::Error::NoSamples)));
+        assert!(matches!(
+            many,
+            Err(crate::authoring::Error::TooManySamples { max: 100 })
+        ));
     }
 
     #[test]

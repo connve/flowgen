@@ -62,36 +62,53 @@ web:
 
 Without `targets`, one `workspace` target covers `flows/` and `resources/` and anyone signed in may approve. The web UI offers **Edit** only on files inside a target and shows the target of each change.
 
-Flows in different folders are kept apart at runtime too: an [`inproc_endpoint`](/docs/flowgen/core/inproc) accepts calls from its own top-level folder by default, so `user/` flows cannot call `system/publish_workspace`.
+Flows in different folders are kept apart at runtime too: an [`inproc_endpoint`](/docs/flowgen/core/inproc) accepts calls from its own top-level folder by default, so `user/` flows cannot call `system/commit_workspace`.
 
 ## Approving
 
-`POST {path}/api/changes/{id}/approve` and `/reject` require a signed-in user, and a member of one of the change's target's `approver_groups` when the list is set. Groups are read from the user's claim named by `web.authoring.groups_claim` (default `groups`); most providers include it only when asked, for example with a `groups` scope in `web.auth.extra_scopes`. Requests authenticated with a machine key are refused, so an agent can propose changes but never publish them. With `?updatedAt=` set to the change's `updatedAt` as reviewed, approving fails with 409 when the change was edited since. Approving moves the change to `publishing`, runs the publish flow, and records `published` with the flow's result, or `failed` with the error. Publishing runs to the end even when the browser disconnects, and is recorded as failed after the `ack_timeout` of the publish flow's `inproc_endpoint`.
+`POST {path}/api/changes/{id}/approve` and `/reject` require a signed-in user, and a member of one of the change's target's `approver_groups` when the list is set. Groups are read from the user's claim named by `web.authoring.groups_claim` (default `groups`); most providers include it only when asked, for example with a `groups` scope in `web.auth.extra_scopes`. Requests authenticated with a machine key are refused, so an agent can propose changes but never commit them. With `?updatedAt=` set to the change's `updatedAt` as reviewed, approving fails with 409 when the change was edited since. Approving moves the change to `committing`, runs the commit flow, and records `committed` with the flow's result, or `failed` with the error. Committing runs to the end even when the browser disconnects, and is recorded as failed after the `ack_timeout` of the commit flow's `inproc_endpoint`.
 
-A failed change can be approved again, as can one left in `publishing` past the timeout, for example after a restart; such a change has `stalled` set, and the web UI offers to retry it. [Git Push](/docs/flowgen/git/push) accepts files that already hold the proposed content, so publishing again after a partial success does not conflict.
+A failed change can be approved again, as can one left in `committing` past the timeout, for example after a restart; such a change has `stalled` set, and the web UI offers to retry it. [Git Push](/docs/flowgen/git/push) accepts files that already hold the proposed content, so committing again after a partial success does not conflict.
 
-The publish flow is any flow starting with an [`inproc_endpoint`](/docs/flowgen/core/inproc); the target's `publish_flow` names it by its identity (default `system/publish_workspace`), so targets can share one publish flow or commit to different repositories. Approvals call it in-process, and it has no HTTP route, so nothing else can trigger a publish. It receives:
+The commit flow is any flow starting with an [`inproc_endpoint`](/docs/flowgen/core/inproc); the target's `commit_flow` names it by its identity (default `system/commit_workspace`), so targets can share one commit flow or commit to different repositories. Approvals call it in-process, and it has no HTTP route, so nothing else can trigger a commit. It receives:
 
 | Field | Description |
 |---|---|
 | `id`, `title` | The change. |
 | `target` | The change's target. |
-| `author` | `{name, email}` of the approving user, from the identity provider's claims. |
+| `author` | `{name, email}` of the approving user, from the identity provider's claims; empty strings without sign-in. |
 | `files` | `{path, content, previous}` per file. |
 
-The approving user's identity is in `event.meta.auth`. [`examples/authoring/publish_workspace.yaml`](https://github.com/connve/flowgen/blob/main/examples/authoring/publish_workspace.yaml) commits the files with [Git Push](/docs/flowgen/git/push), which fails when a file changed since the change was proposed, and records the commit as the change's result.
+The approving user's identity is in `event.meta.auth`. [`config/commit_workspace.yaml`](https://github.com/connve/flowgen/blob/main/config/commit_workspace.yaml) commits the files with [Git Push](/docs/flowgen/git/push), which fails when a file changed since the change was proposed, and records the commit as the change's result.
+
+## Lifecycle flows
+
+The commit flow, with the release and deploy flows below, is in [`config/`](https://github.com/connve/flowgen/tree/main/config). The same three flows run on one machine and in a cluster; they read where to commit, release and deploy from environment variables. A workspace started by `flowgen` without `--config` holds them in `flows/system/` and sets the variables itself. In a cluster, `flows.system: true` runs them from flowgen itself, matching its version, and the deployment sets the variables, with the credentials files mounted; the chart's `lifecycle` values do both.
+
+| Variable | Set by flowgen to | In a cluster |
+|---|---|---|
+| `FLOWGEN_REPOSITORY` | The workspace's repository, a path on this machine, in a local run. | The repository's URL. |
+| `FLOWGEN_WORKSPACE_PATH` | The workspace's folder in the repository, ending in `/`, or empty for the whole repository, in a local run. | The folder, or empty. |
+| `FLOWGEN_GIT_CREDENTIALS` | | The [git credentials](/docs/flowgen/git#credentials) file. |
+| `FLOWGEN_RELEASES` | `oci-layout://.flowgen/releases`, an OCI Image Layout next to the cache. | The registry repository, e.g. `ghcr.io/acme/workspace`. |
+| `FLOWGEN_REGISTRY_CREDENTIALS` | | The [registry credentials](/docs/flowgen/oci#credentials) file. |
+| `FLOWGEN_CACHE_URL` | The `cache`: `redb://<path>` or its NATS URL. | |
+| `FLOWGEN_CACHE_CREDENTIALS` | The `cache` credentials file, or empty. | |
+| `FLOWGEN_SYSTEM_BUCKET` | The system bucket. | |
+
+flowgen sets a variable only when the environment does not. An empty credentials variable means none. Without sign-in, the commit is by the git user of the machine; a commit to a URL needs the approving user, so a cluster needs `web.auth`. The release and deploy flows have `require_leader_election`, so one pod runs each.
 
 ## Releasing
 
 An approved change ends as a commit, the same as a change pushed by hand, and the deployment releases every commit the same way. The workspace is deployed in one of three ways:
 
-- straight from the repository with [Git Sync](/docs/flowgen/git/sync), as in [`examples/git/sync_workspace.yaml`](https://github.com/connve/flowgen/blob/main/examples/git/sync_workspace.yaml);
-- from an artifact the repository's CI pipeline publishes, deployed by the [OCI Sync](/docs/flowgen/oci/sync) bootstrap; flowgen then needs only read access to the registry;
-- from an artifact a release flow in flowgen publishes. [`examples/authoring/release_workspace.yaml`](https://github.com/connve/flowgen/blob/main/examples/authoring/release_workspace.yaml) pulls the branch with [Git Sync](/docs/flowgen/git/sync) when it moves and pushes it with [OCI Push](/docs/flowgen/oci/push), tagged with the commit and `latest`.
+- straight from the repository, with [Git Sync](/docs/flowgen/git/sync) in place of OCI Sync in the deploy flow; see [Loading flows from Git](/docs/flowgen/git/guides/loading-flows);
+- from an artifact the repository's CI pipeline releases, deployed by [`config/deploy_workspace.yaml`](https://github.com/connve/flowgen/blob/main/config/deploy_workspace.yaml) with [OCI Sync](/docs/flowgen/oci/sync); flowgen then needs only read access to the registry;
+- from an artifact a release flow in flowgen releases. [`config/release_workspace.yaml`](https://github.com/connve/flowgen/blob/main/config/release_workspace.yaml) reads each new commit with [Git Sync](/docs/flowgen/git/sync) and pushes it with [OCI Push](/docs/flowgen/oci/push), tagged with the commit and `latest`, to a local OCI Image Layout or, with `repository` set to one, a registry.
 
-An artifact lets every environment run a release by its tag and roll back to an earlier one. Exactly one thing should publish it.
+An artifact lets every environment run a release by its tag and roll back to an earlier one. Exactly one thing should release it.
 
-A `published` change reports its `deployment` against what this instance runs: `waiting` while a file still runs as before the change, `deployed` otherwise. Set `track_deployment: false` on a target that is not deployed to this instance automatically.
+A `committed` change reports its `deployment` against what this instance runs: `waiting` until its commit is released, `released` once a release is recorded under `releases.<commit>` in the system bucket, and `deployed` when no file runs as before the change. A release flow records it with a [KV Store](/docs/flowgen/kv-store/kv-store) `put` after pushing; without such a record a change goes from `waiting` to `deployed`. Set `track_deployment: false` on a target that is not deployed to this instance automatically.
 
 ## Machine keys
 
@@ -111,8 +128,18 @@ web:
 
 Send the key as `Authorization: Bearer <key>`. The key's name is recorded as the proposer (`key:operator-agent`). Keys shorter than 32 characters are ignored, and keys are read at startup.
 
-A machine key reaches only what an agent needs: reading flows, resources, logs and changes (`GET`), validating files, proposing changes, and adding files to and editing the pending changes it proposed. Every other route answers `403` to a key. Machine keys apply only when `web.auth` is set; without it the API is open and anyone can approve.
+A machine key reaches only what an agent needs: reading flows, resources, logs and changes (`GET`), validating files, testing scripts, proposing changes, and adding files to and editing the pending changes it proposed. Every other route answers `403` to a key. Machine keys apply only when `web.auth` is set; without it the API is open and anyone can approve.
 
-## Operator agent
+## Flowgen Agent
 
-[`examples/authoring/flow_operator.yaml`](https://github.com/connve/flowgen/blob/main/examples/authoring/flow_operator.yaml) is an agent for the built-in Agents chat. Its tools are flows in `examples/authoring/tools/`, such as [`propose_change.yaml`](https://github.com/connve/flowgen/blob/main/examples/authoring/tools/propose_change.yaml), that call the web API with a machine key to list and read deployed flows and resources, validate drafts, propose changes, and read a flow's logs after it is deployed.
+A local workspace starts with Flowgen Agent, `flows/system/flowgen_agent.yaml`, an agent for the built-in Agents chat. Its tools are the flows in `flows/system/flowgen_agent/`, served as the MCP toolset `/mcp/v1/system/flowgen_agent`. They call the web API to list and read deployed flows and resources, validate drafts, run draft Rhai scripts on sample events with `POST /api/workspace/test`, propose changes, and read a flow's logs after it is deployed. With `web.auth` set, give each tool's `http_request` a machine key with `credentials_path`.
+
+The agent asks the AI gateway for the model `default`, served by an `llm_proxy` named `default`, such as a model flow from a hub's templates. The agent and its tools reach the servers of the run through variables that every run sets unless they are set already:
+
+| Variable | Default |
+|---|---|
+| `FLOWGEN_URL` | The web server, `http://<host>:<web.port><web.path>` |
+| `FLOWGEN_MCP_URL` | The MCP server, `http://<host>:<mcp_server.port><mcp_server.path>` |
+| `FLOWGEN_AI_GATEWAY_URL` | The AI gateway, `http://<host>:<ai_gateway.port><ai_gateway.path>` |
+
+`<host>` is `host`, or `127.0.0.1` when `host` is `0.0.0.0`.

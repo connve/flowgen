@@ -21,22 +21,10 @@ spec:
     - port: {{ default 8082 $worker.cluster.port }}
       protocol: TCP
   - ports:
-    {{- if $worker.http_server }}
-    - port: {{ $worker.http_server.port }}
+    {{- range $key, $server := include "flowgen.servers" . | fromYaml }}
+    - port: {{ $server.port }}
       protocol: TCP
     {{- end }}
-    {{- if $worker.mcp_server }}
-    - port: {{ $worker.mcp_server.port }}
-      protocol: TCP
-    {{- end }}
-    {{- if $worker.ai_gateway }}
-    - port: {{ $worker.ai_gateway.port }}
-      protocol: TCP
-    {{- end }}
-    {{- if $worker.web }}
-    - port: {{ $worker.web.port }}
-      protocol: TCP
-    {{- end }}
-    - port: {{ default 8081 (dig "health" "port" nil $worker) }}
+    - port: {{ dig "health" "port" 8081 (include "flowgen.settings" . | fromYaml) }}
       protocol: TCP
 {{- end }}

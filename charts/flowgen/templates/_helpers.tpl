@@ -65,6 +65,40 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/component: wireguard-gateway
 {{- end }}
 
+{{/*
+The app config: `config.settings`, with `flows.system` on when `systemFlows`
+is enabled. Rendered as YAML; read it back with `fromYaml`.
+*/}}
+{{- define "flowgen.settings" -}}
+{{- $worker := index .Values "flowgen" -}}
+{{- $settings := deepCopy (default dict $worker.config.settings) -}}
+{{- if $worker.systemFlows.enabled }}
+{{- $flows := default dict (get $settings "flows") -}}
+{{- $_ := set $flows "system" true -}}
+{{- $_ := set $settings "flows" $flows -}}
+{{- end }}
+{{- toYaml $settings }}
+{{- end }}
+
+{{/*
+The servers the config enables, by settings key: their port name, container
+port and Service type.
+*/}}
+{{- define "flowgen.servers" -}}
+{{- $worker := index .Values "flowgen" -}}
+{{- $settings := include "flowgen.settings" . | fromYaml -}}
+{{- $defaults := dict "http_server" (list "http" 3000) "mcp_server" (list "mcp" 3001) "ai_gateway" (list "ai-gateway" 3002) "web" (list "web" 8080) -}}
+{{- $servers := dict -}}
+{{- range $key, $default := $defaults }}
+{{- $server := get $settings $key }}
+{{- if and $server (get $server "enabled") }}
+{{- $type := dig $key "type" "ClusterIP" (default dict $worker.services) }}
+{{- $_ := set $servers $key (dict "name" (index $default 0) "port" (default (index $default 1) (get $server "port")) "type" $type) }}
+{{- end }}
+{{- end }}
+{{- toYaml $servers }}
+{{- end }}
+
 {{- define "flowgen.serviceAccountName" -}}
 {{- $worker := index .Values "flowgen" -}}
 {{- if $worker.serviceAccount.create }}

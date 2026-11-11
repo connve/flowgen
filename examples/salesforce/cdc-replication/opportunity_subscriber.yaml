@@ -15,7 +15,6 @@ flow:
     tags: ["salesforce", "cdc", "nats", "example"]
   require_leader_election: true
   tasks:
-
     - salesforce_pubsubapi_subscribe:
         name: start_subscription
         credentials_path: /etc/sfdc/credentials.json

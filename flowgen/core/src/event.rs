@@ -13,9 +13,12 @@ use serde::{Serialize, Serializer};
 use serde_json::{Map, Value};
 use std::cell::RefCell;
 use std::io::{Read, Seek, Write};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::info;
+
+/// Work to run once every leaf of an event succeeded, such as saving a cursor.
+pub type SuccessHook = futures_util::future::BoxFuture<'static, ()>;
 
 /// One-shot channel used by a flow source to wait for end-to-end completion.
 /// Carries an optional result payload for request-response flows (HTTP webhook, MCP).
@@ -36,12 +39,24 @@ pub type CompletionTx = tokio::sync::oneshot::Sender<
 /// `signal_completion_with_error`. The "last leaf wins" rule applies to both —
 /// a failing leaf that signals last delivers the error to the source even if
 /// sibling leaves succeeded, and vice versa.
-#[derive(Debug)]
 pub struct CompletionState {
     /// Number of leaves still expected to signal completion.
     remaining: AtomicUsize,
     /// One-shot sender to the source. `None` once completion has been delivered.
     sender: Mutex<Option<CompletionTx>>,
+    /// Whether any leaf signalled a failure.
+    failed: AtomicBool,
+    /// Run when the last leaf signals and none failed; dropped otherwise.
+    on_success: Mutex<Vec<SuccessHook>>,
+}
+
+impl std::fmt::Debug for CompletionState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompletionState")
+            .field("remaining", &self.remaining)
+            .field("failed", &self.failed)
+            .finish()
+    }
 }
 
 impl CompletionState {
@@ -55,7 +70,29 @@ impl CompletionState {
         Self {
             remaining: AtomicUsize::new(leaf_count.max(1)),
             sender: Mutex::new(Some(sender)),
+            failed: AtomicBool::new(false),
+            on_success: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Runs `hook` once every leaf has signalled and none failed, so a task
+    /// can commit progress, such as a cursor, only after the flow finished
+    /// with its output. Register it before sending the events it covers.
+    pub fn on_success(&self, hook: SuccessHook) {
+        let mut hooks = match self.on_success.lock() {
+            Ok(hooks) => hooks,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        hooks.push(hook);
+    }
+
+    /// The hooks registered so far, taken so each runs at most once.
+    fn take_hooks(&self) -> Vec<SuccessHook> {
+        let mut hooks = match self.on_success.lock() {
+            Ok(hooks) => hooks,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        std::mem::take(&mut *hooks)
     }
 
     /// Counts one leaf as done and returns whether it was the last one. The
@@ -88,6 +125,21 @@ impl CompletionState {
         if !self.last_leaf() {
             return;
         }
+        let hooks = self.take_hooks();
+        match (
+            self.failed.load(Ordering::Acquire),
+            tokio::runtime::Handle::try_current(),
+        ) {
+            (false, Ok(runtime)) => {
+                for hook in hooks {
+                    runtime.spawn(hook);
+                }
+            }
+            (false, Err(_)) if !hooks.is_empty() => {
+                tracing::warn!("No runtime to run the work of a completed event on")
+            }
+            _ => {}
+        }
         if let Ok(mut guard) = self.sender.lock() {
             if let Some(tx) = guard.take() {
                 tx.send(Ok(payload)).ok();
@@ -103,9 +155,11 @@ impl CompletionState {
     /// caller as a tool/request error instead of falling back to an opaque
     /// acknowledgement timeout.
     pub fn signal_completion_with_error(&self, error: String) {
+        self.failed.store(true, Ordering::Release);
         if !self.last_leaf() {
             return;
         }
+        drop(self.take_hooks());
         if let Ok(mut guard) = self.sender.lock() {
             if let Some(tx) = guard.take() {
                 tx.send(Err(error.into())).ok();
@@ -1254,6 +1308,63 @@ mod tests {
         assert_eq!(forwarded.error.as_deref(), Some("boom"));
         assert!(forwarded.completion_tx.is_some());
         assert!(completion_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn success_hooks_run_only_when_every_leaf_succeeded() {
+        let ran = |leaves: &[bool]| {
+            let leaves = leaves.to_vec();
+            async move {
+                let (completion, _rx) = new_completion_channel(leaves.len());
+                let (done_tx, mut done_rx) = tokio::sync::mpsc::channel(1);
+                completion.on_success(Box::pin(async move {
+                    let _ = done_tx.send(()).await;
+                }));
+                for succeeded in leaves {
+                    match succeeded {
+                        true => completion.signal_completion(None),
+                        false => completion.signal_completion_with_error("boom".to_string()),
+                    }
+                }
+                matches!(
+                    tokio::time::timeout(std::time::Duration::from_millis(200), done_rx.recv())
+                        .await,
+                    Ok(Some(()))
+                )
+            }
+        };
+
+        assert!(ran(&[true]).await);
+        assert!(ran(&[true, true]).await);
+        assert!(!ran(&[false]).await, "A failed leaf drops the hook");
+        assert!(
+            !ran(&[false, true]).await,
+            "A failed leaf drops the hook even when a later one succeeds"
+        );
+        assert!(!ran(&[true, false]).await);
+    }
+
+    #[tokio::test]
+    async fn a_success_hook_waits_for_the_last_leaf() {
+        let (completion, _rx) = new_completion_channel(2);
+        let (done_tx, mut done_rx) = tokio::sync::mpsc::channel(1);
+        completion.on_success(Box::pin(async move {
+            let _ = done_tx.send(()).await;
+        }));
+
+        completion.signal_completion(None);
+        tokio::task::yield_now().await;
+        assert!(
+            done_rx.try_recv().is_err(),
+            "One of two leaves is not enough"
+        );
+        completion.signal_completion(None);
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), done_rx.recv())
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]

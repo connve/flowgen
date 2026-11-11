@@ -13,7 +13,6 @@ flow:
     description: "Consumes order-status events from NATS and publishes them as Salesforce platform events via the Pub/Sub API to trigger Salesforce automation."
     tags: ["salesforce", "platform-events", "nats", "pubsub", "example"]
   tasks:
-
     - nats_jetstream_subscribe:
         name: start_subscription
         credentials_path: /etc/nats/credentials.json

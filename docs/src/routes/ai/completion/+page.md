@@ -23,7 +23,7 @@ Run LLM completions from multiple providers within a flow. Supports custom OpenA
 | `prompt` | string/resource | required | User prompt template. Supports handlebars templating and resource files. |
 | `credentials_path` | string | | Path to provider credentials JSON. Required for hosted providers, optional for `custom`/`ollama` (local providers without auth). |
 | `endpoint` | string | | Base URL of a custom OpenAI-compatible endpoint. Required when `provider: custom` or `provider: ollama`. Example: `https://llm-gateway.internal.example.com/v1`. |
-| `headers` | map of string to string | | HTTP headers sent with every request (`provider: custom`/`ollama` only). Use this to identify the agent to a downstream `llm_proxy` scoped by its own `headers` field — see [AI Gateway](/docs/flowgen/ai/gateway#llm_proxy). |
+| `headers` | map of string to string | | HTTP headers sent with every request (`provider: custom`/`ollama` only), such as a key the endpoint requires. |
 | `system_prompt` | string/resource | | System prompt. |
 | `max_tokens` | int | | Maximum tokens in response. |
 | `temperature` | float | | Sampling temperature (0.0–1.0). |
@@ -180,13 +180,11 @@ For MCP servers that require OAuth 2.0, use the `oauth2_client_credentials` form
 }
 ```
 
-Each entry also accepts `headers`, sent with every request to that MCP server. Use it to identify this agent to an `mcp_tool` scoped by its own `headers` field, so the agent only sees and can call the tools meant for it:
+Each entry also accepts `headers`, sent with every request to that MCP server, such as a key the server requires. To give an agent only the tools of one folder of flows, connect it to that folder's [toolset](/docs/flowgen/ai/mcp) URL:
 
 ```yaml
     mcp_servers:
-      - url: "http://localhost:3001/mcp"
-        headers:
-          X-Flowgen-Client: your-agent-name
+      - url: "http://localhost:3001/mcp/v1/sales"
 ```
 
 `allowed_tools` names the tools of that server the agent uses; the others stay out of the model's tool list. Without it the agent gets every tool the server lists:

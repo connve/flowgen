@@ -17,8 +17,6 @@
 //!
 //! Runs in `cargo test` without `#[ignore]` because no external daemon
 //! is required.
-
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -97,7 +95,6 @@ fn register_fake_proxy_with_protocol<F>(
     let config = Arc::new(LlmProxy {
         name: name.to_string(),
         models: Vec::new(),
-        headers: HashMap::new(),
         protocol,
         credentials_path: None,
         auth: None,
@@ -148,7 +145,6 @@ fn register_fake_proxy_with_models<F>(
     let config = Arc::new(LlmProxy {
         name: name.to_string(),
         models,
-        headers: HashMap::new(),
         protocol: Protocol::Openai,
         credentials_path: None,
         auth: None,
@@ -179,53 +175,6 @@ fn register_fake_proxy_with_models<F>(
             let payload = respond(&event);
             if let Some(completion_tx) = event.completion_tx.as_ref() {
                 completion_tx.signal_completion(Some(payload));
-            }
-        }
-    });
-}
-
-/// Registers a proxy scoped to a `headers` requirement, so tests can
-/// exercise the exclusivity filter on `GET /models` and dispatch.
-fn register_fake_proxy_with_headers(
-    server: &AiGatewayServer,
-    name: &str,
-    headers: HashMap<String, String>,
-) {
-    let (tx, mut rx) = mpsc::channel::<Event>(4);
-
-    let config = Arc::new(LlmProxy {
-        name: name.to_string(),
-        models: Vec::new(),
-        headers,
-        protocol: Protocol::Openai,
-        credentials_path: None,
-        auth: None,
-        ack_timeout: Some(Duration::from_secs(5)),
-        depends_on: None,
-        retry: None,
-    });
-
-    let registration = LlmProxyRegistration {
-        flow_name: "test_flow".to_string(),
-        display_name: None,
-        description: None,
-        protocol: Protocol::Openai,
-        config,
-        credentials: None,
-        auth_provider: None,
-        tx,
-        task_id: 0,
-        task_type: "llm_proxy",
-        response_registry: Arc::new(ResponseRegistry::new()),
-        leaf_count: 1,
-        cancellation_token: CancellationToken::new(),
-    };
-    server.register(name.to_string(), registration);
-
-    tokio::spawn(async move {
-        while let Some(event) = rx.recv().await {
-            if let Some(completion_tx) = event.completion_tx.as_ref() {
-                completion_tx.signal_completion(Some(json!({"text": "unused"})));
             }
         }
     });
@@ -770,81 +719,6 @@ async fn list_models_returns_registered_proxies_in_openai_shape() {
 }
 
 #[tokio::test]
-async fn list_models_headers_filter_scopes_by_matching_header() {
-    // `public` (empty headers) is reachable by everyone; `scoped` requires
-    // `X-Flowgen-Client: flowgen-ui`. Everyone sees `public`; only a request
-    // carrying the matching header also sees `scoped`.
-    let (server, chat_url, _handle) = boot_server().await;
-    register_fake_proxy_with_headers(&server, "public", HashMap::new());
-    register_fake_proxy_with_headers(
-        &server,
-        "scoped",
-        HashMap::from([("X-Flowgen-Client".to_string(), "flowgen-ui".to_string())]),
-    );
-    let models_url = chat_url.replace("/chat/completions", "/models");
-
-    let ids_for = |client: Option<&'static str>| {
-        let url = models_url.clone();
-        async move {
-            let mut req = reqwest::Client::new().get(&url);
-            if let Some(c) = client {
-                req = req.header("X-Flowgen-Client", c);
-            }
-            let body: Value = req
-                .send()
-                .await
-                .expect("GET /models")
-                .json()
-                .await
-                .expect("json");
-            body["data"]
-                .as_array()
-                .expect("data array")
-                .iter()
-                .map(|m| m["id"].as_str().expect("id").to_string())
-                .collect::<Vec<_>>()
-        }
-    };
-
-    // Named client: sees both — public is visible to everyone, and its
-    // header satisfies the scoped proxy's requirement.
-    let ui = ids_for(Some("flowgen-ui")).await;
-    assert!(
-        ui.contains(&"scoped".to_string()),
-        "flowgen-ui must see scoped"
-    );
-    assert!(
-        ui.contains(&"public".to_string()),
-        "flowgen-ui must see public too"
-    );
-
-    // Anonymous: only the public proxy — scoped requires the header.
-    let anon = ids_for(None).await;
-    assert!(anon.contains(&"public".to_string()), "anon must see public");
-    assert!(
-        !anon.contains(&"scoped".to_string()),
-        "anon must NOT see scoped, got {anon:?}"
-    );
-
-    // Dispatch is blocked, not just hidden from listing: an anonymous
-    // request to the scoped proxy gets the same 404 as an unknown proxy.
-    let resp = reqwest::Client::new()
-        .post(&chat_url)
-        .json(&json!({
-            "model": "scoped/gpt-4",
-            "messages": [{"role": "user", "content": "hi"}]
-        }))
-        .send()
-        .await
-        .expect("post");
-    assert_eq!(
-        resp.status(),
-        404,
-        "anon must not be able to dispatch to scoped"
-    );
-}
-
-#[tokio::test]
 async fn unknown_proxy_returns_404() {
     let (_server, url, _handle) = boot_server().await;
 
@@ -964,7 +838,6 @@ fn register_proxy_with_bearer_token(
     let config = Arc::new(LlmProxy {
         name: name.to_string(),
         models: Vec::new(),
-        headers: HashMap::new(),
         protocol,
         credentials_path: None,
         auth: None,
@@ -1219,7 +1092,6 @@ async fn session_of_bearer_request(
             config: Arc::new(LlmProxy {
                 name: "gw".to_string(),
                 models: Vec::new(),
-                headers: HashMap::new(),
                 protocol: Protocol::Openai,
                 credentials_path: None,
                 auth,
@@ -1315,7 +1187,6 @@ async fn a_request_not_taken_within_ack_timeout_gets_503() {
             config: Arc::new(LlmProxy {
                 name: "gw".to_string(),
                 models: Vec::new(),
-                headers: HashMap::new(),
                 protocol: Protocol::Openai,
                 credentials_path: None,
                 auth: None,

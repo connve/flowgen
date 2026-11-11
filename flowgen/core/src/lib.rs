@@ -58,6 +58,8 @@ pub mod flow {
 }
 /// Validation helpers for config-supplied identifiers and paths.
 pub mod validate;
+/// The layout of a workspace.
+pub mod workspace;
 /// Task execution framework with runner trait, context, and manager.
 pub mod task {
     pub use flowgen_macros::TaskConfig;

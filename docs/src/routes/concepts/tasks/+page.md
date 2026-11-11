@@ -35,7 +35,7 @@ Processors receive events, do something with them, and emit events to the next t
 | `http_request` | Makes outbound HTTP calls. |
 | `html_scrape` | Extracts rows from HTML with CSS selectors. |
 | `nats_jetstream_publish` | Publishes events to a NATS JetStream subject. |
-| `nats_kv_store` | Read, write, list, and delete keys in a NATS KV bucket. |
+| `kv_store` | Read, write, list, and delete keys in a redb file or a NATS KV bucket. |
 | `salesforce_pubsubapi_publish` | Publishes Salesforce Platform Events. |
 | `salesforce_restapi_sobject` | Salesforce CRUD operations (create, get, update, upsert, delete). |
 | `salesforce_restapi_composite` | Batch Salesforce operations. |
@@ -58,8 +58,8 @@ Processors receive events, do something with them, and emit events to the next t
 | `klaviyo_profiles` | Reads and writes Klaviyo profiles. |
 | `mongodb_collection` | Reads or writes documents in a MongoDB collection. |
 | `object_store` | Object storage operations (read, write, list, move) on S3, GCS, Azure, local. |
-| `git_sync` | Clone/pull a Git repository and emit one event per file. |
-| `oci_sync` | Pull an OCI artifact from a registry and emit one event per layer. |
+| `git_sync` | Clone/pull a Git repository and emit its files in one event. |
+| `oci_sync` | Pull an OCI artifact from a registry and emit its files in one event. |
 | `ai_completion` | LLM completions from multiple providers. |
 | `llm_proxy` | Registers a flow as a backend on the AI gateway server. |
 | `mcp_tool` | Expose flows as MCP tools for LLM agents. |

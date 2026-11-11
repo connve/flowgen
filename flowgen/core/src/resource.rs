@@ -195,6 +195,7 @@ impl std::fmt::Debug for CacheSource {
 pub struct ResourceLoader {
     base_path: Option<PathBuf>,
     cache: Option<CacheSource>,
+    drafts: Arc<std::collections::HashMap<String, String>>,
 }
 
 impl ResourceLoader {
@@ -206,7 +207,14 @@ impl ResourceLoader {
         Self {
             base_path,
             cache: None,
+            drafts: Arc::default(),
         }
+    }
+
+    /// This loader with `drafts`, content by key, loaded before every other source.
+    pub fn with_drafts(mut self, drafts: std::collections::HashMap<String, String>) -> Self {
+        self.drafts = Arc::new(drafts);
+        self
     }
 
     /// Creates a new cache-backed `ResourceLoader`.
@@ -221,6 +229,7 @@ impl ResourceLoader {
         Self {
             base_path: None,
             cache: Some(CacheSource { cache, prefix }),
+            drafts: Arc::default(),
         }
     }
 
@@ -237,6 +246,22 @@ impl ResourceLoader {
     pub fn with_cache(mut self, cache: Arc<dyn crate::cache::Cache>, prefix: String) -> Self {
         self.cache = Some(CacheSource { cache, prefix });
         self
+    }
+
+    /// Changes to the cached resources; a loader without a cache never changes.
+    pub async fn watch(
+        &self,
+    ) -> Result<
+        futures_util::stream::BoxStream<
+            'static,
+            Result<crate::cache::WatchEvent, crate::cache::Error>,
+        >,
+        crate::cache::Error,
+    > {
+        match &self.cache {
+            Some(source) => source.cache.watch(&source.prefix, false).await,
+            None => Ok(Box::pin(futures_util::stream::pending())),
+        }
     }
 
     /// Loads a resource by key.
@@ -259,6 +284,9 @@ impl ResourceLoader {
             return Err(Error::InvalidKey {
                 key: key.to_string(),
             });
+        }
+        if let Some(draft) = self.drafts.get(key) {
+            return Ok(draft.clone());
         }
 
         // Filesystem first when configured.
@@ -298,7 +326,7 @@ impl ResourceLoader {
             });
         }
 
-        if self.base_path.is_none() {
+        if self.base_path.is_none() && self.drafts.is_empty() {
             return Err(Error::ResourcePathNotConfigured);
         }
 
@@ -312,6 +340,28 @@ impl ResourceLoader {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn drafts_are_loaded_before_the_files_they_change() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rhai"), "deployed").unwrap();
+        std::fs::write(dir.path().join("b.rhai"), "deployed").unwrap();
+        let drafts = [("a.rhai".to_string(), "draft".to_string())].into();
+        let loader = ResourceLoader::new(Some(dir.path().to_path_buf())).with_drafts(drafts);
+
+        assert_eq!(loader.load("a.rhai").await.unwrap(), "draft");
+        assert_eq!(loader.load("b.rhai").await.unwrap(), "deployed");
+        assert!(matches!(
+            loader.load("../a.rhai").await,
+            Err(Error::InvalidKey { .. })
+        ));
+        let only_drafts = ResourceLoader::new(None)
+            .with_drafts([("a.rhai".to_string(), "draft".to_string())].into());
+        assert!(matches!(
+            only_drafts.load("c.rhai").await,
+            Err(Error::ResourceNotFound { .. })
+        ));
+    }
 
     #[test]
     fn test_new_with_path() {

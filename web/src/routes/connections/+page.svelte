@@ -3,11 +3,7 @@
 	import { goto, invalidate } from '$app/navigation';
 	import { encodePath, type Connection, type FlowStatus } from '$lib/api';
 	import Icon from '@iconify/svelte';
-	import IconButton from '$lib/IconButton.svelte';
-	import Inspector from '$lib/Inspector.svelte';
-	import InspectorSection from '$lib/InspectorSection.svelte';
-	import StatusDot from '$lib/StatusDot.svelte';
-	import StateMessage from '$lib/StateMessage.svelte';
+	import { IconButton, Inspector, InspectorSection, StateMessage, StatusDot } from '@connve/ui';
 	import { connectorByName } from '$lib/connectors';
 	import { m } from '$lib/paraglide/messages.js';
 	import { pageTitle } from '$lib/pageTitle';

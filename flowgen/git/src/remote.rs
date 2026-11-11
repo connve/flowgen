@@ -219,6 +219,17 @@ pub enum UrlError {
     },
 }
 
+/// Whether `value` holds a template, so it can only be checked rendered.
+pub fn is_template(value: &str) -> bool {
+    value.contains("{{")
+}
+
+/// Whether a repository is a URL to a git server rather than a path on this
+/// machine. An SSH address counts as a URL, so `check_url` can refuse it.
+pub fn is_url(repository: &str) -> bool {
+    repository.contains("://") || repository.starts_with("git@")
+}
+
 /// Rejects SSH URLs, and with credentials any URL but HTTPS or HTTP to a
 /// loopback host, because the push sends the token with its first request.
 pub fn check_url(url: &str, credentials: Option<&Credentials>) -> Result<(), UrlError> {

@@ -53,12 +53,8 @@ impl bb8::ManageConnection for ConnectionManager {
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Error reading credentials file '{path}': {source}")]
-    ReadCredentials {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
+    #[error(transparent)]
+    ReadCredentials(flowgen_core::credentials::Error),
     #[error("Error parsing credentials file '{path}': {source}")]
     ParseCredentials {
         path: PathBuf,
@@ -198,11 +194,24 @@ pub fn connection_config(
 
 /// Reads the credentials file.
 pub fn read_credentials(path: &Path) -> Result<Credentials, Error> {
-    let raw = std::fs::read_to_string(path).map_err(|source| Error::ReadCredentials {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    serde_json::from_str(&raw).map_err(|source| Error::ParseCredentials {
+    parse_credentials(
+        path,
+        &flowgen_core::credentials::read(path).map_err(Error::ReadCredentials)?,
+    )
+}
+
+/// [`read_credentials`] on a blocking thread, as the keychain and the file system block.
+pub async fn load_credentials(path: &Path) -> Result<Credentials, Error> {
+    parse_credentials(
+        path,
+        &flowgen_core::credentials::read_async(path)
+            .await
+            .map_err(Error::ReadCredentials)?,
+    )
+}
+
+fn parse_credentials(path: &Path, raw: &str) -> Result<Credentials, Error> {
+    serde_json::from_str(raw).map_err(|source| Error::ParseCredentials {
         path: path.to_path_buf(),
         source,
     })

@@ -33,6 +33,85 @@ pub enum Error {
         #[source]
         source: serde_json::Error,
     },
+    #[error("Failed to read the credentials for {path} from the system keychain: {source}")]
+    Keychain {
+        path: String,
+        #[source]
+        source: keyring_core::Error,
+    },
+}
+
+/// The service flowgen keeps credentials under in the system keychain.
+pub const KEYCHAIN_SERVICE: &str = "flowgen";
+
+/// Uses the system keychain for credentials without a file; call once at startup.
+pub fn use_system_keychain() -> Result<(), keyring_core::Error> {
+    #[cfg(target_os = "macos")]
+    let store = apple_native_keyring_store::keychain::Store::new()?;
+    #[cfg(target_os = "windows")]
+    let store = windows_native_keyring_store::Store::new()?;
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let store = zbus_secret_service_keyring_store::Store::new()?;
+    keyring_core::set_default_store(store);
+    Ok(())
+}
+
+/// The keychain entry of the credentials at `path`, named by its absolute path;
+/// none without a keychain.
+fn keychain_entry(path: &Path) -> Option<keyring_core::Entry> {
+    let account = std::path::absolute(path).ok()?;
+    keyring_core::Entry::new(KEYCHAIN_SERVICE, &account.to_string_lossy()).ok()
+}
+
+/// Reads the credentials at `path`: the file, or, when there is none, its
+/// entry in the system keychain.
+pub fn read(path: &Path) -> Result<String, Error> {
+    let file_error = |source| Error::ReadFile {
+        path: path.display().to_string(),
+        source,
+    };
+    match std::fs::read_to_string(path) {
+        Ok(content) => Ok(content),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            match keychain_entry(path).map(|entry| entry.get_password()) {
+                Some(Ok(content)) => Ok(content),
+                Some(Err(keyring_core::Error::NoEntry)) | None => Err(file_error(source)),
+                Some(Err(source)) => Err(Error::Keychain {
+                    path: path.display().to_string(),
+                    source,
+                }),
+            }
+        }
+        Err(source) => Err(file_error(source)),
+    }
+}
+
+/// Keeps `content` as the credentials at `path` in the system keychain, where
+/// [`read`] finds them while no file is there.
+pub fn keep(path: &Path, content: &str) -> Result<(), Error> {
+    let keychain_error = |source| Error::Keychain {
+        path: path.display().to_string(),
+        source,
+    };
+    let account = std::path::absolute(path).map_err(|source| Error::ReadFile {
+        path: path.display().to_string(),
+        source,
+    })?;
+    keyring_core::Entry::new(KEYCHAIN_SERVICE, &account.to_string_lossy())
+        .and_then(|entry| entry.set_password(content))
+        .map_err(keychain_error)
+}
+
+/// [`read`] on a blocking thread, as the keychain and the file system block.
+pub async fn read_async(path: &Path) -> Result<String, Error> {
+    let owned = path.to_path_buf();
+    match tokio::task::spawn_blocking(move || read(&owned)).await {
+        Ok(read) => read,
+        Err(join) => Err(Error::ReadFile {
+            path: path.display().to_string(),
+            source: std::io::Error::other(join),
+        }),
+    }
 }
 
 /// Errors that can occur during OAuth 2.0 token fetch.
@@ -405,14 +484,9 @@ pub async fn load_http_credentials(path: &Path) -> Result<HttpCredentials, Error
     load_credentials(path).await
 }
 
-/// Loads and parses any credentials type from a JSON file.
+/// Loads and parses any credentials type from a JSON file, or its keychain entry.
 pub async fn load_credentials<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, Error> {
-    let content = tokio::fs::read_to_string(path)
-        .await
-        .map_err(|source| Error::ReadFile {
-            path: path.display().to_string(),
-            source,
-        })?;
+    let content = read_async(path).await?;
     serde_json::from_str(&content).map_err(|source| Error::ParseFile {
         path: path.display().to_string(),
         source,
@@ -422,6 +496,63 @@ pub async fn load_credentials<T: serde::de::DeserializeOwned>(path: &Path) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A missing file at a new path, with the mock keychain in place.
+    fn missing() -> std::path::PathBuf {
+        static MOCK: std::sync::Once = std::sync::Once::new();
+        MOCK.call_once(|| {
+            keyring_core::set_default_store(keyring_core::mock::Store::new().unwrap())
+        });
+        std::env::temp_dir()
+            .join(format!("flowgen_test_{}", uuid::Uuid::now_v7()))
+            .join("credentials.json")
+    }
+
+    fn keep(path: &Path, content: &str) {
+        super::keep(path, content).unwrap();
+    }
+
+    #[test]
+    fn credentials_without_a_file_come_from_the_keychain() {
+        let path = missing();
+        keep(&path, r#"{"bearer_auth": "t"}"#);
+
+        assert_eq!(read(&path).unwrap(), r#"{"bearer_auth": "t"}"#);
+    }
+
+    #[test]
+    fn a_file_wins_over_the_keychain() {
+        let path = missing();
+        keep(&path, "keychain");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "file").unwrap();
+
+        assert_eq!(read(&path).unwrap(), "file");
+    }
+
+    #[test]
+    fn credentials_in_neither_are_a_missing_file() {
+        let path = missing();
+
+        match read(&path) {
+            Err(Error::ReadFile { source, .. }) => {
+                assert_eq!(source.kind(), std::io::ErrorKind::NotFound)
+            }
+            other => panic!("Expected a missing file, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn keychain_credentials_load_like_a_file() {
+        let path = missing();
+        keep(&path, r#"{"bearer_auth": "t"}"#);
+
+        let credentials: HttpCredentials = load_credentials(&path).await.unwrap();
+        assert_eq!(
+            credentials.authorization_header().as_deref(),
+            Some("Bearer t")
+        );
+    }
 
     #[test]
     fn a_misspelled_credentials_field_is_rejected() {

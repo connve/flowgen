@@ -16,9 +16,11 @@
 // (`$lib/logRecord`) and never drift.
 
 import { browser } from '$app/environment';
-import { apiUrl, type FlowStatus, type LogRecord } from '$lib/api';
+import { listLogs, type FlowStatus, type LogRecord } from '$lib/api';
+import { flowsStream, logsStream } from '$lib/urls';
 import { LOGS_LIMIT_DEFAULT } from '$lib/logsLimit';
 import { rafBatch } from '$lib/rafBatch';
+import { visibleEventSource } from '$lib/visibleEventSource';
 import {
 	extractFieldSummary,
 	extractSpanSummary,
@@ -128,16 +130,17 @@ function ensureMetricsSubscription() {
 	if (!browser || metricsStarted) return;
 	metricsStarted = true;
 
-	const sse = new EventSource(apiUrl('api/flows/stream'));
-	sse.addEventListener('snapshot', (e) => {
-		try {
-			const initial = JSON.parse(e.data) as FlowMetricsSnapshot[];
-			const merged: Record<string, FlowMetricsSnapshot> = { ...metricsByFlow };
-			for (const m of initial) merged[m.flow] = m;
-			metricsByFlow = merged;
-		} catch {
-			// ignore malformed snapshot
-		}
+	visibleEventSource(flowsStream(), (sse) => {
+		sse.addEventListener('snapshot', (e) => {
+			try {
+				const initial = JSON.parse(e.data) as FlowMetricsSnapshot[];
+				const merged: Record<string, FlowMetricsSnapshot> = { ...metricsByFlow };
+				for (const m of initial) merged[m.flow] = m;
+				metricsByFlow = merged;
+			} catch {
+				// ignore malformed snapshot
+			}
+		});
 	});
 }
 
@@ -162,14 +165,12 @@ async function refetchFlowHistory(flow: string) {
 	const limit = flowActivityLimit;
 	try {
 		const perLevel = await Promise.all(
-			API_LEVELS.map(async (level) => {
-				const res = await fetch(
-					apiUrl(
-						`api/logs?flow=${encodeURIComponent(flow)}&limit=${limit}&levels=${level}`,
-					),
-				);
-				return res.ok ? ((await res.json()) as LogRecord[]) : [];
-			}),
+			API_LEVELS.map((level) =>
+				listLogs({ query: { flow, limit, levels: [level] } }).then(
+					({ data }) => data,
+					() => [] as LogRecord[],
+				),
+			),
 		);
 		if (request !== historyRequest) return;
 		const history = perLevel
@@ -238,7 +239,7 @@ async function ensureFlowSubscription(flow: string) {
 	// navigated away from.
 	if (activeFlow !== flow) return;
 
-	const sse = new EventSource(apiUrl(`api/logs/stream?flow=${encodeURIComponent(flow)}`));
+	const sse = new EventSource(logsStream({ flow }));
 	activeSource = sse;
 	sse.addEventListener('log', (e) => {
 		let record: LogRecord;

@@ -10,7 +10,6 @@ flow:
     tags: ["mssql", "query", "sql-server", "example"]
   require_leader_election: true
   tasks:
-
     # One-shot trigger, ten seconds after startup.
     - generate:
         name: trigger

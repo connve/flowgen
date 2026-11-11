@@ -1,4 +1,5 @@
-import { apiUrl, type Connector as ApiConnector } from '$lib/api';
+import { listConnectors } from '$lib/api';
+import { connectorIconUrl } from '$lib/urls';
 
 export interface Connector {
 	name: string;
@@ -7,7 +8,7 @@ export interface Connector {
 }
 
 function connector(name: string, label: string): Connector {
-	return { name, label, iconUrl: apiUrl(`api/connectors/${name}/icon`) };
+	return { name, label, iconUrl: connectorIconUrl(name) };
 }
 
 const CORE = connector('core', 'Core');
@@ -17,10 +18,8 @@ let taskConnectors: Record<string, string> = {};
 let loading: Promise<void> | null = null;
 
 export function loadConnectors(fetcher: typeof fetch): Promise<void> {
-	loading ??= fetcher(apiUrl('api/connectors'))
-		.then(async (res) => {
-			if (!res.ok) throw new Error(res.statusText);
-			const found: ApiConnector[] = await res.json();
+	loading ??= listConnectors({ fetch: fetcher })
+		.then(({ data: found }) => {
 			connectors = Object.fromEntries(found.map((c) => [c.name, connector(c.name, c.label)]));
 			taskConnectors = Object.fromEntries(
 				found.flatMap((c) => c.taskTypes.map((taskType) => [taskType, c.name]))

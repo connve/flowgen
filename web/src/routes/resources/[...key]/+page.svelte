@@ -1,8 +1,7 @@
 <script lang="ts">
 	import { base } from '$app/paths';
 	import ResourceViewer from '$lib/ResourceViewer.svelte';
-	import CopyButton from '$lib/CopyButton.svelte';
-	import EditButton from '$lib/EditButton.svelte';
+	import { CopyButton, EditButton } from '@connve/ui';
 	import PendingChanges from '$lib/PendingChanges.svelte';
 	import { editUrl, targetOf } from '$lib/changes';
 	import { m } from '$lib/paraglide/messages.js';

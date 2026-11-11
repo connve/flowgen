@@ -1,80 +1,9 @@
 @import 'tailwindcss';
 @plugin '@tailwindcss/typography';
-@plugin 'daisyui';
-@import '$lib/theme.css';
-
-@theme {
-	--color-primary: #006b55;
+@plugin 'daisyui' {
+	themes: false;
 }
-
-/* Shared chip filter styling. Dark mode uses solid text colors; light
-   mode mixes the accent with base-content for readable contrast on the
-   pale tinted background. */
-@utility chip {
-	@apply flex h-8 items-center gap-1.5 rounded-full border border-transparent px-3 text-xs transition-colors;
-}
-@utility chip-sm {
-	@apply flex h-6 items-center gap-1.5 rounded-full border border-transparent px-2 text-xs transition-colors;
-}
-@utility chip-inactive {
-	@apply opacity-40 hover:opacity-70;
-}
-@utility chip-neutral {
-	@apply bg-base-200;
-}
-@utility chip-success {
-	@apply bg-primary/10;
-	color: color-mix(in oklab, var(--color-primary) 75%, var(--color-base-content));
-}
-:root[data-theme='mydark'] .chip-success {
-	@apply text-primary;
-}
-/* List rows read at the size of the folders and conversations beside them. */
-.table-sm tbody tr {
-	font-size: var(--text-sm);
-}
-tr[role='button']:focus {
-	outline: none;
-}
-tr[role='button']:focus-visible {
-	@apply bg-base-200;
-}
-@utility chip-warn {
-	@apply bg-warning/10;
-	color: color-mix(in oklab, var(--color-warning) 60%, var(--color-base-content));
-}
-@utility chip-error {
-	@apply bg-error/10;
-	color: color-mix(in oklab, var(--color-error) 65%, var(--color-base-content));
-}
-/* Warning hue readable as text: pending changes and warning badges. */
-@utility text-attention {
-	color: color-mix(in oklab, var(--color-warning) 60%, var(--color-base-content));
-}
-:root[data-theme='mydark'] .text-attention {
-	color: var(--color-warning);
-}
-:root[data-theme='mydark'] .chip-warn,
-:root[data-theme='mydark'] .chip-error {
-	color: unset;
-}
-:root[data-theme='mydark'] .chip-warn {
-	@apply text-warning;
-}
-:root[data-theme='mydark'] .chip-error {
-	@apply text-error;
-}
-
-/* Hide native number-input spinners so the Limit field matches other inputs. */
-@utility no-spinner {
-	appearance: textfield;
-	-moz-appearance: textfield;
-}
-.no-spinner::-webkit-outer-spin-button,
-.no-spinner::-webkit-inner-spin-button {
-	-webkit-appearance: none;
-	margin: 0;
-}
+@import '@connve/ui/theme.css';
 
 /* Typing indicator: three dots bouncing in a staggered wave. */
 @keyframes typing-bounce {
@@ -100,7 +29,7 @@ tr[role='button']:focus-visible {
 
 /* Shared Prism syntax-highlight palette, used by the resource viewer and the
    Agents chat code blocks. Token colors are theme-scoped variables. */
-[data-theme='mytheme'] {
+[data-theme='connve-light'] {
 	--prism-comment: #8a8a8a;
 	--prism-punctuation: #556b60;
 	--prism-property: #006ba1;
@@ -111,7 +40,7 @@ tr[role='button']:focus-visible {
 	--prism-function: #007600;
 	--prism-variable: #ff9804;
 }
-[data-theme='mydark'] {
+[data-theme='connve-dark'] {
 	--prism-comment: #9ca3af;
 	--prism-punctuation: #d4e0d9;
 	--prism-property: #82d4ff;

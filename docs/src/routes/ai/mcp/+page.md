@@ -75,7 +75,6 @@ Registers a flow as an LLM-callable tool. Inbound `tools/call` requests are inje
 | `description` | string | required | Human-readable description shown to LLMs for tool selection. |
 | `input_schema` | object | | JSON Schema for the tool's input parameters. A call whose arguments do not match it gets a tool error naming the first problem, such as `Invalid arguments: "project_id" is a required property`, and the flow does not run. The error leaves out argument values. A call without arguments is checked as `{}`. An invalid schema fails the task at startup, and a `$ref` to another file or URL is not fetched. |
 | `credentials_path` | string | | Overrides `mcp_server.credentials_path` for this tool. |
-| `headers` | map of string to string | `{}` | HTTP headers a request must carry, with matching values, for this tool to be listed on `tools/list` and callable at all. All declared headers must match. Empty (the default) means every caller can see and call it. A caller missing a required header gets the same "unknown tool" error as a nonexistent tool name — use this to give an agent only the specific tools it needs, e.g. a marketing agent that should see a BigQuery tool but not a Salesforce tool. |
 | `ack_timeout` | duration | wait indefinitely | Max time for the flow to take the call and finish it. If the flow is too busy to take it in time, the client gets a "Server is too busy" error; if it doesn't finish in time, a timeout error. |
 | `auth` | object | | Per-tool authentication. When `auth.required` is true, requests must include a valid bearer token validated by the shared auth provider; the resolved user context is injected into `event.meta.auth`. |
 | `depends_on` | list | | Upstream task names. |
@@ -152,7 +151,6 @@ Client calls `resources/read({uri: "flowgen://account/001Qy0abc"})`; the server 
 | `mime_type` | string | `text/plain` | Standard MIME type. |
 | `content` | string/resource | required | Inline string or `resource:` reference. For templates, rendered as a Handlebars template against `{placeholder}` bindings on each read. |
 | `parameters` | list | | URI-template parameter descriptors. Only valid when `uri_template` is set. Each entry may attach a `completion` source served by `completion/complete`. |
-| `headers` | map of string to string | `{}` | HTTP headers a request must carry, with matching values, for this resource to be listed and readable at all. Same semantics as `mcp_tool`'s `headers` (see above). |
 | `depends_on` | list | | Upstream task names. |
 | `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
 
@@ -231,7 +229,6 @@ arguments:
 | `arguments` | list | | Argument definitions (see above). |
 | `template` | string/resource | | Single-message shorthand. Mutually exclusive with `messages`. |
 | `messages` | list | | Multi-message form. Each entry is `{role, content}` where `role` is `user` or `assistant` and `content` is a string or `resource:` reference rendered as a Handlebars template. Mutually exclusive with `template`. |
-| `headers` | map of string to string | `{}` | HTTP headers a request must carry, with matching values, for this prompt to be listed and usable at all. Same semantics as `mcp_tool`'s `headers` (see above). |
 | `depends_on` | list | | Upstream task names. |
 | `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
 

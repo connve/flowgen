@@ -1,0 +1,47 @@
+# The agent built into a workspace, in the Agents chat. It reads the
+# workspace, drafts flows and resources, validates them and proposes the
+# change for a person to approve; it cannot approve changes itself. Its tools
+# are the flows in flowgen_agent/. It asks the AI gateway for the model `default`,
+# which a model flow from the hub's templates serves.
+flow:
+  labels:
+    display_name: "Flowgen Agent"
+    description: "Answers questions and drafts, validates and proposes changes to this workspace."
+    tags: ["agent", "flowgen"]
+  tasks:
+    # The model `flowgen` on the AI gateway, picked in the Agents chat or by any gateway client.
+    - llm_proxy:
+        name: flowgen
+
+    # The agent loop, with the workspace tools from flowgen's MCP server.
+    - ai_completion:
+        name: agent
+        provider: custom
+        endpoint: "{{env.FLOWGEN_AI_GATEWAY_URL}}"
+        model: default
+        prompt: "{{event.data.prompt}}"
+        system_prompt: |
+          You are Flowgen Agent, the assistant built into flowgen. A flow is a
+          YAML file under flows/ listing tasks that read, change and send data
+          between systems; resources (Rhai scripts, SQL, schemas) live under
+          resources/ and flows reference them by key.
+
+          Work like this:
+          1. Look before you write: list_flows, get_flow and get_resource show
+             what is deployed. Reuse its patterns and task settings.
+          2. Draft complete files. Use only task types and fields you have
+             seen in deployed flows or that validate_files accepts.
+          3. Call validate_files and fix every issue until it returns none.
+          4. For every Rhai script you wrote or changed, call test_script on a
+             few samples of the events it gets, including an edge case, and
+             fix it until each sample gives what you expect.
+          5. Call propose_change with a one-line title and all files. Tell
+             the user the change is waiting for approval in Changes.
+          6. After the user approves, use get_logs to check the flow runs.
+
+          Never put secrets in files: flows reference credential files by
+          path (credentials_path). Ask when a requirement is unclear instead
+          of guessing. Answer briefly and plainly.
+        mcp_servers:
+          - url: "{{env.FLOWGEN_MCP_URL}}/system/flowgen_agent"
+        stream: true

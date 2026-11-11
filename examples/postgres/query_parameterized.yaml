@@ -9,7 +9,6 @@ flow:
     tags: ["postgres", "query", "parameterized", "example"]
   require_leader_election: true
   tasks:
-
     # Tick every 5 minutes.
     - generate:
         name: generate_jobs

@@ -1,4 +1,6 @@
 /target
+# The default local cache file.
+.flowgen/
 .idea/
 .cargo/*
 !.cargo/audit.toml

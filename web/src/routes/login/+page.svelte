@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { page } from '$app/state';
-	import { apiUrl } from '$lib/api';
-	import StateMessage from '$lib/StateMessage.svelte';
+	import { loginUrl } from '$lib/urls';
+	import { StateMessage } from '@connve/ui';
 	import { m } from '$lib/paraglide/messages.js';
 	import { pageTitle } from '$lib/pageTitle';
 	import Icon from '@iconify/svelte';
@@ -33,7 +33,7 @@
 		message={errorMessage ?? m.login_message()}
 		icon={errorMessage ? 'tabler:lock-x' : 'tabler:lock'}
 	>
-		<a href={apiUrl('auth/login')} data-sveltekit-reload class="btn btn-primary btn-sm gap-1.5">
+		<a href={loginUrl()} data-sveltekit-reload class="btn btn-primary btn-sm gap-1.5">
 			<Icon icon="tabler:login-2" class="h-4 w-4" />
 			{m.login_sign_in()}
 		</a>

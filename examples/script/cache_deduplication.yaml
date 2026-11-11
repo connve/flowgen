@@ -7,7 +7,6 @@ flow:
     tags: ["script", "cache", "deduplication", "example"]
   require_leader_election: true
   tasks:
-
     - generate:
         name: trigger
         interval: 10s

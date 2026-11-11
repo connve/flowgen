@@ -307,6 +307,12 @@ pub enum Error {
         #[source]
         source: flowgen_nats::cache::Error,
     },
+    /// Failed to open the cache file.
+    #[error("Failed to open the cache file: {source}")]
+    SystemCacheOpen {
+        #[source]
+        source: flowgen_core::cache::Error,
+    },
     /// Failed to list keys from the system cache.
     #[error("Failed to list flow keys from cache: {source}")]
     CacheListKeys {
@@ -350,6 +356,8 @@ pub struct App {
     /// history queries and SSE tail. `None` when the selected telemetry
     /// backend does not (yet) expose a query surface.
     pub logs_store: Option<Arc<dyn flowgen_core::telemetry::query::LogsStore>>,
+    /// Told once the web UI accepts connections.
+    pub web_ready: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 /// The system bucket, opened once at startup, plus the name it was opened
@@ -363,24 +371,24 @@ struct SystemBucket {
 
 impl SystemBucket {
     /// Opens the bucket named by `cache.system.db_name`. Yields an empty
-    /// handle when the cache is disabled, leaving callers on their own
-    /// buckets and the executor on a per-pod in-memory store.
+    /// handle when it cannot open, leaving callers on their own buckets and
+    /// the executor on a per-pod in-memory store.
     async fn open(app_config: &AppConfig) -> Self {
-        let name = app_config.cache.as_ref().map(|c| c.system.db_name.clone());
-        let cache = match &name {
-            Some(db_name) => match App::init_cache(app_config, Some(db_name)).await {
-                Ok(cache) => {
-                    info!("Initialized system cache on bucket '{db_name}'.");
-                    Some(cache)
-                }
-                Err(e) => {
-                    warn!(error = %e, bucket = %db_name, "System cache unavailable");
-                    None
-                }
-            },
-            None => None,
+        let db_name = app_config.cache_options().system.db_name;
+        let cache = match App::init_cache(app_config, Some(&db_name)).await {
+            Ok(cache) => {
+                info!("Initialized system cache on bucket '{db_name}'.");
+                Some(cache)
+            }
+            Err(e) => {
+                warn!(error = %e, bucket = %db_name, "System cache unavailable");
+                None
+            }
         };
-        Self { cache, name }
+        Self {
+            cache,
+            name: Some(db_name),
+        }
     }
 
     /// Returns the open system bucket when `db_name` names it, otherwise
@@ -402,20 +410,34 @@ impl SystemBucket {
 }
 
 impl App {
-    /// Builds the runtime cache from config (NATS if enabled and reachable,
-    /// otherwise in-memory). Callable before tracing is up so `main` can
-    /// hand a real cache to the metrics store builder.
+    /// Opens the `db_name` bucket, or the runtime bucket, of the configured
+    /// cache: a `redb` file unless the config names NATS. Callable before
+    /// tracing is up so `main` can hand a real cache to the metrics store builder.
     pub async fn init_cache(
         app_config: &AppConfig,
         db_name: Option<&str>,
     ) -> Result<Arc<dyn flowgen_core::cache::Cache>, Error> {
-        let Some(cache_config) = &app_config.cache else {
-            return Ok(Arc::new(flowgen_core::cache::memory::MemoryCache::new()));
-        };
-        if !cache_config.enabled {
-            return Ok(Arc::new(flowgen_core::cache::memory::MemoryCache::new()));
-        }
+        let cache_config = app_config.cache_options();
         let db_name = db_name.unwrap_or(cache_config.runtime.db_name.as_str());
+        match cache_config.cache_type {
+            crate::config::CacheType::Redb => Self::init_redb_cache(&cache_config, db_name),
+            crate::config::CacheType::Nats => Self::init_nats_cache(&cache_config, db_name).await,
+        }
+    }
+
+    fn init_redb_cache(
+        cache_config: &crate::config::CacheOptions,
+        db_name: &str,
+    ) -> Result<Arc<dyn flowgen_core::cache::Cache>, Error> {
+        let cache = flowgen_core::cache::RedbCache::open(&cache_config.path, db_name)
+            .map_err(|source| Error::SystemCacheOpen { source })?;
+        Ok(Arc::new(cache))
+    }
+
+    async fn init_nats_cache(
+        cache_config: &crate::config::CacheOptions,
+        db_name: &str,
+    ) -> Result<Arc<dyn flowgen_core::cache::Cache>, Error> {
         let mut cache_builder =
             flowgen_nats::cache::CacheBuilder::new().url(cache_config.url.clone());
         if let Some(path) = cache_config.credentials_path.clone() {
@@ -701,12 +723,13 @@ impl App {
         let health_handle = match app_config.health.enabled {
             true => {
                 let port = app_config.health.port;
+                let host = app_config.host.clone();
                 let ready = Arc::clone(&ready);
                 let readiness: flowgen_core::health::ReadinessCheck =
                     Arc::new(move || ready.load(std::sync::atomic::Ordering::Acquire));
                 Some(tokio::spawn(async move {
                     if let Err(source) =
-                        flowgen_core::health::start_health_server(port, readiness).await
+                        flowgen_core::health::start_health_server(&host, port, readiness).await
                     {
                         error!("{}", source);
                     }
@@ -724,8 +747,21 @@ impl App {
         // On name collisions the filesystem entry wins, which keeps locally
         // mounted bootstrap flows from being silently overridden by a stale
         // cache entry with the same name.
-        let filesystem_flows = Self::load_flows_from_filesystem(&app_config)?;
+        let mut filesystem_flows = Self::load_flows_from_filesystem(&app_config)?;
         info!("Loaded {} flows from filesystem.", filesystem_flows.len());
+        if app_config.flows.system {
+            for flow in crate::local::system_flows() {
+                match filesystem_flows
+                    .iter()
+                    .any(|mounted| mounted.identity() == flow.identity())
+                {
+                    true => {
+                        info!(flow = %flow.identity(), "A mounted flow takes the system flow's place")
+                    }
+                    false => filesystem_flows.push(flow),
+                }
+            }
+        }
 
         // The system bucket backs leader-election leases and peer
         // registration, so it must exist whenever the cache does —
@@ -736,7 +772,8 @@ impl App {
         // cache-backed flows cost one connection rather than one per consumer.
         let flow_cache = match app_config.flows.cache.as_ref() {
             Some(opts) if opts.enabled => {
-                match system.open_sibling(&app_config, &opts.db_name).await {
+                let bucket = app_config.cache_options().system.db_name;
+                match system.open_sibling(&app_config, &bucket).await {
                     Ok(cache) => Some((cache, opts)),
                     Err(e) => {
                         warn!(error = %e, "Flows will load from filesystem only");
@@ -748,8 +785,10 @@ impl App {
         };
 
         let cache_flows = match &flow_cache {
-            Some((cache, opts)) => {
-                let configs = Self::load_flows_from_cache(cache.as_ref(), &opts.prefix).await?;
+            Some((cache, _)) => {
+                let configs =
+                    Self::load_flows_from_cache(cache.as_ref(), crate::config::FLOWS_CACHE_PREFIX)
+                        .await?;
                 info!("Loaded {} flows from cache.", configs.len());
                 configs
             }
@@ -932,8 +971,11 @@ impl App {
 
                 let cache_source = match resource_options.cache.as_ref() {
                     Some(rc) if rc.enabled => {
-                        match system.open_sibling(&app_config, &rc.db_name).await {
-                            Ok(cache) => Some((cache, rc.prefix.clone())),
+                        let bucket = app_config.cache_options().system.db_name;
+                        match system.open_sibling(&app_config, &bucket).await {
+                            Ok(cache) => {
+                                Some((cache, crate::config::RESOURCES_CACHE_PREFIX.to_string()))
+                            }
                             Err(e) => {
                                 warn!(error = %e, "Resources will load from filesystem only");
                                 None
@@ -1006,7 +1048,7 @@ impl App {
                 let token = Arc::new(flowgen_core::telemetry::cluster::ClusterToken::new(
                     Arc::clone(system_cache),
                 ));
-                let listener = flowgen_core::telemetry::cluster::bind(port)
+                let listener = flowgen_core::telemetry::cluster::bind(&app_config.host, port)
                     .await
                     .map_err(|source| Error::ClusterSetup { source })?;
                 let serving = flowgen_core::telemetry::cluster::serve(
@@ -1155,10 +1197,11 @@ impl App {
                 .unwrap_or(flowgen_http::server::DEFAULT_ENDPOINT_PORT);
             info!(port = configured_port, path = %http_server.path(), "Starting HTTP server");
             let http_server = Arc::clone(http_server);
+            let host = app_config.host.clone();
             let span = tracing::Span::current();
             let server_handle = tokio::spawn(
                 async move {
-                    if let Err(source) = http_server.start_server(configured_port).await {
+                    if let Err(source) = http_server.start_server(&host, configured_port).await {
                         let err = Error::HttpServerStart { source };
                         error!("{}", err);
                     }
@@ -1176,10 +1219,11 @@ impl App {
                 .unwrap_or(flowgen_mcp::server::DEFAULT_MCP_PORT);
             info!(port = configured_port, path = %mcp_server.path(), "Starting MCP server");
             let server = Arc::clone(mcp_server);
+            let host = app_config.host.clone();
             let span = tracing::Span::current();
             let server_handle = tokio::spawn(
                 async move {
-                    if let Err(source) = server.start_server(configured_port).await {
+                    if let Err(source) = server.start_server(&host, configured_port).await {
                         error!("{}", Error::McpServerStart { source });
                     }
                 }
@@ -1196,10 +1240,11 @@ impl App {
                 .unwrap_or(flowgen_ai_agent::ai_gateway::server::DEFAULT_AI_GATEWAY_PORT);
             info!(port = configured_port, path = %ai_gateway_server.path(), "Starting AI gateway server");
             let server = Arc::clone(ai_gateway_server);
+            let host = app_config.host.clone();
             let span = tracing::Span::current();
             let server_handle = tokio::spawn(
                 async move {
-                    if let Err(source) = server.start_server(configured_port).await {
+                    if let Err(source) = server.start_server(&host, configured_port).await {
                         error!("{}", Error::AiGatewayServerStart { source });
                     }
                 }
@@ -1326,7 +1371,7 @@ impl App {
                     this_pod: holder_identity.clone(),
                     running_flows: Arc::clone(&running_flows),
                     app_config: Arc::clone(&app_config),
-                    conversation_cache: Arc::clone(&executor_cache),
+                    session_cache: Arc::clone(&executor_cache),
                     system_bucket_present: system.cache.is_some(),
                     agents: match &web_config.agents {
                         Some(agents) if agents.enabled => Some(agents.clone()),
@@ -1348,9 +1393,19 @@ impl App {
                         None => None,
                     },
                     replies: Default::default(),
+                    latest_release: Default::default(),
                 };
+                if web_config.update_check.enabled {
+                    background_handles.push(tokio::spawn(crate::releases::watch_latest(
+                        web_config.update_check.clone(),
+                        web_state.latest_release.clone(),
+                    )));
+                }
+                let host = app_config.host.clone();
+                let web_ready = self.web_ready;
                 let web_handle = tokio::spawn(async move {
-                    if let Err(source) = crate::web::start_web_server(port, &path, web_state).await
+                    if let Err(source) =
+                        crate::web::start_web_server(&host, port, &path, web_state, web_ready).await
                     {
                         error!("{}", source);
                     }
@@ -1366,8 +1421,8 @@ impl App {
         let stopping = Arc::new(RwLock::new(HashMap::new()));
         let runtime_cache = Arc::clone(&cache);
         // Only cache-backed flows have keys to watch.
-        if let Some((system_cache_arc, cache_opts)) = &flow_cache {
-            let prefix = cache_opts.prefix.clone();
+        if let Some((system_cache_arc, _)) = &flow_cache {
+            let prefix = crate::config::FLOWS_CACHE_PREFIX.to_string();
             let (watch_tx, watch_rx) =
                 tokio::sync::mpsc::channel::<flowgen_core::cache::WatchEvent>(256);
 
@@ -1609,7 +1664,11 @@ async fn init_flows(flows: Vec<super::flow::Flow>) -> Vec<super::flow::Flow> {
 }
 
 /// Port peers read this pod's logs and counters from; `None` with the `remote` backend.
+/// The port pods share logs and metrics on; none for a single process on a local file cache.
 fn cluster_port(app_config: &AppConfig) -> Option<u16> {
+    if app_config.cache_options().cache_type == crate::config::CacheType::Redb {
+        return None;
+    }
     match app_config.telemetry.as_ref() {
         Some(crate::config::TelemetryOptions {
             enabled: true,
@@ -1753,6 +1812,35 @@ fn compute_source_path(
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn a_redb_cache_keeps_runtime_and_system_apart_across_restarts() {
+        let path = std::env::temp_dir()
+            .join(format!("flowgen_test_{}", uuid::Uuid::now_v7()))
+            .join("state.redb");
+        let config: AppConfig = serde_yaml::from_str(&format!(
+            "flows:\n  path: /flows\ncache:\n  type: redb\n  path: {}\n",
+            path.display()
+        ))
+        .expect("parses");
+
+        {
+            let runtime = App::init_cache(&config, None).await.unwrap();
+            let system = App::init_cache(&config, Some("flowgen_system"))
+                .await
+                .unwrap();
+            runtime.put("k", "runtime".into(), None).await.unwrap();
+            assert_eq!(system.get("k").await.unwrap(), None);
+            system.put("k", "system".into(), None).await.unwrap();
+        }
+
+        let runtime = App::init_cache(&config, None).await.unwrap();
+        let system = App::init_cache(&config, Some("flowgen_system"))
+            .await
+            .unwrap();
+        assert_eq!(runtime.get("k").await.unwrap(), Some("runtime".into()));
+        assert_eq!(system.get("k").await.unwrap(), Some("system".into()));
+    }
 
     #[test]
     fn route_source_returns_the_interface_address_for_the_target() {

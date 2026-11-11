@@ -397,7 +397,6 @@ impl flowgen_core::task::runner::Runner for Processor {
 
     async fn init(&self) -> Result<EventHandler, Error> {
         let mut builder = reqwest::ClientBuilder::new()
-            .https_only(true)
             .gzip(true)
             .brotli(true)
             .deflate(true);

@@ -9,7 +9,6 @@ flow:
     description: "Consumes a Kafka topic and publishes each record to a NATS JetStream subject."
     tags: ["kafka", "nats", "subscriber", "example"]
   tasks:
-
     - kafka_subscribe:
         name: consume_topic
         brokers: "localhost:9092"

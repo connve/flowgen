@@ -1,12 +1,12 @@
 # OCI Sync
 
-Pulls an OCI artifact (manifest + layers) from a registry and emits one event per file. Downstream tasks decide what to do with each file's content — parse it, store it, transform it.
+Pulls an OCI artifact (manifest + layers) from a registry, or from an OCI Image Layout on the same machine, and emits one event with every file of the artifact. Downstream tasks decide what to do with each file's content — parse it, store it, transform it. Use [`iterate`](/docs/flowgen/core/iterate) on `files` for one event per file.
 
 Works with any OCI-compliant registry: GHCR, ECR, GAR, ACR, Artifactory, Harbor, Docker Hub, Quay, self-hosted.
 
-Each UTF-8 text event contains `{path, content, digest, artifact_digest}` on `event.data`. The shape mirrors [Git Sync](/docs/flowgen/git/sync), so the same downstream tasks work with either source. Binary layers (or tar entries) that cannot be safely decoded as UTF-8 arrive as `EventData::Bytes` instead, with `{path, digest, artifact_digest}` moved to `event.meta` so downstream tasks such as `object_store::write` can still route by key.
+The event holds `{digest, files}`, the shape of [Git Sync](/docs/flowgen/git/sync) with the manifest digest for the commit, so the same downstream tasks work with either source.
 
-Both `oras push` artifacts and Docker container images are supported. `oras`-style layers — identified by the presence of the `org.opencontainers.image.title` annotation — emit one event per layer using the annotation as the path. Docker image layers — layers without a title annotation — are merged in manifest order with overlay-fs semantics: later layers override earlier ones, `.wh.<name>` markers delete files from lower layers, and `.wh..wh..opq` markers hide entire subtrees. Only the surviving final state is emitted downstream.
+Both `oras push` artifacts and Docker container images are supported. `oras`-style layers — identified by the presence of the `org.opencontainers.image.title` annotation — give one file per layer using the annotation as the path. Docker image layers — layers without a title annotation — are merged in manifest order with overlay-fs semantics: later layers override earlier ones, `.wh.<name>` markers delete files from lower layers, and `.wh..wh..opq` markers hide entire subtrees. Only the surviving final state is emitted downstream.
 
 ## Configuration
 
@@ -24,7 +24,7 @@ To load flowgen's own flows and resources from a registry, see [Loading flows fr
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `name` | string | required | Task name. |
-| `artifact` | string | required | Full OCI reference, e.g. `registry.example.com/team/configs:prod` or `registry.example.com/team/configs@sha256:abcd…`. Supports `{{env.VAR_NAME}}` templates. |
+| `artifact` | string | required | Full OCI reference, e.g. `registry.example.com/team/configs:prod` or `registry.example.com/team/configs@sha256:abcd…`, or a tag in an OCI Image Layout folder on the same machine, `oci-layout://<folder>:<tag>`. A tag the layout does not hold yet emits nothing. Supports `{{env.VAR_NAME}}` templates. |
 | `credentials_path` | string | | Path to a JSON credentials file. Two formats are auto-detected; see [credentials](/docs/flowgen/oci#credentials). Anonymous auth if omitted. |
 | `force_pull` | bool | `false` | Bypass the manifest-digest cache and re-pull every tick. Use only to re-seed a downstream cache mutated out of band; leave off in steady state. |
 | `max_file_size` | int | `10485760` (10 MB) | Maximum uncompressed size, in bytes, for any single file extracted from a tar or tar+gzip layer. Applies to raw layers as their whole-blob size. |
@@ -34,18 +34,21 @@ To load flowgen's own flows and resources from a registry, see [Loading flows fr
 
 ## Output
 
-Format: [JSON](https://docs.rs/serde_json/latest/serde_json/enum.Value.html) for UTF-8 files, [`EventData::Bytes`](/docs/flowgen/concepts/events) for binary files. Each file emitted produces one event.
+Format: [JSON](https://docs.rs/serde_json/latest/serde_json/enum.Value.html). One event per pull, with `event.data` containing:
 
-For UTF-8 files, `event.data` contains:
+| Field | Type | Description |
+|---|---|---|
+| `digest` | string | Whole-artifact manifest digest. |
+| `files` | array | Every file of the artifact, each with the fields below. |
+
+Each file holds:
 
 | Field | Type | Description |
 |---|---|---|
 | `path` | string | File path in the artifact. For raw layers, taken from the layer's `org.opencontainers.image.title` annotation (falls back to `layer-<index>` if missing). For tar and tar+gzip layers, taken from the tar entry path with any leading `/` stripped. |
-| `content` | string | File content as UTF-8. |
+| `content` | string | File content as UTF-8; absent for a binary file. |
+| `content_base64` | string | Content of a binary file, base64-encoded; absent for a UTF-8 file. |
 | `digest` | string | Layer blob digest (`sha256:…`). Multiple files extracted from one tar layer share the same digest. |
-| `artifact_digest` | string | Whole-artifact manifest digest. The same value across all events from one pull. |
-
-For binary files, `event.data` carries the raw bytes and the same routing fields (`path`, `digest`, `artifact_digest`) land on `event.meta` instead. Downstream tasks match `EventData::Bytes` directly and read `event.meta.path` to know where the payload belongs.
 
 ## Layer formats
 
@@ -53,16 +56,16 @@ The layer's `mediaType` in the manifest dispatches the extractor:
 
 | Media type suffix | Handling |
 |---|---|
-| anything else (e.g. `application/octet-stream`, `application/yaml`) | Raw layer — the blob bytes are the file. One event per layer. Path from `org.opencontainers.image.title`. |
-| `+gzip` (e.g. `application/vnd.oci.image.layer.v1.tar+gzip`, `application/vnd.docker.image.rootfs.diff.tar.gzip`) | tar+gzip archive — decompressed and unpacked. One event per file entry. Path from the tar entry. |
-| `.tar` or `+tar` (e.g. `application/vnd.oci.image.layer.v1.tar`) | tar archive — unpacked. One event per file entry. |
+| anything else (e.g. `application/octet-stream`, `application/yaml`) | Raw layer — the blob bytes are the file. One file per layer. Path from `org.opencontainers.image.title`. |
+| `+gzip` (e.g. `application/vnd.oci.image.layer.v1.tar+gzip`, `application/vnd.docker.image.rootfs.diff.tar.gzip`) | tar+gzip archive — decompressed and unpacked. One file per tar entry. Path from the tar entry. |
+| `.tar` or `+tar` (e.g. `application/vnd.oci.image.layer.v1.tar`) | tar archive — unpacked. One file per tar entry. |
 
-Inside tar and tar+gzip layers, directories, symlinks, and hardlinks are skipped. Only regular files produce events. Docker whiteout markers (`.wh.<name>`, `.wh..wh..opq`) are consumed by the layer-merge pass rather than emitted downstream.
+Inside tar and tar+gzip layers, directories, symlinks, and hardlinks are skipped. Only regular files are emitted. Docker whiteout markers (`.wh.<name>`, `.wh..wh..opq`) are consumed by the layer-merge pass rather than emitted downstream.
 
 This means both push paths work:
 
 - `oras push {{env.OCI_ARTIFACT}} a.yaml:application/yaml`: one raw layer per file, path from the `:mediaType` annotation.
-- `docker push {{env.OCI_ARTIFACT}}`: layers are merged into a single overlay-fs snapshot, and the final state emits one event per surviving file. Every file in the image is emitted, so build the final stage `FROM scratch`.
+- `docker push {{env.OCI_ARTIFACT}}`: layers are merged into a single overlay-fs snapshot, and every surviving file is emitted. Every file in the image is emitted, so build the final stage `FROM scratch`.
 
 ## Change detection
 
@@ -74,6 +77,6 @@ INFO flowgen_oci::sync::processor: OCI manifest digest unchanged since last pull
 
 Works for both mutable tags (`:prod`) and immutable digests (`@sha256:…`) — the digest is authoritative in either case, so a re-tag of `:prod` to a new release still triggers a pull.
 
-The cached digest is persisted only after every layer event was sent, so a mid-pull failure causes the next tick to re-emit the full batch.
+The digest is cached once every task after `oci_sync` handled the event without an error, so a failed or interrupted flow pulls the same artifact again on the next tick.
 
 Set `force_pull: true` to bypass the cache — use only to re-seed a downstream cache mutated out of band.

@@ -12,7 +12,6 @@ flow:
     tags: ["object-store", "gcs", "bigquery", "archive", "example"]
   require_leader_election: true
   tasks:
-
     - generate:
         name: trigger
         interval: 5m

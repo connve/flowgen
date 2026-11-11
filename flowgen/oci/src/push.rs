@@ -62,11 +62,12 @@ pub struct OciPush {
     #[serde(default)]
     pub annotations: BTreeMap<String, String>,
     /// Registry credentials: `{username, password}` or a Docker `config.json`.
+    /// Empty means none.
     ///
     /// ```yaml
     /// credentials_path: /etc/registry/credentials.json
     /// ```
-    #[serde(default)]
+    #[serde(default, deserialize_with = "flowgen_core::config::optional_path")]
     pub credentials_path: Option<PathBuf>,
     /// Optional list of upstream task names this task depends on.
     ///

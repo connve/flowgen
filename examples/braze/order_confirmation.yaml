@@ -13,7 +13,6 @@ flow:
     description: "Receives placed orders over an HTTP webhook and sends each customer a Braze transactional email with the order's details."
     tags: ["braze", "messaging", "transactional", "example"]
   tasks:
-
     # POST /api/flowgen/workers/v1/braze/orders
     - http_endpoint:
         name: receive_orders

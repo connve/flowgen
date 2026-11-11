@@ -11,7 +11,6 @@ flow:
     tags: ["bigquery", "gcp", "job", "cancel", "example"]
   require_leader_election: true
   tasks:
-
     # Placeholder trigger; real deployments emit from upstream flows.
     - generate:
         name: trigger

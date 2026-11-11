@@ -31,9 +31,6 @@ pub mod jetstream {
     pub mod subscribe;
 }
 
-/// JetStream Key-Value store operations (get, put, list, delete).
-pub mod kv_store;
-
 /// The connector of this crate's task types.
 pub const CONNECTOR: Connector = Connector {
     name: "nats",
@@ -66,14 +63,6 @@ impl TaskMeta for jetstream::subscribe::Subscribe {
     }
 }
 
-impl TaskMeta for kv_store::KvStore {
-    const CONNECTOR: Connector = CONNECTOR;
-
-    fn connections(&self) -> Vec<Connection> {
-        vec![Connection::new(CONNECTOR, self.credentials_path.as_deref()).target(&[&self.url])]
-    }
-}
-
 impl Task for jetstream::publish::Publish {
     async fn run(self, io: TaskIo, context: Arc<TaskContext>) -> Result<(), TaskError> {
         let mut builder = jetstream::publish::ProcessorBuilder::new()
@@ -99,24 +88,6 @@ impl Task for jetstream::subscribe::Subscribe {
             .task_id(io.task_id)
             .task_type(io.task_type)
             .task_context(context);
-        if let Some(tx) = io.tx {
-            builder = builder.sender(tx);
-        }
-        builder.build().await?.run().await?;
-        Ok(())
-    }
-}
-
-impl Task for kv_store::KvStore {
-    async fn run(self, io: TaskIo, context: Arc<TaskContext>) -> Result<(), TaskError> {
-        let mut builder = kv_store::ProcessorBuilder::new()
-            .config(Arc::new(self))
-            .task_id(io.task_id)
-            .task_type(io.task_type)
-            .task_context(context);
-        if let Some(rx) = io.rx {
-            builder = builder.receiver(rx);
-        }
         if let Some(tx) = io.tx {
             builder = builder.sender(tx);
         }

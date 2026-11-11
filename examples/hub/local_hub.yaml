@@ -1,0 +1,22 @@
+# A hub whose catalog publish_catalog.yaml publishes to a local OCI Image
+# Layout. As flows/system/local_hub.yaml, its templates are listed in the
+# editor of a new flow or resource, under Templates.
+flow:
+  labels:
+    display_name: "Local Hub"
+    description: "Templates from the hub catalog in the local OCI Image Layout."
+    tags: ["system", "hub", "oci-sync", "example"]
+  tasks:
+    # The web UI calls it in-process; it has no HTTP route.
+    - inproc_endpoint:
+        name: on_request
+        ack_timeout: 60s
+
+    # Returns the catalog. One attempt, so the web UI shows why the hub is
+    # unavailable instead of waiting.
+    - oci_sync:
+        name: read_hub
+        artifact: "oci-layout://.flowgen/hub:{{env.FLOWGEN_VERSION}}"
+        force_pull: true
+        retry:
+          max_attempts: 1

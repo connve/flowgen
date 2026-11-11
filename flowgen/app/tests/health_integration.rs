@@ -35,7 +35,9 @@ async fn livez_returns_ok_when_server_started() {
     let port = reserve_port().await;
     let readiness: ReadinessCheck = Arc::new(|| true);
     let handle = tokio::spawn(async move {
-        start_health_server(port, readiness).await.unwrap();
+        start_health_server("127.0.0.1", port, readiness)
+            .await
+            .unwrap();
     });
 
     let response = wait_for_response(&format!("http://127.0.0.1:{port}/livez")).await;
@@ -49,7 +51,9 @@ async fn healthz_alias_returns_ok() {
     let port = reserve_port().await;
     let readiness: ReadinessCheck = Arc::new(|| true);
     let handle = tokio::spawn(async move {
-        start_health_server(port, readiness).await.unwrap();
+        start_health_server("127.0.0.1", port, readiness)
+            .await
+            .unwrap();
     });
 
     let response = wait_for_response(&format!("http://127.0.0.1:{port}/healthz")).await;
@@ -63,7 +67,9 @@ async fn readyz_returns_unavailable_before_any_flow_registered() {
     let port = reserve_port().await;
     let readiness: ReadinessCheck = Arc::new(|| false);
     let handle = tokio::spawn(async move {
-        start_health_server(port, readiness).await.unwrap();
+        start_health_server("127.0.0.1", port, readiness)
+            .await
+            .unwrap();
     });
 
     let response = wait_for_response(&format!("http://127.0.0.1:{port}/readyz")).await;
@@ -79,7 +85,9 @@ async fn readyz_flips_to_ok_once_predicate_becomes_true() {
     let ready_for_check = Arc::clone(&ready);
     let readiness: ReadinessCheck = Arc::new(move || ready_for_check.load(Ordering::Relaxed));
     let handle = tokio::spawn(async move {
-        start_health_server(port, readiness).await.unwrap();
+        start_health_server("127.0.0.1", port, readiness)
+            .await
+            .unwrap();
     });
 
     let url = format!("http://127.0.0.1:{port}/readyz");
@@ -98,7 +106,9 @@ async fn unknown_path_returns_404() {
     let port = reserve_port().await;
     let readiness: ReadinessCheck = Arc::new(|| true);
     let handle = tokio::spawn(async move {
-        start_health_server(port, readiness).await.unwrap();
+        start_health_server("127.0.0.1", port, readiness)
+            .await
+            .unwrap();
     });
 
     let response = wait_for_response(&format!("http://127.0.0.1:{port}/something-else")).await;

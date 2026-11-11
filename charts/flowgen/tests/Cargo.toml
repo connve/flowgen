@@ -7,5 +7,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dev-dependencies]
+config = { workspace = true }
+flowgen = { path = "../../../flowgen/app" }
 serde = { workspace = true, features = ["derive"] }
 serde_yaml = { workspace = true }

@@ -59,8 +59,6 @@ Files are read on each task invocation — there is no in-memory caching. Edit a
 resources:
   cache:
     enabled: true
-    prefix: resources
-    db_name: flowgen_system
 ```
 
 Resource keys map to entries in the distributed cache (NATS JetStream KV). Every replica reads the same content, and updates propagate without restarting workers.
@@ -77,8 +75,8 @@ The cache backend reuses the same cache configuration as the rest of flowgen (se
 
 The cache backend assumes someone is writing to `resources.*`. Canonical bootstrap flows do exactly that — they tick on an interval, fetch a directory tree containing both `flows/` and `resources/`, and reconcile them into the cache (puts for new and changed entries, deletes for entries the source no longer contains). One release cadence covers both flow YAML and resource changes:
 
-- [`examples/git/sync_workspace.yaml`](https://github.com/connve/flowgen/blob/main/examples/git/sync_workspace.yaml) — pulls from any HTTPS Git host.
-- [`examples/oci/sync_workspace.yaml`](https://github.com/connve/flowgen/blob/main/examples/oci/sync_workspace.yaml) — pulls from any OCI registry (GHCR, ECR, GAR, Artifactory, Harbor).
+- [`config/deploy_workspace.yaml`](https://github.com/connve/flowgen/blob/main/config/deploy_workspace.yaml) — deploys a release from an OCI Image Layout folder or any OCI registry (GHCR, ECR, GAR, Artifactory, Harbor).
+- The same flow with [`git_sync`](/docs/flowgen/git/sync) in place of `oci_sync` deploys from any HTTPS Git host. See [Loading flows from Git](/docs/flowgen/git/guides/loading-flows).
 
 ## Inline vs resource trade-offs
 

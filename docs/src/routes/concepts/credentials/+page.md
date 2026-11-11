@@ -9,7 +9,7 @@ Tasks that talk to external systems load credentials from a JSON file referenced
 | `http_request`, `ai_completion` (`mcp_servers`) | `HttpCredentials` (bearer / basic / OAuth 2.0 client credentials) | The outgoing HTTP request header. |
 | `http_endpoint` | `HttpCredentials` (bearer / basic) | Incoming requests, checked against the expected token. |
 | `mcp_tool` | `Credentials` (`api_keys` list) | Incoming MCP calls, checked against the allowed keys. |
-| `nats_jetstream_*`, `nats_kv_store` | NATS credentials JSON | NATS server connection. |
+| `nats_jetstream_*`, `kv_store` on NATS | NATS credentials JSON | NATS server connection. |
 | `gcp_*` (BigQuery) | GCP service account JSON | Google Cloud APIs. |
 | `salesforce_*` | Salesforce credentials JSON | Salesforce REST / Pub/Sub / Bulk APIs. |
 | `mssql_query` | MSSQL credentials JSON | SQL Server connection. |
@@ -133,7 +133,7 @@ The key fields used for deduplication depend on the task family:
 | `salesforce_*` | `credentials_path` |
 | `gcp_*` (BigQuery) | `credentials_path` |
 | `mssql_query`, `postgres_query`, `postgres_write` | `credentials_path`, `max_connections`, `connection_timeout`, `query_timeout` |
-| `nats_jetstream_*`, `nats_kv_store` | `credentials_path`, `url` |
+| `nats_jetstream_*`, `kv_store` | `credentials_path`, `url` |
 | `object_store_*` | `path`, `credentials_path` |
 
 Tasks with different identity fields get separate clients. Two MSSQL tasks with the same credentials but different `max_connections` do not share a pool.

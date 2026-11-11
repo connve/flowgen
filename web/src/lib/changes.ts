@@ -1,8 +1,14 @@
 import { error } from '@sveltejs/kit';
 import {
-	apiUrl,
+	ApiError,
+	addChangeFiles,
+	editChange,
 	encodePath,
-	failure,
+	getChange,
+	getConfig,
+	getWorkspaceFile,
+	isStatus,
+	listChanges,
 	type AuthoringTarget,
 	type Change,
 	type ChangeSummary,
@@ -16,8 +22,8 @@ import { m } from '$lib/paraglide/messages.js';
 let configInfo: Promise<ConfigInfo | null> | null = null;
 
 function loadConfigInfo(fetcher: typeof fetch): Promise<ConfigInfo | null> {
-	configInfo ??= fetcher(apiUrl('api/config'))
-		.then((res) => (res.ok ? (res.json() as Promise<ConfigInfo>) : null))
+	configInfo ??= getConfig({ fetch: fetcher })
+		.then(({ data }) => data)
 		.catch(() => null)
 		.then((info) => {
 			if (info === null) configInfo = null;
@@ -65,10 +71,34 @@ export function draftChange(
 	return latest;
 }
 
+// Adds `files` to the pending change `id`; null when the change can no longer
+// take them. A title the editor generated follows the files; one a person or
+// agent wrote stays.
+export async function addToDraft(
+	id: string,
+	files: { path: string; content?: string | null }[]
+): Promise<Change | null> {
+	const before = await loadChange(id);
+	let after: Change;
+	try {
+		after = (await addChangeFiles({ path: { id }, body: { files } })).data;
+	} catch (err) {
+		if (isStatus(err, 403) || isStatus(err, 409)) return null;
+		throw err;
+	}
+	const title = generatedTitle(after.files);
+	if (before && before.title === generatedTitle(before.files) && title !== after.title) {
+		await editChange({ path: { id }, body: { title } }).catch(() => undefined);
+	}
+	return after;
+}
+
 // A change with its files, or null when it cannot be loaded.
 export async function loadChange(id: string, fetcher: typeof fetch = fetch): Promise<Change | null> {
-	const res = await fetcher(apiUrl(`api/changes/${encodeURIComponent(id)}`));
-	return res.ok ? res.json() : null;
+	return getChange({ path: { id }, fetch: fetcher }).then(
+		({ data }) => data,
+		() => null
+	);
 }
 
 // The content `path` has in a pending change, or null when the change deletes it.
@@ -143,27 +173,42 @@ export function editUrl(base: string, path: string): string {
 	return `${base}/edit/${encodePath(path)}`;
 }
 
-// The version a change to `path` is based on: what runs, with published
+// The version a change to `path` is based on: what runs, with committed
 // changes not deployed yet on top; null when the file does not exist.
 export async function baseContent(
 	path: string,
 	fetcher: typeof fetch = fetch
 ): Promise<string | null> {
-	const res = await fetcher(apiUrl(`api/workspace/file?path=${encodeURIComponent(path)}`));
-	if (res.status === 404) return null;
-	if (!res.ok) error(res.status, (await failure(res)).message);
-	const body = await res.json();
-	return body.content ?? null;
+	try {
+		return (await getWorkspaceFile({ query: { path }, fetch: fetcher })).data.content ?? null;
+	} catch (err) {
+		if (isStatus(err, 404)) return null;
+		if (err instanceof ApiError) error(err.status, err.message);
+		throw err;
+	}
+}
+
+// A free path for a copy of `path`: `<name>_copy`, then `<name>_copy_2` and on,
+// taken by neither the workspace nor a pending change.
+export async function copyPath(
+	path: string,
+	pending: ChangeSummary[],
+	fetcher: typeof fetch = fetch
+): Promise<string> {
+	const [, stem, extension] = path.match(/^(.*?)(\.[^./]+)?$/) ?? [path, path, ''];
+	const proposed = new Set(pending.flatMap((change) => change.paths));
+	for (let n = 1; ; n++) {
+		const candidate = `${stem}_copy${n === 1 ? '' : `_${n}`}${extension ?? ''}`;
+		if (!proposed.has(candidate) && (await baseContent(candidate, fetcher)) === null) return candidate;
+	}
 }
 
 // Pending workspace changes, or none when authoring is not configured or the
 // store is unreachable — callers only decorate pages with them.
 export async function pendingChanges(fetcher: typeof fetch = fetch): Promise<ChangeSummary[]> {
 	try {
-		const res = await fetcher(apiUrl('api/changes'));
-		if (!res.ok) return [];
-		const changes: ChangeSummary[] = (await res.json()).changes ?? [];
-		return changes.filter((change) => change.status === 'pending');
+		const { data } = await listChanges({ fetch: fetcher });
+		return (data.changes ?? []).filter((change) => change.status === 'pending');
 	} catch {
 		return [];
 	}

@@ -16,10 +16,7 @@ use axum::{
     routing::post,
     Router,
 };
-use flowgen_core::http_server::{
-    headers_satisfy, record_headers_rejected_activity, DispatchState, Dispatcher, HasFlowName,
-    HttpServer,
-};
+use flowgen_core::http_server::{DispatchState, Dispatcher, HasFlowName, HttpServer};
 use flowgen_core::registry::{Content, ProgressEvent, ResponseRegistry, ToolResult};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -159,9 +156,6 @@ pub struct ToolRegistration {
     /// the per-request completion channel so the response is delivered only
     /// after every leaf has signalled.
     pub leaf_count: usize,
-    /// Headers a caller must present, with matching values, for this tool
-    /// to be listed or called. Empty means every caller can reach it.
-    pub headers: std::collections::HashMap<String, String>,
     /// Cancelled once the task that registered the tool stops reading.
     pub cancellation_token: tokio_util::sync::CancellationToken,
 }
@@ -209,9 +203,6 @@ pub struct ResourceRegistration {
     /// Loader used to resolve template `Source::Resource` content at read
     /// time. Concrete resources ignore this; templates need it.
     pub resource_loader: Option<flowgen_core::resource::ResourceLoader>,
-    /// Headers a caller must present, with matching values, for this
-    /// resource to be listed or read. Empty means every caller can reach it.
-    pub headers: std::collections::HashMap<String, String>,
     /// Cancelled once the task that registered the resource stops reading.
     pub cancellation_token: tokio_util::sync::CancellationToken,
 }
@@ -270,7 +261,6 @@ pub struct PromptRegistration {
     pub arguments: Vec<PromptArgument>,
     pub messages: Vec<PromptMessage>,
     pub resource_loader: Option<flowgen_core::resource::ResourceLoader>,
-    pub headers: std::collections::HashMap<String, String>,
     /// Cancelled once the task that registered the prompt stops reading.
     pub cancellation_token: tokio_util::sync::CancellationToken,
 }
@@ -393,7 +383,8 @@ impl Toolset {
     }
 }
 
-/// Registers a tool under its name, which must suit model APIs and be unique on the server.
+/// Registers a tool under its name, which must suit model APIs and be unique
+/// on the server. Broadcasts `notifications/tools/list_changed` on success.
 pub fn register_tool(
     server: &McpServer,
     name: String,
@@ -402,7 +393,12 @@ pub fn register_tool(
     validate_name(&name)?;
     server
         .try_register(name.clone(), registration)
-        .map_err(|_| Error::ToolNameCollision { name })
+        .map_err(|_| Error::ToolNameCollision { name })?;
+    broadcast_notification(
+        &server.extras().sessions,
+        "notifications/tools/list_changed",
+    );
+    Ok(())
 }
 
 /// Registers a concrete resource keyed by URI. Broadcasts
@@ -484,8 +480,11 @@ pub fn register_prompt(
 /// table that lost at least one entry so subscribed MCP clients refresh
 /// their cached lists.
 pub fn deregister_flow_all(server: &McpServer, flow_name: &str) {
-    server.deregister_flow(flow_name);
+    let tools_removed = server.deregister_flow(flow_name);
     let extras = server.extras();
+    if tools_removed > 0 {
+        broadcast_notification(&extras.sessions, "notifications/tools/list_changed");
+    }
 
     let resources_removed = retain_and_count(&extras.resources, |reg| reg.flow_name != flow_name);
     let templates_removed =
@@ -818,12 +817,30 @@ const SESSION_CHANNEL_CAPACITY: usize = 32;
 /// ID is returned in the `Mcp-Session-Id` header per MCP spec.
 async fn handle_mcp_sse(
     State(state): State<DispatchState<ToolRegistration, McpExtras>>,
+    headers: HeaderMap,
 ) -> Response {
-    let session_id = uuid::Uuid::now_v7().to_string();
-    // UUID v7 is ASCII-only, so this conversion cannot fail. If it ever
-    // does, the client has no way to route subsequent POSTs to this
-    // session, so we surface the error rather than emitting a stream
-    // the client cannot use.
+    if let Err(status) = validate_auth(&state, &headers, None) {
+        return status.into_response();
+    }
+    let session_id = match headers
+        .get(MCP_SESSION_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+    {
+        Some(session_id) => session_id.to_string(),
+        None => uuid::Uuid::now_v7().to_string(),
+    };
+    let open = state
+        .extras
+        .sessions
+        .get(&session_id)
+        .is_some_and(|sender| !sender.is_closed());
+    if open {
+        return (
+            StatusCode::CONFLICT,
+            "The session already has an open stream",
+        )
+            .into_response();
+    }
     let session_header = match axum::http::HeaderValue::from_str(&session_id) {
         Ok(value) => value,
         Err(source) => {
@@ -923,9 +940,7 @@ fn handle_initialize(request: JsonRpcRequest) -> Response {
     let result = InitializeResult {
         protocol_version: MCP_PROTOCOL_VERSION,
         capabilities: ServerCapabilities {
-            tools: ToolsCapability {
-                list_changed: false,
-            },
+            tools: ToolsCapability { list_changed: true },
             resources: ResourcesCapability {
                 subscribe: false,
                 list_changed: true,
@@ -938,7 +953,13 @@ fn handle_initialize(request: JsonRpcRequest) -> Response {
             version: env!("CARGO_PKG_VERSION"),
         },
     };
-    json_rpc_response(request.id, result)
+    let mut response = json_rpc_response(request.id, result);
+    if let Ok(session_id) = axum::http::HeaderValue::from_str(&uuid::Uuid::now_v7().to_string()) {
+        response
+            .headers_mut()
+            .insert(MCP_SESSION_ID_HEADER, session_id);
+    }
+    response
 }
 
 fn handle_tools_list(
@@ -954,10 +975,7 @@ fn handle_tools_list(
     let entries: Vec<_> = state
         .table
         .iter()
-        .filter(|entry| {
-            toolset.contains(&entry.value().flow_name)
-                && headers_satisfy(headers, &entry.value().headers)
-        })
+        .filter(|entry| toolset.contains(&entry.value().flow_name))
         .map(|entry| {
             let reg = entry.value();
             (
@@ -998,10 +1016,7 @@ fn handle_resources_list(
         .extras
         .resources
         .iter()
-        .filter(|entry| {
-            toolset.contains(&entry.value().flow_name)
-                && headers_satisfy(headers, &entry.value().headers)
-        })
+        .filter(|entry| toolset.contains(&entry.value().flow_name))
         .map(|entry| {
             let reg = entry.value();
             (
@@ -1038,10 +1053,7 @@ fn handle_resource_templates_list(
         .extras
         .resource_templates
         .iter()
-        .filter(|entry| {
-            toolset.contains(&entry.value().flow_name)
-                && headers_satisfy(headers, &entry.value().headers)
-        })
+        .filter(|entry| toolset.contains(&entry.value().flow_name))
         .map(|entry| {
             let reg = entry.value();
             (
@@ -1094,17 +1106,6 @@ async fn handle_resources_read(
         .get(&params.uri)
         .filter(|entry| toolset.contains(&entry.flow_name))
     {
-        if !headers_satisfy(headers, &entry.headers) {
-            record_headers_rejected_activity(&entry.flow_name, &entry.name, 0, "mcp_resource");
-            return json_rpc_error_response(
-                request.id,
-                -32602,
-                Error::UnknownResourceUri {
-                    uri: params.uri.clone(),
-                }
-                .to_string(),
-            );
-        }
         let reg = entry.value();
         let text = match &reg.body {
             ResourceBody::Concrete(content) => content.clone(),
@@ -1121,37 +1122,16 @@ async fn handle_resources_read(
         return resource_read_response(request.id, &reg.uri, &reg.mime_type, text);
     }
 
-    // Slow path: match against every resource-template pattern in one pass,
-    // remembering the first URI match whose headers rejected it so a
-    // headers-only miss can still be attributed to a flow below.
-    let mut matched = None;
-    let mut uri_matched_but_rejected = None;
-    for entry in state
+    // Slow path: the first resource-template pattern that matches the URI.
+    let matched = state
         .extras
         .resource_templates
         .iter()
         .filter(|entry| toolset.contains(&entry.flow_name))
-    {
-        let Some(bindings) = match_uri_template(entry.key(), &params.uri) else {
-            continue;
-        };
-        if headers_satisfy(headers, &entry.value().headers) {
-            matched = Some((entry.value().clone(), bindings));
-            break;
-        }
-        if uri_matched_but_rejected.is_none() {
-            uri_matched_but_rejected = Some((entry.flow_name.clone(), entry.name.clone()));
-        }
-    }
-
-    // Headers filtered out every template match for this URI: log against
-    // the first URI-matching (but header-rejected) template so the
-    // rejection shows up in that flow's Activity panel too.
-    if matched.is_none() {
-        if let Some((flow_name, name)) = uri_matched_but_rejected {
-            record_headers_rejected_activity(&flow_name, &name, 0, "mcp_resource");
-        }
-    }
+        .find_map(|entry| {
+            match_uri_template(entry.key(), &params.uri)
+                .map(|bindings| (entry.value().clone(), bindings))
+        });
 
     let (reg, bindings) = match matched {
         Some(pair) => pair,
@@ -1236,10 +1216,7 @@ fn handle_prompts_list(
         .extras
         .prompts
         .iter()
-        .filter(|entry| {
-            toolset.contains(&entry.value().flow_name)
-                && headers_satisfy(headers, &entry.value().headers)
-        })
+        .filter(|entry| toolset.contains(&entry.value().flow_name))
         .map(|entry| {
             let reg = entry.value();
             (
@@ -1291,14 +1268,6 @@ async fn handle_prompts_get(
         .get(&params.name)
         .filter(|entry| toolset.contains(&entry.flow_name))
     {
-        Some(entry) if !headers_satisfy(headers, &entry.headers) => {
-            record_headers_rejected_activity(&entry.flow_name, &entry.name, 0, "mcp_prompt");
-            return json_rpc_error_response(
-                request.id,
-                -32602,
-                Error::UnknownPrompt { name: params.name }.to_string(),
-            );
-        }
         Some(entry) => entry.value().clone(),
         None => {
             return json_rpc_error_response(
@@ -1575,12 +1544,6 @@ async fn execute_tool_call(
             })
         }
     };
-    if !headers_satisfy(headers, &entry.headers) {
-        record_headers_rejected_activity(&entry.flow_name, &params.name, 0, "mcp_tool");
-        return Err(Error::UnknownTool {
-            name: params.name.clone(),
-        });
-    }
     let (tool_tx, ack_timeout, auth_required, leaf_count, flow_name) = (
         entry.tx.clone(),
         entry.ack_timeout,
@@ -2063,7 +2026,6 @@ mod tests {
             ack_timeout: None,
             auth_required: false,
             leaf_count: 1,
-            headers: std::collections::HashMap::new(),
             cancellation_token: tokio_util::sync::CancellationToken::new(),
         }
     }
@@ -2834,7 +2796,6 @@ mod tests {
                 content: flowgen_core::resource::Source::Inline("hi".to_string()),
             }],
             resource_loader: None,
-            headers: std::collections::HashMap::new(),
             cancellation_token: tokio_util::sync::CancellationToken::new(),
         }
     }
@@ -2868,6 +2829,50 @@ mod tests {
         assert!(rx.recv().await.is_some());
         deregister_flow_all(&server, "f");
         assert!(rx.recv().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_tool_starting_or_stopping_tells_open_sessions() {
+        let server = test_server();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        server.extras().sessions.insert("session-1".to_string(), tx);
+
+        register_tool(&server, "t".to_string(), test_tool_registration("f", "d")).unwrap();
+        let started = rx.recv().await.unwrap();
+        deregister_flow_all(&server, "f");
+        let stopped = rx.recv().await.unwrap();
+
+        assert!(started.contains("notifications/tools/list_changed"));
+        assert!(stopped.contains("notifications/tools/list_changed"));
+    }
+
+    #[test]
+    fn initialize_returns_a_session_id() {
+        let request: JsonRpcRequest = serde_json::from_value(serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize"
+        }))
+        .unwrap();
+
+        let response = handle_initialize(request);
+
+        assert!(response.headers().get(MCP_SESSION_ID_HEADER).is_some());
+    }
+
+    #[tokio::test]
+    async fn a_session_with_an_open_stream_gets_no_second_one() {
+        let server = test_server();
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        server.extras().sessions.insert("s".to_string(), tx);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            MCP_SESSION_ID_HEADER,
+            axum::http::HeaderValue::from_static("s"),
+        );
+        let state = build_test_state(&server, Arc::new(DashMap::new()));
+
+        let response = handle_mcp_sse(State(state), headers).await;
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
     }
 
     #[test]

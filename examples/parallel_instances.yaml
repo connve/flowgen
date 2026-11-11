@@ -10,7 +10,6 @@ flow:
   require_leader_election: true
   parallel_instances: 5
   tasks:
-
     # Each instance ticks independently every 5 seconds.
     - generate:
         name: trigger

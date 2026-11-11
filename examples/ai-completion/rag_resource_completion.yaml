@@ -13,7 +13,6 @@ flow:
     description: "Answers webhook-submitted questions with an OpenAI completion grounded in static resource context."
     tags: ["ai", "rag", "openai", "example"]
   tasks:
-
     # POST /api/flowgen/workers/v1/ask_question with { "question": "..." }
     - http_endpoint:
         name: receive_question

@@ -20,7 +20,7 @@ thiserror = { workspace = true }
 walkdir = { workspace = true }
 async-trait = { workspace = true }
 tokio-retry = { workspace = true }
-gix = { workspace = true, features = ["tree-editor"] }
+gix = { workspace = true, features = ["tree-editor", "status"] }
 reqwest = { workspace = true }
 humantime-serde = { workspace = true }
 flate2 = { workspace = true }

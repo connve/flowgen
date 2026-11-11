@@ -1,13 +1,15 @@
 //! Workspace change proposals: validated, diffed against what is deployed,
-//! and published by a flow once a signed-in user approves them.
+//! and committed by a flow once a signed-in user approves them.
 
 use crate::validation::flow_identity;
 use crate::web::{Caller, WebState};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
+use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use flowgen_client::types as api;
+use futures_util::{Stream, StreamExt};
 use serde::Serialize;
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,6 +20,12 @@ const CHANGE_KEY_PREFIX: &str = "authoring.changes.";
 
 /// How long a diff searches for the smallest edit before settling for a larger one.
 const DIFF_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// The most samples one script test runs.
+const MAX_TEST_SAMPLES: usize = 100;
+
+/// How long one script test may run, checked between samples.
+const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Failure of a change request, with the status it answers.
 #[derive(thiserror::Error, Debug)]
@@ -60,10 +68,10 @@ pub enum Error {
     EditedSinceReview,
     #[error("'{user}' is not allowed to approve or reject changes")]
     NotApprover { user: String },
-    #[error("Publishing timed out after {timeout:?}. Please try again.")]
-    PublishTimeout { timeout: Duration },
-    #[error("Publishing stopped unexpectedly: {source}")]
-    PublishAborted {
+    #[error("Committing timed out after {timeout:?}. Please try again.")]
+    CommitTimeout { timeout: Duration },
+    #[error("Committing stopped unexpectedly: {source}")]
+    CommitAborted {
         #[source]
         source: tokio::task::JoinError,
     },
@@ -74,7 +82,7 @@ pub enum Error {
     },
     #[error(transparent)]
     Call(#[from] flowgen_core::task::inproc::registry::CallError),
-    #[error("Failed to serialize the publish request: {source}")]
+    #[error("Failed to serialize the commit request: {source}")]
     Serialize {
         #[source]
         source: serde_json::Error,
@@ -110,6 +118,14 @@ pub enum Error {
         #[source]
         source: serde_json::Error,
     },
+    #[error("A script test needs at least one sample")]
+    NoSamples,
+    #[error("A script test takes at most {max} samples")]
+    TooManySamples { max: usize },
+    #[error("The script test ran past {timeout:?}")]
+    TestTimeout { timeout: Duration },
+    #[error(transparent)]
+    Test(#[from] flowgen_core::task::script::samples::Error),
 }
 
 impl IntoResponse for Error {
@@ -121,7 +137,11 @@ impl IntoResponse for Error {
             | Error::MissingTitle
             | Error::NoFiles
             | Error::NoTarget { .. }
-            | Error::MixedTargets { .. } => (StatusCode::BAD_REQUEST, None),
+            | Error::MixedTargets { .. }
+            | Error::NoSamples
+            | Error::TooManySamples { .. }
+            | Error::TestTimeout { .. }
+            | Error::Test(_) => (StatusCode::BAD_REQUEST, None),
             Error::NotPending { .. }
             | Error::Invalid
             | Error::Concurrent
@@ -143,11 +163,11 @@ impl IntoResponse for Error {
                 StatusCode::SERVICE_UNAVAILABLE,
                 Some("Deployed content unavailable"),
             ),
-            Error::PublishTimeout { .. }
-            | Error::PublishAborted { .. }
+            Error::CommitTimeout { .. }
+            | Error::CommitAborted { .. }
             | Error::Call(_)
             | Error::Serialize { .. } => {
-                (StatusCode::INTERNAL_SERVER_ERROR, Some("Publishing failed"))
+                (StatusCode::INTERNAL_SERVER_ERROR, Some("Committing failed"))
             }
             Error::Encode { .. } => (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -196,8 +216,8 @@ pub enum PathError {
 /// `[A-Za-z0-9._-]` because flow identities and resource keys become cache keys.
 fn locate(path: &str) -> Result<Location<'_>, PathError> {
     let (location, rest) = match path.split_once('/') {
-        Some(("flows", file)) => (Location::Flow { file }, file),
-        Some(("resources", key)) => (Location::Resource { key }, key),
+        Some((flowgen_core::workspace::FLOWS_DIR, file)) => (Location::Flow { file }, file),
+        Some((flowgen_core::workspace::RESOURCES_DIR, key)) => (Location::Resource { key }, key),
         _ => return Err(PathError::Root),
     };
     if rest.is_empty() || rest.ends_with('/') {
@@ -304,11 +324,9 @@ async fn deployed(
     match location {
         Location::Flow { file } => {
             let identity = flow_identity(file);
-            if let (Some(cache), Some(options)) =
-                (&state.flows_cache, &state.app_config.flows.cache)
-            {
+            if let Some(cache) = &state.flows_cache {
                 let synced = cache
-                    .get(&format!("{}.{identity}", options.prefix))
+                    .get(&format!("{}.{identity}", crate::config::FLOWS_CACHE_PREFIX))
                     .await
                     .map_err(|source| Error::DeployedCache {
                         path: path.to_string(),
@@ -349,35 +367,35 @@ fn same_content(a: Option<&str>, b: Option<&str>) -> bool {
     }
 }
 
-/// Published versions of each path with the change that made them, oldest
+/// Committed versions of each path with the change that made them, oldest
 /// approval first.
-type Published = std::collections::HashMap<String, Vec<(String, api::ChangeFile)>>;
+type Committed = std::collections::HashMap<String, Vec<(String, api::ChangeFile)>>;
 
-fn index_published<'a>(changes: impl IntoIterator<Item = &'a api::Change>) -> Published {
+fn index_committed<'a>(changes: impl IntoIterator<Item = &'a api::Change>) -> Committed {
     let mut decided: Vec<_> = changes
         .into_iter()
-        .filter(|change| change.status == api::ChangeStatus::Published)
+        .filter(|change| change.status == api::ChangeStatus::Committed)
         .map(|change| match change.decided_at {
             Some(decided_at) => (decided_at, change),
             None => (change.created_at, change),
         })
         .collect();
     decided.sort_by_key(|(decided_at, _)| *decided_at);
-    let mut published = Published::new();
+    let mut committed = Committed::new();
     for (_, change) in decided {
         for file in &change.files {
-            published
+            committed
                 .entry(file.path.clone())
                 .or_default()
                 .push((change.id.clone(), file.clone()));
         }
     }
-    published
+    committed
 }
 
-async fn published_versions(state: &WebState) -> Result<Published, Error> {
+async fn committed_versions(state: &WebState) -> Result<Committed, Error> {
     let keys = state
-        .conversation_cache
+        .session_cache
         .list_keys(CHANGE_KEY_PREFIX)
         .await
         .map_err(|source| Error::Store { source })?;
@@ -387,14 +405,14 @@ async fn published_versions(state: &WebState) -> Result<Published, Error> {
             changes.push(change);
         }
     }
-    Ok(index_published(&changes))
+    Ok(index_committed(&changes))
 }
 
-/// Applies the published versions of a file to what runs: from the newest
+/// Applies the committed versions of a file to what runs: from the newest
 /// version already running, each later one based on the content so far. Gives
 /// what the branch holds as far as flowgen knows, and the changes applied,
 /// which are not deployed yet.
-fn apply_published<'a>(
+fn apply_committed<'a>(
     running: Option<&'a str>,
     versions: &'a [(String, api::ChangeFile)],
 ) -> (Option<&'a str>, Vec<&'a str>) {
@@ -421,28 +439,32 @@ async fn base_content(
     state: &WebState,
     path: &str,
     location: &Location<'_>,
-    published: &Published,
+    committed: &Committed,
 ) -> Result<Option<String>, Error> {
     let running = deployed(state, path, location).await?;
-    let versions = match published.get(path) {
+    let versions = match committed.get(path) {
         Some(versions) => versions.as_slice(),
         None => &[],
     };
-    Ok(apply_published(running.as_deref(), versions)
+    Ok(apply_committed(running.as_deref(), versions)
         .0
         .map(str::to_string))
 }
 
-/// Where a published change stands against what this instance runs; `None`
+/// The prefix of the system-bucket keys a release flow writes, one per
+/// released commit: `releases.<commit>`.
+pub(crate) const RELEASES_PREFIX: &str = "releases";
+
+/// Where a committed change stands against what this instance runs; `None`
 /// for other changes, for targets without `track_deployment`, and when the
 /// running content cannot be read.
 async fn deployment(
     state: &WebState,
     change: &api::Change,
-    published: &Published,
+    committed: &Committed,
 ) -> Option<api::ChangeDeployment> {
     let tracked = match (&change.status, &state.authoring) {
-        (api::ChangeStatus::Published, Some(authoring)) => authoring
+        (api::ChangeStatus::Committed, Some(authoring)) => authoring
             .targets
             .iter()
             .any(|target| target.name == change.target && target.track_deployment),
@@ -456,17 +478,17 @@ async fn deployment(
             Ok(location) => location,
             Err(_) => return None,
         };
-        let versions = match published.get(&file.path) {
+        let versions = match committed.get(&file.path) {
             Some(versions) => versions.as_slice(),
             None => &[],
         };
         match deployed(state, &file.path, &location).await {
             Ok(running)
-                if apply_published(running.as_deref(), versions)
+                if apply_committed(running.as_deref(), versions)
                     .1
                     .contains(&change.id.as_str()) =>
             {
-                return Some(api::ChangeDeployment::Waiting)
+                return Some(release(state, change).await)
             }
             Ok(_) => {}
             Err(error) => {
@@ -476,6 +498,27 @@ async fn deployment(
         }
     }
     Some(api::ChangeDeployment::Deployed)
+}
+
+/// `released` once a release flow recorded the change's commit under
+/// [`RELEASES_PREFIX`], `waiting` until then.
+async fn release(state: &WebState, change: &api::Change) -> api::ChangeDeployment {
+    let commit = match change.result.get("commit") {
+        Some(serde_json::Value::String(commit)) => commit,
+        _ => return api::ChangeDeployment::Waiting,
+    };
+    let cache = match &state.flows_cache {
+        Some(cache) => cache,
+        None => return api::ChangeDeployment::Waiting,
+    };
+    match cache.get(&format!("{RELEASES_PREFIX}.{commit}")).await {
+        Ok(Some(_)) => api::ChangeDeployment::Released,
+        Ok(None) => api::ChangeDeployment::Waiting,
+        Err(error) => {
+            warn!(change = %change.id, error = %error, "Failed to check the release of a change");
+            api::ChangeDeployment::Waiting
+        }
+    }
 }
 
 /// The change with each file's diff filled in, on a blocking thread as large
@@ -527,7 +570,7 @@ fn target_for<'a, 'p>(
 }
 
 /// The target a stored change still belongs to under the current configuration,
-/// so approver groups and the publish flow cannot come from a target that no
+/// so approver groups and the commit flow cannot come from a target that no
 /// longer owns its files.
 fn stored_target<'a>(
     authoring: &'a crate::config::AuthoringOptions,
@@ -626,7 +669,7 @@ async fn load(state: &WebState, id: &str) -> Result<(api::Change, u64), Error> {
         return Err(Error::NotFound { id: id.to_string() });
     }
     let stored = state
-        .conversation_cache
+        .session_cache
         .get_with_revision(&change_key(id))
         .await
         .map_err(|source| Error::Store { source })?;
@@ -648,7 +691,7 @@ fn encode(change: &api::Change) -> Result<bytes::Bytes, Error> {
 
 async fn store(state: &WebState, change: &api::Change) -> Result<(), Error> {
     state
-        .conversation_cache
+        .session_cache
         .put(&change_key(&change.id), encode(change)?, None)
         .await
         .map_err(|source| Error::Store { source })
@@ -657,7 +700,7 @@ async fn store(state: &WebState, change: &api::Change) -> Result<(), Error> {
 /// Writes `change` only if nobody wrote it since `revision`, returning the new revision.
 async fn transition(state: &WebState, change: &api::Change, revision: u64) -> Result<u64, Error> {
     match state
-        .conversation_cache
+        .session_cache
         .update(&change_key(&change.id), encode(change)?, revision, None)
         .await
     {
@@ -683,6 +726,77 @@ pub(crate) async fn validate_workspace(
     }))
 }
 
+/// `POST /api/workspace/test`: the script run on each sample, importing the
+/// draft resources before the deployed ones.
+pub(crate) async fn test_script(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<api::ScriptTest>,
+) -> Result<Json<api::ScriptTestResult>, Error> {
+    match body.samples.len() {
+        0 => return Err(Error::NoSamples),
+        count if count > MAX_TEST_SAMPLES => {
+            return Err(Error::TooManySamples {
+                max: MAX_TEST_SAMPLES,
+            })
+        }
+        _ => {}
+    }
+    let mut drafts = std::collections::HashMap::new();
+    for file in body.files {
+        let key = match locate(&file.path) {
+            Ok(Location::Resource { key }) => key.to_string(),
+            Ok(Location::Flow { .. }) => continue,
+            Err(reason) => {
+                return Err(Error::InvalidPath {
+                    path: file.path,
+                    reason,
+                })
+            }
+        };
+        if let Some(content) = file.content {
+            drafts.insert(key, content);
+        }
+    }
+    let resources = match &state.resource_loader {
+        Some(loader) => loader.clone(),
+        None => flowgen_core::resource::ResourceLoader::new(None),
+    };
+    let samples = body
+        .samples
+        .into_iter()
+        .enumerate()
+        .map(|(index, sample)| ((index + 1).to_string(), sample))
+        .collect();
+    let run = flowgen_core::task::script::samples::run_on(
+        flowgen_core::resource::Source::Inline(body.script),
+        samples,
+        resources.with_drafts(drafts),
+    );
+    let outcomes = match tokio::time::timeout(TEST_TIMEOUT, run).await {
+        Ok(outcomes) => outcomes?,
+        Err(_) => {
+            return Err(Error::TestTimeout {
+                timeout: TEST_TIMEOUT,
+            })
+        }
+    };
+    Ok(Json(api::ScriptTestResult {
+        outcomes: outcomes
+            .into_iter()
+            .map(|outcome| match outcome.result {
+                Ok(events) => api::ScriptTestOutcome {
+                    events,
+                    error: None,
+                },
+                Err(error) => api::ScriptTestOutcome {
+                    events: Vec::new(),
+                    error: Some(error),
+                },
+            })
+            .collect(),
+    }))
+}
+
 /// Query of `GET /api/workspace/file`.
 #[derive(serde::Deserialize)]
 pub(crate) struct FileQuery {
@@ -704,19 +818,69 @@ pub(crate) async fn workspace_file(
             })
         }
     };
-    let published = published_versions(&state).await?;
-    let content = base_content(&state, &query.path, &location, &published).await?;
+    let committed = committed_versions(&state).await?;
+    let content = base_content(&state, &query.path, &location, &committed).await?;
     Ok(Json(api::WorkspaceFile {
         path: query.path,
         content,
     }))
 }
 
+/// The SSE event sent when the deployed flows or resources change. It carries
+/// `{}`, as browsers drop an event without data.
+const SSE_EVENT_DEPLOYMENT: &str = "deployment";
+
+/// `GET /api/changes/stream`: `deployment` each time a commit is released or
+/// a flow or resource in the cache changes, so a client rechecks committed
+/// changes as they move on. The stream ends when a watch fails or ends, and
+/// the client reconnects and reads the changes again.
+pub(crate) async fn stream_deployments(
+    State(state): State<Arc<WebState>>,
+) -> Sse<impl Stream<Item = Result<SseEvent, axum::Error>>> {
+    let mut watches = Vec::new();
+    if let Some(cache) = &state.flows_cache {
+        watches.push(cache.watch(RELEASES_PREFIX, false).await);
+        watches.push(cache.watch(crate::config::FLOWS_CACHE_PREFIX, false).await);
+    }
+    if let Some(loader) = &state.resource_loader {
+        watches.push(loader.watch().await);
+    }
+    let mut sources = Vec::with_capacity(watches.len());
+    for watched in watches {
+        match watched {
+            Ok(stream) => sources.push(stream),
+            Err(source) => {
+                warn!(error = %source, "Deployment watch subscription failed");
+                sources.push(futures_util::stream::empty().boxed());
+            }
+        }
+    }
+    if sources.is_empty() {
+        sources.push(futures_util::stream::pending().boxed());
+    }
+    let live = crate::web::until_any_ends(sources)
+        .take_while(|event| {
+            std::future::ready(match event {
+                Ok(_) => true,
+                Err(source) => {
+                    warn!(error = %source, "Deployment watch failed");
+                    false
+                }
+            })
+        })
+        .map(|_| Ok(SseEvent::default().event(SSE_EVENT_DEPLOYMENT).data("{}")));
+    Sse::new(live).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("keep-alive"),
+    )
+}
+
 /// `GET /api/changes`.
 pub(crate) async fn list_changes(State(state): State<Arc<WebState>>) -> Result<Response, Error> {
     require_authoring(&state)?;
     let keys = state
-        .conversation_cache
+        .session_cache
         .list_keys(CHANGE_KEY_PREFIX)
         .await
         .map_err(|source| Error::Store { source })?;
@@ -727,11 +891,11 @@ pub(crate) async fn list_changes(State(state): State<Arc<WebState>>) -> Result<R
             Err(error) => warn!(key = %key, error = %error, "Skipping unreadable change"),
         }
     }
-    let published = index_published(&loaded);
+    let committed = index_committed(&loaded);
     let mut changes = Vec::with_capacity(loaded.len());
     for change in loaded {
         changes.push(api::ChangeSummary {
-            deployment: deployment(&state, &change, &published).await,
+            deployment: deployment(&state, &change, &committed).await,
             paths: change.files.iter().map(|file| file.path.clone()).collect(),
             id: change.id,
             target: change.target,
@@ -768,10 +932,10 @@ pub(crate) async fn propose_change(
     )?
     .name
     .clone();
-    let published = published_versions(&state).await?;
+    let committed = committed_versions(&state).await?;
     let mut files = Vec::with_capacity(proposal.files.len());
     for (file, location) in proposal.files.iter().zip(&locations) {
-        let previous = base_content(&state, &file.path, location, &published).await?;
+        let previous = base_content(&state, &file.path, location, &committed).await?;
         files.push(api::ChangeFile {
             diff: String::new(),
             path: file.path.clone(),
@@ -811,11 +975,11 @@ pub(crate) async fn get_change(
     let authoring = require_authoring(&state)?;
     let (mut change, _) = load(&state, &id).await?;
     change.stalled = Some(match stored_target(authoring, &change) {
-        Ok(target) => stalled(&change, publish_wait(&state, target)),
+        Ok(target) => stalled(&change, commit_wait(&state, target)),
         Err(_) => false,
     });
-    change.deployment = match published_versions(&state).await {
-        Ok(published) => deployment(&state, &change, &published).await,
+    change.deployment = match committed_versions(&state).await {
+        Ok(committed) => deployment(&state, &change, &committed).await,
         Err(error) => {
             warn!(change = %change.id, error = %error, "Failed to check the deployment of a change");
             None
@@ -903,7 +1067,7 @@ pub(crate) async fn add_change_files(
             current: target.name.clone(),
         });
     }
-    let published = published_versions(&state).await?;
+    let committed = committed_versions(&state).await?;
     for (file, location) in body.files.iter().zip(&locations) {
         match change
             .files
@@ -912,7 +1076,7 @@ pub(crate) async fn add_change_files(
         {
             Some(known) => known.content = file.content.clone(),
             None => {
-                let previous = base_content(&state, &file.path, location, &published).await?;
+                let previous = base_content(&state, &file.path, location, &committed).await?;
                 change.files.push(api::ChangeFile {
                     diff: String::new(),
                     path: file.path.clone(),
@@ -936,46 +1100,47 @@ pub(crate) async fn add_change_files(
     Ok(Json(with_diffs(change).await?))
 }
 
-/// File sent to the publish flow; `previous` is always present, `null` for a new file.
+/// File sent to the commit flow; `previous` is always present, `null` for a new file.
 #[derive(Serialize)]
-struct PublishFile<'a> {
+struct CommitFile<'a> {
     path: &'a str,
     content: Option<&'a str>,
     previous: Option<&'a str>,
 }
 
 #[derive(Serialize)]
-struct PublishAuthor {
+struct CommitAuthor {
     name: String,
     email: String,
 }
 
-/// Event data the publish flow receives.
+/// Event data the commit flow receives.
 #[derive(Serialize)]
-struct Publish<'a> {
+struct Commit<'a> {
     id: &'a str,
     target: &'a str,
     title: &'a str,
-    author: PublishAuthor,
-    files: Vec<PublishFile<'a>>,
+    author: CommitAuthor,
+    files: Vec<CommitFile<'a>>,
 }
 
-/// Commit author for a decider: name and email claims, else the user id.
-fn author(user: Option<&flowgen_core::auth::UserContext>) -> PublishAuthor {
-    let claim = |name: &str| match user {
-        Some(user) => match user.claims.get(name) {
-            Some(serde_json::Value::String(value)) if !value.trim().is_empty() => {
-                Some(value.trim().to_string())
-            }
-            _ => None,
-        },
-        None => None,
+/// Commit author for a decider: name and email claims, else the user id;
+/// empty without sign-in, so a commit on this machine is by its git user.
+fn author(user: Option<&flowgen_core::auth::UserContext>) -> CommitAuthor {
+    let Some(user) = user else {
+        return CommitAuthor {
+            name: String::new(),
+            email: String::new(),
+        };
     };
-    let id = match user {
-        Some(user) => user.user_id.clone(),
-        None => "flowgen".to_string(),
+    let claim = |name: &str| match user.claims.get(name) {
+        Some(serde_json::Value::String(value)) if !value.trim().is_empty() => {
+            Some(value.trim().to_string())
+        }
+        _ => None,
     };
-    PublishAuthor {
+    let id = user.user_id.clone();
+    CommitAuthor {
         name: match claim("name") {
             Some(name) => name,
             None => id.clone(),
@@ -1007,7 +1172,7 @@ pub(crate) async fn approve_change(
     let (mut change, revision) = load(&state, &id).await?;
     let target = stored_target(authoring, &change)?;
     let user = decider(caller.as_ref(), authoring, target)?;
-    if !can_publish(&change, publish_wait(&state, target)) {
+    if !can_commit(&change, commit_wait(&state, target)) {
         return Err(Error::NotPending {
             status: change.status,
         });
@@ -1021,32 +1186,32 @@ pub(crate) async fn approve_change(
     if !change.issues.is_empty() {
         return Err(Error::Invalid);
     }
-    change.status = api::ChangeStatus::Publishing;
+    change.status = api::ChangeStatus::Committing;
     change.decided_by = Some(caller_label(caller.as_ref()));
     change.decided_at = Some(now_ms());
     change.error = None;
     let revision = transition(&state, &change, revision).await?;
 
-    let publishing = tokio::spawn(publish(
+    let committing = tokio::spawn(commit(
         Arc::clone(&state),
         target.clone(),
         user,
         change,
         revision,
     ));
-    match publishing.await {
+    match committing.await {
         Ok(result) => Ok(Json(with_diffs(result?).await?)),
-        Err(source) => Err(Error::PublishAborted { source }),
+        Err(source) => Err(Error::CommitAborted { source }),
     }
 }
 
-/// Whether a change may be published: pending, failed (a retry), or stuck in
-/// `publishing` for longer than `timeout`, how long publishing may take.
-/// Without a `timeout` a change in `publishing` may not be published again.
-fn can_publish(change: &api::Change, timeout: Option<Duration>) -> bool {
+/// Whether a change may be committed: pending, failed (a retry), or stuck in
+/// `committing` for longer than `timeout`, how long committing may take.
+/// Without a `timeout` a change in `committing` may not be committed again.
+fn can_commit(change: &api::Change, timeout: Option<Duration>) -> bool {
     match change.status {
         api::ChangeStatus::Pending | api::ChangeStatus::Failed => true,
-        api::ChangeStatus::Publishing => {
+        api::ChangeStatus::Committing => {
             match (
                 change.decided_at,
                 timeout.map(|t| i64::try_from(t.as_millis())),
@@ -1056,30 +1221,30 @@ fn can_publish(change: &api::Change, timeout: Option<Duration>) -> bool {
                 (None, _) => true,
             }
         }
-        api::ChangeStatus::Rejected | api::ChangeStatus::Published => false,
+        api::ChangeStatus::Rejected | api::ChangeStatus::Committed => false,
     }
 }
 
-/// Whether publishing ran past `timeout`, so approving again retries it.
+/// Whether committing ran past `timeout`, so approving again retries it.
 fn stalled(change: &api::Change, timeout: Option<Duration>) -> bool {
-    matches!(change.status, api::ChangeStatus::Publishing) && can_publish(change, timeout)
+    matches!(change.status, api::ChangeStatus::Committing) && can_commit(change, timeout)
 }
 
-/// How long publishing for `target` may take: the `ack_timeout` of its publish
+/// How long committing for `target` may take: the `ack_timeout` of its commit
 /// flow's `inproc_endpoint`. `None` when the flow does not run on this pod,
-/// which then cannot tell whether another pod is still publishing.
-fn publish_wait(state: &WebState, target: &crate::config::AuthoringTarget) -> Option<Duration> {
-    state.inproc.ack_timeout(&target.publish_flow)
+/// which then cannot tell whether another pod is still committing.
+fn commit_wait(state: &WebState, target: &crate::config::AuthoringTarget) -> Option<Duration> {
+    state.inproc.ack_timeout(&target.commit_flow)
 }
 
-/// Runs the publish flow for `change` and returns its result.
-async fn run_publish_flow(
+/// Runs the commit flow for `change` and returns its result.
+async fn run_commit_flow(
     state: &WebState,
     target: &crate::config::AuthoringTarget,
     user: Option<&flowgen_core::auth::UserContext>,
     change: &api::Change,
 ) -> Result<Option<serde_json::Value>, Error> {
-    let publish = Publish {
+    let commit = Commit {
         id: &change.id,
         target: &target.name,
         title: &change.title,
@@ -1087,14 +1252,14 @@ async fn run_publish_flow(
         files: change
             .files
             .iter()
-            .map(|file| PublishFile {
+            .map(|file| CommitFile {
                 path: &file.path,
                 content: file.content.as_deref(),
                 previous: file.previous.as_deref(),
             })
             .collect(),
     };
-    let data = serde_json::to_value(&publish).map_err(|source| Error::Serialize { source })?;
+    let data = serde_json::to_value(&commit).map_err(|source| Error::Serialize { source })?;
     let mut meta = serde_json::Map::new();
     let mut session = None;
     if let Some(user) = user {
@@ -1107,37 +1272,37 @@ async fn run_publish_flow(
     }
     match state
         .inproc
-        .call(&[], &target.publish_flow, data, meta, session)
+        .call(&[], &target.commit_flow, data, meta, session)
         .await
     {
         Ok(result) => Ok(result),
         Err(flowgen_core::task::inproc::registry::CallError::Timeout { timeout }) => {
-            Err(Error::PublishTimeout { timeout })
+            Err(Error::CommitTimeout { timeout })
         }
         Err(error) => Err(Error::Call(error)),
     }
 }
 
-/// Runs the publish flow and records its outcome over the record written at
+/// Runs the commit flow and records its outcome over the record written at
 /// `revision`, leaving a record rewritten since then alone. Spawned, so a
-/// client that disconnects does not leave the change in `publishing`.
-async fn publish(
+/// client that disconnects does not leave the change in `committing`.
+async fn commit(
     state: Arc<WebState>,
     target: crate::config::AuthoringTarget,
     user: Option<flowgen_core::auth::UserContext>,
     mut change: api::Change,
     revision: u64,
 ) -> Result<api::Change, Error> {
-    match run_publish_flow(&state, &target, user.as_ref(), &change).await {
+    match run_commit_flow(&state, &target, user.as_ref(), &change).await {
         Ok(result) => {
-            change.status = api::ChangeStatus::Published;
+            change.status = api::ChangeStatus::Committed;
             change.result = match result {
                 Some(serde_json::Value::Object(fields)) => fields,
                 _ => Default::default(),
             };
         }
         Err(error) => {
-            warn!(change = %change.id, error = %error, "Publishing a change failed");
+            warn!(change = %change.id, error = %error, "Committing a change failed");
             change.status = api::ChangeStatus::Failed;
             change.error = Some(match error {
                 Error::Call(flowgen_core::task::inproc::registry::CallError::Failed { reason }) => {
@@ -1152,7 +1317,7 @@ async fn publish(
         match transition(&state, &change, revision).await {
             Ok(_) => Ok(()),
             Err(error @ Error::Store { .. }) => {
-                warn!(change = %change.id, error = %error, "Failed to record the publish outcome");
+                warn!(change = %change.id, error = %error, "Failed to record the commit outcome");
                 Err(tokio_retry::RetryError::transient(error))
             }
             Err(error) => Err(tokio_retry::RetryError::permanent(error)),
@@ -1164,7 +1329,7 @@ async fn publish(
         Err(Error::Concurrent) => {
             warn!(
                 change = %change.id,
-                "The change was rewritten while publishing, keeping the newer record"
+                "The change was rewritten while committing, keeping the newer record"
             );
             Ok(change)
         }
@@ -1307,7 +1472,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_and_stuck_changes_can_be_published_again() {
+    fn failed_and_stuck_changes_can_be_committed_again() {
         let change = |status: api::ChangeStatus, decided_at: Option<i64>| api::Change {
             id: "a".to_string(),
             target: "workspace".to_string(),
@@ -1327,40 +1492,40 @@ mod tests {
             stalled: None,
         };
         let timeout = Some(std::time::Duration::from_secs(60));
-        assert!(can_publish(
+        assert!(can_commit(
             &change(api::ChangeStatus::Pending, None),
             timeout
         ));
-        assert!(can_publish(
+        assert!(can_commit(
             &change(api::ChangeStatus::Failed, None),
             timeout
         ));
         assert!(!stalled(&change(api::ChangeStatus::Failed, None), timeout));
-        assert!(!can_publish(
-            &change(api::ChangeStatus::Publishing, Some(now_ms())),
+        assert!(!can_commit(
+            &change(api::ChangeStatus::Committing, Some(now_ms())),
             timeout
         ));
         assert!(!stalled(
-            &change(api::ChangeStatus::Publishing, Some(now_ms())),
+            &change(api::ChangeStatus::Committing, Some(now_ms())),
             timeout
         ));
-        assert!(can_publish(
-            &change(api::ChangeStatus::Publishing, Some(now_ms() - 61_000)),
+        assert!(can_commit(
+            &change(api::ChangeStatus::Committing, Some(now_ms() - 61_000)),
             timeout
         ));
         assert!(stalled(
-            &change(api::ChangeStatus::Publishing, Some(now_ms() - 61_000)),
+            &change(api::ChangeStatus::Committing, Some(now_ms() - 61_000)),
             timeout
         ));
         assert!(!stalled(
-            &change(api::ChangeStatus::Publishing, Some(now_ms() - 61_000)),
+            &change(api::ChangeStatus::Committing, Some(now_ms() - 61_000)),
             None
         ));
-        assert!(!can_publish(
-            &change(api::ChangeStatus::Published, None),
+        assert!(!can_commit(
+            &change(api::ChangeStatus::Committed, None),
             timeout
         ));
-        assert!(!can_publish(
+        assert!(!can_commit(
             &change(api::ChangeStatus::Rejected, None),
             timeout
         ));
@@ -1369,7 +1534,7 @@ mod tests {
     }
 
     #[test]
-    fn published_versions_apply_from_the_newest_one_already_running() {
+    fn committed_versions_apply_from_the_newest_one_already_running() {
         let version = |id: &str, previous: Option<&str>, content: Option<&str>| {
             (
                 id.to_string(),
@@ -1386,13 +1551,13 @@ mod tests {
             version("2", Some("t"), Some("u")),
         ];
         assert_eq!(
-            apply_published(Some("s\n"), &chain),
+            apply_committed(Some("s\n"), &chain),
             (Some("u"), vec!["1", "2"])
         );
-        assert_eq!(apply_published(Some("t"), &chain), (Some("u"), vec!["2"]));
-        assert_eq!(apply_published(Some("u"), &chain), (Some("u"), vec![]));
+        assert_eq!(apply_committed(Some("t"), &chain), (Some("u"), vec!["2"]));
+        assert_eq!(apply_committed(Some("u"), &chain), (Some("u"), vec![]));
         assert_eq!(
-            apply_published(Some("by hand"), &chain),
+            apply_committed(Some("by hand"), &chain),
             (Some("by hand"), vec![])
         );
 
@@ -1402,16 +1567,16 @@ mod tests {
             version("3", Some("s"), Some("t")),
             version("4", Some("t"), Some("s")),
         ];
-        assert_eq!(apply_published(Some("t"), &toggled), (Some("s"), vec!["4"]));
-        assert_eq!(apply_published(Some("s"), &toggled), (Some("s"), vec![]));
+        assert_eq!(apply_committed(Some("t"), &toggled), (Some("s"), vec!["4"]));
+        assert_eq!(apply_committed(Some("s"), &toggled), (Some("s"), vec![]));
 
         let lifecycle = [version("1", None, Some("a")), version("2", Some("a"), None)];
         assert_eq!(
-            apply_published(None, &lifecycle[..1]),
+            apply_committed(None, &lifecycle[..1]),
             (Some("a"), vec!["1"])
         );
-        assert_eq!(apply_published(Some("a"), &lifecycle), (None, vec!["2"]));
-        assert_eq!(apply_published(None, &lifecycle), (None, vec![]));
+        assert_eq!(apply_committed(Some("a"), &lifecycle), (None, vec!["2"]));
+        assert_eq!(apply_committed(None, &lifecycle), (None, vec![]));
     }
 
     #[test]
@@ -1419,7 +1584,7 @@ mod tests {
         let target = |name: &str, paths: &[&str]| crate::config::AuthoringTarget {
             name: name.to_string(),
             paths: paths.iter().map(|p| p.to_string()).collect(),
-            publish_flow: "system/publish_workspace".to_string(),
+            commit_flow: "system/commit_workspace".to_string(),
             approver_groups: Vec::new(),
             track_deployment: true,
         };
@@ -1439,8 +1604,8 @@ mod tests {
             Err(Error::MixedTargets { .. })
         ));
         assert!(matches!(
-            target_for(&authoring, ["flows/system/publish.yaml"]),
-            Err(Error::NoTarget { path }) if path == "flows/system/publish.yaml"
+            target_for(&authoring, ["flows/system/commit.yaml"]),
+            Err(Error::NoTarget { path }) if path == "flows/system/commit.yaml"
         ));
         assert!(matches!(target_for(&authoring, []), Err(Error::NoFiles)));
     }
@@ -1450,7 +1615,7 @@ mod tests {
         let target = |name: &str, paths: &[&str]| crate::config::AuthoringTarget {
             name: name.to_string(),
             paths: paths.iter().map(|p| p.to_string()).collect(),
-            publish_flow: "system/publish_workspace".to_string(),
+            commit_flow: "system/commit_workspace".to_string(),
             approver_groups: Vec::new(),
             track_deployment: true,
         };
@@ -1510,7 +1675,7 @@ mod tests {
                 targets: vec![crate::config::AuthoringTarget {
                     name: "user".to_string(),
                     paths: vec!["flows/user/".to_string()],
-                    publish_flow: "p".to_string(),
+                    commit_flow: "p".to_string(),
                     approver_groups: groups.iter().map(|g| g.to_string()).collect(),
                     track_deployment: true,
                 }],

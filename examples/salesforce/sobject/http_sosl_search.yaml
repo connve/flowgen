@@ -11,7 +11,6 @@ flow:
     description: "Accepts a search term over an HTTP webhook and runs a SOSL query across Account and Contact records via the REST API."
     tags: ["salesforce", "sosl", "search", "http", "example"]
   tasks:
-
     - http_endpoint:
         name: receive_request
         method: POST

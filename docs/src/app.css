@@ -1,14 +1,92 @@
 @import 'tailwindcss';
-@plugin 'daisyui';
-@import '$lib/theme.css';
+@plugin 'daisyui' {
+	themes: false;
+}
+@import '@connve/ui/theme.css';
 
-@theme {
-	--color-primary: #006b55;
+/* Prism palette shared with the flowgen web app, scoped to the theme. */
+[data-theme='connve-light'] {
+	--prism-comment: #8a8a8a;
+	--prism-punctuation: #556b60;
+	--prism-property: #006ba1;
+	--prism-number: #cf3450;
+	--prism-string: #006b55;
+	--prism-operator: #007cf3;
+	--prism-keyword: #7c3aed;
+	--prism-function: #007600;
+	--prism-variable: #ff9804;
+}
+[data-theme='connve-dark'] {
+	--prism-comment: #9ca3af;
+	--prism-punctuation: #d4e0d9;
+	--prism-property: #82d4ff;
+	--prism-number: #ffb0b8;
+	--prism-string: #7ce8b5;
+	--prism-operator: #d4e0d9;
+	--prism-keyword: #d59fff;
+	--prism-function: #ffe0a0;
+	--prism-variable: #ffb84d;
+}
+.token.comment,
+.token.prolog,
+.token.doctype,
+.token.cdata {
+	color: var(--prism-comment);
+	font-style: italic;
+}
+.token.punctuation {
+	color: var(--prism-punctuation);
+}
+.token.property,
+.token.tag,
+.token.constant,
+.token.symbol,
+.token.deleted {
+	color: var(--prism-property);
+}
+.token.boolean,
+.token.number {
+	color: var(--prism-number);
+}
+.token.selector,
+.token.attr-name,
+.token.string,
+.token.char,
+.token.builtin,
+.token.inserted {
+	color: var(--prism-string);
+}
+.token.operator,
+.token.entity,
+.token.url,
+.language-css .token.string,
+.style .token.string {
+	color: var(--prism-operator);
+}
+.token.key.atrule,
+.token.attr-value {
+	color: var(--prism-property);
+	font-weight: 600;
+}
+.token.atrule,
+.token.keyword {
+	color: var(--prism-keyword);
+	font-weight: 600;
+}
+.token.function,
+.token.class-name {
+	color: var(--prism-function);
+}
+.token.regex,
+.token.important,
+.token.variable {
+	color: var(--prism-variable);
 }
 
 /* Prose styling for markdown content. */
 .prose {
 	max-width: 75ch;
+	color: var(--color-base-content);
 }
 
 .prose h1 {
@@ -17,6 +95,7 @@
 	margin-top: 0;
 	margin-bottom: 1rem;
 	line-height: 1.2;
+	letter-spacing: -0.01em;
 }
 
 .prose h2 {
@@ -26,7 +105,7 @@
 	margin-bottom: 0.75rem;
 	line-height: 1.3;
 	padding-bottom: 0.5rem;
-	border-bottom: 1px solid oklch(90% 0 0);
+	border-bottom: 1px solid var(--color-base-200);
 }
 
 .prose h3 {
@@ -34,6 +113,10 @@
 	font-weight: 600;
 	margin-top: 2rem;
 	margin-bottom: 0.5rem;
+}
+
+.prose :is(h1, h2, h3, h4, h5, h6) {
+	scroll-margin-top: 5.5rem;
 }
 
 .prose p {
@@ -87,29 +170,48 @@
 }
 
 .prose code {
-	background-color: oklch(96% 0 0);
+	background-color: var(--color-base-200);
 	padding: 0.125rem 0.375rem;
 	border-radius: 0.25rem;
 	font-size: 0.875em;
 }
 
+/* The code scrolls inside the block, so the copy button stays in its corner. */
 .prose pre {
 	position: relative;
-	padding: 1rem 1.25rem;
-	border-radius: 0.5rem;
-	overflow-x: auto;
 	margin-top: 1rem;
 	margin-bottom: 1rem;
-	font-size: 0.875rem;
+	border-radius: var(--radius-box);
+	background-color: var(--color-base-200);
+	font-size: 0.8125rem;
 	line-height: 1.6;
 }
 
-.prose pre code {
+.prose pre > code {
+	display: block;
+	overflow-x: auto;
+	padding: 1rem 3rem 1rem 1.25rem;
 	background: none;
-	padding: 0;
 	border-radius: 0;
 	font-size: inherit;
 	color: inherit;
+}
+
+.code-copy {
+	position: absolute;
+	top: 0.5rem;
+	right: 0.5rem;
+}
+
+@media (hover: hover) {
+	.code-copy {
+		opacity: 0;
+		transition: opacity 0.15s;
+	}
+	.prose pre:hover .code-copy,
+	.code-copy:focus-within {
+		opacity: 1;
+	}
 }
 
 .prose table {
@@ -126,12 +228,13 @@
 	text-align: left;
 	font-weight: 600;
 	padding: 0.5rem 0.75rem;
-	border-bottom: 2px solid oklch(85% 0 0);
+	border-bottom: 1px solid var(--color-base-300);
+	color: color-mix(in oklab, var(--color-base-content) 70%, transparent);
 }
 
 .prose td {
 	padding: 0.5rem 0.75rem;
-	border-bottom: 1px solid oklch(92% 0 0);
+	border-bottom: 1px solid var(--color-base-200);
 }
 
 .prose blockquote {
@@ -139,31 +242,6 @@
 	padding-left: 1rem;
 	margin-top: 1rem;
 	margin-bottom: 1rem;
-	color: oklch(45% 0 0);
+	color: color-mix(in oklab, var(--color-base-content) 70%, transparent);
 	font-style: italic;
-}
-
-/* Copy button on code blocks. */
-.copy-btn {
-	position: absolute;
-	top: 0.5rem;
-	right: 0.5rem;
-	padding: 0.25rem 0.5rem;
-	font-size: 0.75rem;
-	color: oklch(70% 0 0);
-	background: oklch(30% 0 0);
-	border: 1px solid oklch(40% 0 0);
-	border-radius: 0.25rem;
-	cursor: pointer;
-	opacity: 0;
-	transition: opacity 0.15s;
-}
-
-pre:hover .copy-btn {
-	opacity: 1;
-}
-
-.copy-btn:hover {
-	color: oklch(90% 0 0);
-	background: oklch(35% 0 0);
 }

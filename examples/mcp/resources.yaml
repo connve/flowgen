@@ -19,7 +19,6 @@ flow:
     description: "Registers read-only MCP resources — inline, loader-backed, explicit-URI, and templated — that the server serves via resources/list, resources/templates/list, and resources/read."
     tags: ["mcp", "resources", "templating", "example"]
   tasks:
-
     # Inline concrete resource. URI auto-generated as
     # <resource_uri_scheme>://mcp_resources_examples/company_glossary.
     - mcp_resource:

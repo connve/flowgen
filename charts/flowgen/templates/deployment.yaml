@@ -61,28 +61,33 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: status.podIP
+        {{- $system := $worker.systemFlows }}
+        {{- if $system.enabled }}
+        - name: FLOWGEN_REPOSITORY
+          value: {{ $system.repository | quote }}
+        - name: FLOWGEN_WORKSPACE_PATH
+          value: {{ $system.workspacePath | quote }}
+        {{- with $system.releases }}
+        - name: FLOWGEN_RELEASES
+          value: {{ . | quote }}
+        {{- end }}
+        {{- if $system.gitCredentials.secretName }}
+        - name: FLOWGEN_GIT_CREDENTIALS
+          value: {{ printf "/etc/flowgen/system-flows/git/%s" $system.gitCredentials.key | quote }}
+        {{- end }}
+        {{- if $system.registryCredentials.secretName }}
+        - name: FLOWGEN_REGISTRY_CREDENTIALS
+          value: {{ printf "/etc/flowgen/system-flows/registry/%s" $system.registryCredentials.key | quote }}
+        {{- end }}
+        {{- end }}
         {{- with $worker.env }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
+        {{- $settings := include "flowgen.settings" . | fromYaml }}
         ports:
-        {{- if $worker.http_server }}
-        - name: http
-          containerPort: {{ $worker.http_server.port }}
-          protocol: TCP
-        {{- end }}
-        {{- if $worker.mcp_server }}
-        - name: mcp
-          containerPort: {{ $worker.mcp_server.port }}
-          protocol: TCP
-        {{- end }}
-        {{- if $worker.ai_gateway }}
-        - name: ai-gateway
-          containerPort: {{ $worker.ai_gateway.port }}
-          protocol: TCP
-        {{- end }}
-        {{- if $worker.web }}
-        - name: web
-          containerPort: {{ $worker.web.port }}
+        {{- range $key, $server := include "flowgen.servers" . | fromYaml }}
+        - name: {{ $server.name }}
+          containerPort: {{ $server.port }}
           protocol: TCP
         {{- end }}
         {{- if $worker.cluster }}
@@ -91,7 +96,7 @@ spec:
           protocol: TCP
         {{- end }}
         - name: health
-          containerPort: {{ default 8081 (dig "health" "port" nil $worker) }}
+          containerPort: {{ dig "health" "port" 8081 $settings }}
           protocol: TCP
         {{- $probes := dig "health" "probes" dict $worker }}
         startupProbe:
@@ -117,6 +122,16 @@ spec:
         # runs with readOnlyRootFilesystem: true.
         - name: tmp
           mountPath: /tmp
+        {{- if and $system.enabled $system.gitCredentials.secretName }}
+        - name: system-flows-git
+          mountPath: /etc/flowgen/system-flows/git
+          readOnly: true
+        {{- end }}
+        {{- if and $system.enabled $system.registryCredentials.secretName }}
+        - name: system-flows-registry
+          mountPath: /etc/flowgen/system-flows/registry
+          readOnly: true
+        {{- end }}
         {{- range $key, $volume := $worker.volumes }}
         {{- if and (hasKey $volume "enabled") $volume.enabled }}
         {{- if eq $key "flows" }}
@@ -197,6 +212,18 @@ spec:
       # working tree from a previous pod.
       - name: tmp
         emptyDir: {}
+      {{- if and $system.enabled $system.gitCredentials.secretName }}
+      - name: system-flows-git
+        secret:
+          secretName: {{ $system.gitCredentials.secretName }}
+          defaultMode: 0440
+      {{- end }}
+      {{- if and $system.enabled $system.registryCredentials.secretName }}
+      - name: system-flows-registry
+        secret:
+          secretName: {{ $system.registryCredentials.secretName }}
+          defaultMode: 0440
+      {{- end }}
       {{- range $key, $volume := $worker.volumes }}
       {{- if and (hasKey $volume "enabled") $volume.enabled }}
       {{- if $volume.secretName }}
@@ -219,6 +246,7 @@ spec:
       - name: {{ $key | kebabcase }}
         configMap:
           name: {{ printf "%s-flows" (include "flowgen.fullname" $root) }}
+          optional: true
       {{- end }}
       {{- else if eq $key "flowResources" }}
       {{- if and $worker.flowResources.existingConfigMaps (gt (len $worker.flowResources.existingConfigMaps) 0) }}
@@ -235,17 +263,12 @@ spec:
       - name: {{ $key | kebabcase }}
         configMap:
           name: {{ printf "%s-resources" (include "flowgen.fullname" $root) }}
+          optional: true
       {{- end }}
       {{- else if eq $key "config" }}
       - name: {{ $key | kebabcase }}
         configMap:
-          {{- if $worker.config.existingConfigMap }}
-          name: {{ $worker.config.existingConfigMap }}
-          {{- else if $worker.config.inline }}
-          name: {{ printf "%s-config" (include "flowgen.fullname" $root) }}
-          {{- else if $volume.configMapName }}
-          name: {{ $volume.configMapName }}
-          {{- end }}
+          name: {{ default (printf "%s-config" (include "flowgen.fullname" $root)) $worker.config.existingConfigMap }}
       {{- else if $volume.configMapName }}
       - name: {{ $key | kebabcase }}
         configMap:

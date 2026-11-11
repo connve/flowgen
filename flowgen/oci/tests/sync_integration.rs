@@ -1,12 +1,11 @@
-//! Integration test for `oci_sync` against a real OCI Distribution
+//! Integration tests for `oci_sync` against a real OCI Distribution
 //! registry running in a Docker container.
 //!
-//! Reproduces the production GHCR artifact shape that broke the
-//! bootstrap sync flows: an empty config layer plus N file layers,
-//! where each file layer carries the relative path in
-//! `org.opencontainers.image.title`. Confirms `oci_sync` emits one
-//! event per file layer, in order, with `completion_tx` attached to
-//! the final event so downstream buffers can detect end-of-batch.
+//! Every pull emits one snapshot event, `{digest, files}`: titled layers
+//! as authored in manifest order, untitled layers merged as a Docker
+//! overlay, tar entries unpacked and binary content base64-encoded. The
+//! manifest digest is remembered only once the flow completed the
+//! snapshot successfully; an unchanged artifact then emits nothing.
 //!
 //! Also round-trips an `oci_push` release: the pushed artifact (empty
 //! config, workspace artifact type, one tar+gzip layer) is read back by
@@ -20,292 +19,20 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::Engine;
+use flowgen_core::event::{
+    new_completion_channel, Event, EventBuilder, EventData, SharedCompletionTx,
+};
+use flowgen_core::task::context::TaskContext;
 use flowgen_oci::sync::{OciSync, ProcessorBuilder};
 use oci_client::client::{ClientConfig, ClientProtocol, Config, ImageLayer};
 use oci_client::secrets::RegistryAuth;
 use oci_client::{Client, Reference};
+use sha2::{Digest, Sha256};
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
-use testcontainers::GenericImage;
+use testcontainers::{GenericImage, ImageExt};
 use tokio::sync::mpsc;
-
-#[tokio::test]
-#[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
-async fn oci_sync_emits_one_event_per_file_layer_with_completion_on_last() {
-    let registry = GenericImage::new("registry", "2.8.3")
-        .with_exposed_port(5000.tcp())
-        .with_wait_for(WaitFor::message_on_stderr("listening on"))
-        .start()
-        .await
-        .expect("failed to start registry container");
-    let port = registry
-        .get_host_port_ipv4(5000)
-        .await
-        .expect("failed to read mapped host port");
-
-    let registry_host = format!("127.0.0.1:{port}");
-    let reference: Reference = format!("{registry_host}/flowgen/resources:latest")
-        .parse()
-        .expect("reference parse");
-
-    let soql_bytes = b"SELECT Id, Name FROM Account\n".to_vec();
-    let schema_bytes = br#"{ "fields": [] }"#.to_vec();
-
-    let push_client = Client::new(ClientConfig {
-        protocol: ClientProtocol::Http,
-        ..Default::default()
-    });
-
-    let layer_soql = ImageLayer::new(
-        soql_bytes.clone(),
-        "application/octet-stream".to_string(),
-        Some(annotation("salesforce/query_account.soql")),
-    );
-    let layer_schema = ImageLayer::new(
-        schema_bytes.clone(),
-        "application/octet-stream".to_string(),
-        Some(annotation("salesforce/account_schema.json")),
-    );
-    let config = Config::oci_v1(b"{}".to_vec(), None);
-
-    push_client
-        .push(
-            &reference,
-            &[layer_soql.clone(), layer_schema.clone()],
-            config,
-            &RegistryAuth::Anonymous,
-            None,
-        )
-        .await
-        .expect("push test artifact to registry");
-
-    let sync_config = Arc::new(OciSync {
-        name: "pull_repo".to_string(),
-        artifact: format!("{registry_host}/flowgen/resources:latest"),
-        ..Default::default()
-    });
-
-    let (trigger_tx, trigger_rx) = mpsc::channel(8);
-    let (downstream_tx, mut downstream_rx) = mpsc::channel(16);
-
-    let processor = ProcessorBuilder::new()
-        .config(sync_config)
-        .receiver(trigger_rx)
-        .sender(downstream_tx)
-        .task_id(1)
-        .task_type("oci_sync")
-        .task_context(test_task_context())
-        .build()
-        .await
-        .expect("build oci_sync processor");
-
-    let handle = tokio::spawn(async move {
-        use flowgen_core::task::runner::Runner;
-        let _ = processor.run().await;
-    });
-
-    let (completion_state, _completion_rx) = flowgen_core::event::new_completion_channel(1);
-    trigger_tx
-        .send(
-            flowgen_core::event::EventBuilder::new()
-                .data(flowgen_core::event::EventData::Json(
-                    serde_json::json!({"trigger": true}),
-                ))
-                .subject("tick".to_string())
-                .task_id(0)
-                .task_type("generate")
-                .completion_tx(completion_state)
-                .build()
-                .expect("build trigger event"),
-        )
-        .await
-        .expect("send trigger event");
-
-    let mut events = Vec::new();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while tokio::time::Instant::now() < deadline {
-        match tokio::time::timeout(Duration::from_millis(500), downstream_rx.recv()).await {
-            Ok(Some(event)) => events.push(event),
-            Ok(None) | Err(_) if !events.is_empty() => break,
-            _ => continue,
-        }
-    }
-
-    drop(trigger_tx);
-    let _ = handle.await;
-
-    assert_eq!(
-        events.len(),
-        2,
-        "expected one event per file layer, got {}: {:?}",
-        events.len(),
-        events
-            .iter()
-            .map(|e| e.data_as_json().ok())
-            .collect::<Vec<_>>()
-    );
-
-    let paths: Vec<String> = events
-        .iter()
-        .map(|e| {
-            e.data_as_json()
-                .unwrap()
-                .get("path")
-                .unwrap()
-                .as_str()
-                .unwrap()
-                .to_string()
-        })
-        .collect();
-    assert_eq!(
-        paths,
-        vec![
-            "salesforce/query_account.soql".to_string(),
-            "salesforce/account_schema.json".to_string(),
-        ],
-        "layer paths must round-trip through the title annotation"
-    );
-
-    for (i, event) in events.iter().enumerate() {
-        let is_last = i == events.len() - 1;
-        assert_eq!(
-            event.completion_tx.is_some(),
-            is_last,
-            "event {i} completion_tx presence does not match end-of-batch",
-        );
-    }
-}
-
-#[tokio::test]
-#[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
-async fn oci_sync_unpacks_tar_gzip_layer_into_per_file_events() {
-    let registry = GenericImage::new("registry", "2.8.3")
-        .with_exposed_port(5000.tcp())
-        .with_wait_for(WaitFor::message_on_stderr("listening on"))
-        .start()
-        .await
-        .expect("failed to start registry container");
-    let port = registry
-        .get_host_port_ipv4(5000)
-        .await
-        .expect("failed to read mapped host port");
-
-    let registry_host = format!("127.0.0.1:{port}");
-    let reference: Reference = format!("{registry_host}/flowgen/docker-image:latest")
-        .parse()
-        .expect("reference parse");
-
-    let tar_bytes = build_tar_bytes(&[
-        ("flow.yaml", b"name: docker-flow\n"),
-        ("processors/sms.yaml", b"kind: sms\n"),
-    ]);
-    let tar_gzip_bytes = gzip_bytes(&tar_bytes);
-
-    let push_client = Client::new(ClientConfig {
-        protocol: ClientProtocol::Http,
-        ..Default::default()
-    });
-
-    let layer = ImageLayer::new(
-        tar_gzip_bytes,
-        "application/vnd.oci.image.layer.v1.tar+gzip".to_string(),
-        None,
-    );
-    let config = Config::oci_v1(b"{}".to_vec(), None);
-
-    push_client
-        .push(&reference, &[layer], config, &RegistryAuth::Anonymous, None)
-        .await
-        .expect("push tar+gzip artifact to registry");
-
-    let sync_config = Arc::new(OciSync {
-        name: "pull_docker".to_string(),
-        artifact: format!("{registry_host}/flowgen/docker-image:latest"),
-        ..Default::default()
-    });
-
-    let (trigger_tx, trigger_rx) = mpsc::channel(8);
-    let (downstream_tx, mut downstream_rx) = mpsc::channel(16);
-
-    let processor = ProcessorBuilder::new()
-        .config(sync_config)
-        .receiver(trigger_rx)
-        .sender(downstream_tx)
-        .task_id(1)
-        .task_type("oci_sync")
-        .task_context(test_task_context())
-        .build()
-        .await
-        .expect("build oci_sync processor");
-
-    let handle = tokio::spawn(async move {
-        use flowgen_core::task::runner::Runner;
-        let _ = processor.run().await;
-    });
-
-    let (completion_state, _completion_rx) = flowgen_core::event::new_completion_channel(1);
-    trigger_tx
-        .send(
-            flowgen_core::event::EventBuilder::new()
-                .data(flowgen_core::event::EventData::Json(
-                    serde_json::json!({"trigger": true}),
-                ))
-                .subject("tick".to_string())
-                .task_id(0)
-                .task_type("generate")
-                .completion_tx(completion_state)
-                .build()
-                .expect("build trigger event"),
-        )
-        .await
-        .expect("send trigger event");
-
-    let mut events = Vec::new();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while tokio::time::Instant::now() < deadline {
-        match tokio::time::timeout(Duration::from_millis(500), downstream_rx.recv()).await {
-            Ok(Some(event)) => events.push(event),
-            Ok(None) | Err(_) if !events.is_empty() => break,
-            _ => continue,
-        }
-    }
-
-    drop(trigger_tx);
-    let _ = handle.await;
-
-    assert_eq!(
-        events.len(),
-        2,
-        "expected one event per file entry inside the tar+gzip layer, got {}",
-        events.len(),
-    );
-
-    let mut extracted: Vec<(String, String)> = events
-        .iter()
-        .map(|e| {
-            let data = e.data_as_json().unwrap();
-            (
-                data.get("path").unwrap().as_str().unwrap().to_string(),
-                data.get("content").unwrap().as_str().unwrap().to_string(),
-            )
-        })
-        .collect();
-    extracted.sort();
-    assert_eq!(
-        extracted,
-        vec![
-            ("flow.yaml".to_string(), "name: docker-flow\n".to_string(),),
-            ("processors/sms.yaml".to_string(), "kind: sms\n".to_string(),),
-        ],
-        "tar entry paths and contents must round-trip through the extractor",
-    );
-
-    let last = events.last().unwrap();
-    assert!(
-        last.completion_tx.is_some(),
-        "completion_tx must attach to the final file event, not the layer",
-    );
-}
 
 fn build_tar_bytes(files: &[(&str, &[u8])]) -> Vec<u8> {
     let mut builder = tar::Builder::new(Vec::new());
@@ -324,183 +51,6 @@ fn gzip_bytes(input: &[u8]) -> Vec<u8> {
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     std::io::Write::write_all(&mut encoder, input).unwrap();
     encoder.finish().unwrap()
-}
-
-fn annotation(path: &str) -> BTreeMap<String, String> {
-    let mut map = BTreeMap::new();
-    map.insert(
-        "org.opencontainers.image.title".to_string(),
-        path.to_string(),
-    );
-    map
-}
-
-fn test_task_context() -> Arc<flowgen_core::task::context::TaskContext> {
-    let task_manager = Arc::new(
-        flowgen_core::task::manager::TaskManagerBuilder::new()
-            .build()
-            .expect("build TaskManager"),
-    );
-    let cache = Arc::new(flowgen_core::cache::memory::MemoryCache::new())
-        as Arc<dyn flowgen_core::cache::Cache>;
-    Arc::new(
-        flowgen_core::task::context::TaskContextBuilder::new()
-            .flow_name("test_flow".to_string())
-            .task_manager(task_manager)
-            .cache(cache)
-            .build()
-            .expect("build TaskContext"),
-    )
-}
-
-/// Boots a fresh registry container and returns `(container, host)` so
-/// the container stays alive for the test's lifetime.
-async fn boot_registry() -> (testcontainers::ContainerAsync<GenericImage>, String) {
-    let registry = GenericImage::new("registry", "2.8.3")
-        .with_exposed_port(5000.tcp())
-        .with_wait_for(WaitFor::message_on_stderr("listening on"))
-        .start()
-        .await
-        .expect("failed to start registry container");
-    let port = registry
-        .get_host_port_ipv4(5000)
-        .await
-        .expect("failed to read mapped host port");
-    let host = format!("127.0.0.1:{port}");
-    (registry, host)
-}
-
-/// Pushes a single layer under `<host>/<repo>:latest` and returns the
-/// pushable reference. `media_type` picks between raw / tar / tar+gzip.
-async fn push_layer(host: &str, repo: &str, media_type: &str, bytes: Vec<u8>) -> String {
-    let reference: Reference = format!("{host}/{repo}:latest").parse().expect("reference");
-    let push_client = Client::new(ClientConfig {
-        protocol: ClientProtocol::Http,
-        ..Default::default()
-    });
-    let layer = ImageLayer::new(bytes, media_type.to_string(), None);
-    let config = Config::oci_v1(b"{}".to_vec(), None);
-    push_client
-        .push(&reference, &[layer], config, &RegistryAuth::Anonymous, None)
-        .await
-        .expect("push single-layer artifact to registry");
-    reference.to_string()
-}
-
-/// Runs `oci_sync` against `artifact` and returns whatever events the
-/// downstream channel receives before the sender drops or the deadline
-/// elapses. Fails the test if `oci_sync.run()` returns an error.
-async fn run_sync_and_collect(sync_config: Arc<OciSync>) -> Vec<flowgen_core::event::Event> {
-    let (trigger_tx, trigger_rx) = mpsc::channel(8);
-    let (downstream_tx, mut downstream_rx) = mpsc::channel(16);
-
-    let processor = ProcessorBuilder::new()
-        .config(sync_config)
-        .receiver(trigger_rx)
-        .sender(downstream_tx)
-        .task_id(1)
-        .task_type("oci_sync")
-        .task_context(test_task_context())
-        .build()
-        .await
-        .expect("build oci_sync processor");
-
-    let handle = tokio::spawn(async move {
-        use flowgen_core::task::runner::Runner;
-        processor.run().await.expect("oci_sync run must succeed");
-    });
-
-    let (completion_state, _completion_rx) = flowgen_core::event::new_completion_channel(1);
-    trigger_tx
-        .send(
-            flowgen_core::event::EventBuilder::new()
-                .data(flowgen_core::event::EventData::Json(
-                    serde_json::json!({"trigger": true}),
-                ))
-                .subject("tick".to_string())
-                .task_id(0)
-                .task_type("generate")
-                .completion_tx(completion_state)
-                .build()
-                .expect("build trigger event"),
-        )
-        .await
-        .expect("send trigger event");
-
-    let mut events = Vec::new();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while tokio::time::Instant::now() < deadline {
-        match tokio::time::timeout(Duration::from_millis(500), downstream_rx.recv()).await {
-            Ok(Some(event)) => events.push(event),
-            Ok(None) | Err(_) if !events.is_empty() => break,
-            _ => continue,
-        }
-    }
-
-    drop(trigger_tx);
-    let _ = handle.await;
-    events
-}
-
-/// Same as `run_sync_and_collect` but expects the trigger event to
-/// re-surface downstream with `event.error = Some(_)` after retries are
-/// exhausted. Returns the error string on the event. Panics if no error
-/// event lands within the deadline.
-async fn run_sync_expecting_error(sync_config: Arc<OciSync>) -> String {
-    // Use a small retry budget so a `permanent`-classified error surfaces
-    // fast even when the underlying processor's default retry count is
-    // large.
-    let (trigger_tx, trigger_rx) = mpsc::channel(8);
-    let (downstream_tx, mut downstream_rx) = mpsc::channel(16);
-
-    let processor = ProcessorBuilder::new()
-        .config(sync_config)
-        .receiver(trigger_rx)
-        .sender(downstream_tx)
-        .task_id(1)
-        .task_type("oci_sync")
-        .task_context(test_task_context())
-        .build()
-        .await
-        .expect("build oci_sync processor");
-
-    let handle = tokio::spawn(async move {
-        use flowgen_core::task::runner::Runner;
-        let _ = processor.run().await;
-    });
-
-    let (completion_state, _completion_rx) = flowgen_core::event::new_completion_channel(1);
-    trigger_tx
-        .send(
-            flowgen_core::event::EventBuilder::new()
-                .data(flowgen_core::event::EventData::Json(
-                    serde_json::json!({"trigger": true}),
-                ))
-                .subject("tick".to_string())
-                .task_id(0)
-                .task_type("generate")
-                .completion_tx(completion_state)
-                .build()
-                .expect("build trigger event"),
-        )
-        .await
-        .expect("send trigger event");
-
-    // Wait for the error event carrying the failure string.
-    let deadline = Duration::from_secs(15);
-    let error_event = tokio::time::timeout(deadline, downstream_rx.recv())
-        .await
-        .expect("error event never arrived within deadline")
-        .expect("downstream channel closed before error event");
-
-    let err = error_event
-        .error
-        .clone()
-        .expect("error event must carry an error field, got clean event");
-
-    drop(trigger_tx);
-    handle.abort();
-    err
 }
 
 /// Builds a tar archive from `(name, entry_type, content)` triples so
@@ -529,48 +79,425 @@ fn build_tar_with_types(entries: &[(&str, tar::EntryType, &[u8])]) -> Vec<u8> {
     builder.into_inner().unwrap()
 }
 
+fn title(path: &str) -> BTreeMap<String, String> {
+    BTreeMap::from([(
+        "org.opencontainers.image.title".to_string(),
+        path.to_string(),
+    )])
+}
+
+/// The digest of a blob holding `content`.
+fn blob_digest(content: &[u8]) -> String {
+    format!("sha256:{:x}", Sha256::digest(content))
+}
+
+fn test_task_context() -> Arc<TaskContext> {
+    let task_manager = Arc::new(
+        flowgen_core::task::manager::TaskManagerBuilder::new()
+            .build()
+            .expect("Build the TaskManager"),
+    );
+    let cache = Arc::new(flowgen_core::cache::memory::MemoryCache::new())
+        as Arc<dyn flowgen_core::cache::Cache>;
+    Arc::new(
+        flowgen_core::task::context::TaskContextBuilder::new()
+            .flow_name("test_flow".to_string())
+            .task_manager(task_manager)
+            .cache(cache)
+            .build()
+            .expect("Build the TaskContext"),
+    )
+}
+
+fn config(artifact: String) -> Arc<OciSync> {
+    Arc::new(OciSync {
+        name: "pull".to_string(),
+        artifact,
+        ..Default::default()
+    })
+}
+
+/// Boots a fresh registry container and returns `(container, host)` so
+/// the container stays alive for the test's lifetime. The host port is
+/// reserved on 127.0.0.1 first, since one Docker picks itself can already
+/// be held there by another process, and it is polled until it serves,
+/// which can lag the container's own listening log.
+async fn boot_registry() -> (testcontainers::ContainerAsync<GenericImage>, String) {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("Bind a free host port");
+    let port = listener
+        .local_addr()
+        .expect("Read the bound address")
+        .port();
+    drop(listener);
+    let registry = GenericImage::new("registry", "2.8.3")
+        .with_wait_for(WaitFor::message_on_stderr("listening on"))
+        .with_mapped_port(port, 5000.tcp())
+        .start()
+        .await
+        .expect("Start the registry container");
+    let host = format!("127.0.0.1:{port}");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while !matches!(
+        tokio::time::timeout(Duration::from_secs(1), serves(&host)).await,
+        Ok(true)
+    ) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "The registry serves on {host} within 30s"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    (registry, host)
+}
+
+/// Whether the registry on `host` answers `GET /v2/`.
+async fn serves(host: &str) -> bool {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    match tokio::net::TcpStream::connect(host).await {
+        Ok(mut stream) => {
+            let request = format!("GET /v2/ HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+            let mut status = [0u8; 12];
+            stream.write_all(request.as_bytes()).await.is_ok()
+                && stream.read_exact(&mut status).await.is_ok()
+                && &status == b"HTTP/1.1 200"
+        }
+        Err(_) => false,
+    }
+}
+
+fn push_client() -> Client {
+    Client::new(ClientConfig {
+        protocol: ClientProtocol::Http,
+        ..Default::default()
+    })
+}
+
+/// Pushes `layers` with an empty config under `<host>/<repo>:latest` and
+/// returns the reference.
+async fn push(host: &str, repo: &str, layers: &[ImageLayer]) -> String {
+    let reference: Reference = format!("{host}/{repo}:latest")
+        .parse()
+        .expect("Parse the reference");
+    push_client()
+        .push(
+            &reference,
+            layers,
+            Config::oci_v1(b"{}".to_vec(), None),
+            &RegistryAuth::Anonymous,
+            None,
+        )
+        .await
+        .expect("Push the artifact");
+    reference.to_string()
+}
+
+/// Pushes a single untitled layer; `media_type` picks raw, tar or tar+gzip.
+async fn push_layer(host: &str, repo: &str, media_type: &str, bytes: Vec<u8>) -> String {
+    push(
+        host,
+        repo,
+        &[ImageLayer::new(bytes, media_type.to_string(), None)],
+    )
+    .await
+}
+
+/// Pushes untitled tar+gzip layers, so `oci_sync` merges them as Docker
+/// image layers.
+async fn push_docker_layers(host: &str, repo: &str, layers: &[Vec<u8>]) -> String {
+    let layers: Vec<ImageLayer> = layers
+        .iter()
+        .map(|bytes| {
+            ImageLayer::new(
+                bytes.clone(),
+                "application/vnd.oci.image.layer.v1.tar+gzip".to_string(),
+                None,
+            )
+        })
+        .collect();
+    push(host, repo, &layers).await
+}
+
+/// The digest the registry reports for the manifest `artifact` points at.
+async fn manifest_digest(artifact: &str) -> String {
+    push_client()
+        .fetch_manifest_digest(
+            &artifact.parse().expect("Parse the reference"),
+            &RegistryAuth::Anonymous,
+        )
+        .await
+        .expect("Fetch the manifest digest")
+}
+
+fn trigger(completion: SharedCompletionTx) -> Event {
+    EventBuilder::new()
+        .data(EventData::Json(serde_json::json!({"trigger": true})))
+        .subject("tick".to_string())
+        .task_id(0)
+        .task_type("generate")
+        .completion_tx(completion)
+        .build()
+        .expect("Build the trigger event")
+}
+
+/// Sends one trigger carrying `completion` through `oci_sync` and returns
+/// every event it emits before it stops.
+async fn sync(
+    config: Arc<OciSync>,
+    task_context: Arc<TaskContext>,
+    completion: SharedCompletionTx,
+) -> Vec<Event> {
+    let (trigger_tx, trigger_rx) = mpsc::channel(1);
+    let (downstream_tx, mut downstream_rx) = mpsc::channel(16);
+
+    let processor = ProcessorBuilder::new()
+        .config(config)
+        .receiver(trigger_rx)
+        .sender(downstream_tx)
+        .task_id(1)
+        .task_type("oci_sync")
+        .task_context(task_context)
+        .build()
+        .await
+        .expect("Build the oci_sync processor");
+    let handle = tokio::spawn(async move {
+        use flowgen_core::task::runner::Runner;
+        processor.run().await
+    });
+
+    trigger_tx
+        .send(trigger(completion))
+        .await
+        .expect("Send the trigger event");
+    drop(trigger_tx);
+
+    let mut events = Vec::new();
+    while let Some(event) = tokio::time::timeout(Duration::from_secs(30), downstream_rx.recv())
+        .await
+        .expect("The sync stops within 30s")
+    {
+        events.push(event);
+    }
+    handle
+        .await
+        .expect("The sync does not panic")
+        .expect("The sync runs");
+    events
+}
+
+/// Completes `events` as a leaf would, failing them with `error` when
+/// given, and gives the digest save it triggers time to run.
+async fn complete(events: &[Event], error: Option<&str>) {
+    for completion in events
+        .iter()
+        .filter_map(|event| event.completion_tx.as_ref())
+    {
+        match error {
+            Some(error) => completion.signal_completion_with_error(error.to_string()),
+            None => completion.signal_completion(None),
+        }
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
+/// Runs one sync and completes its events as a succeeding leaf would.
+async fn run_once(config: Arc<OciSync>, task_context: Arc<TaskContext>) -> Vec<Event> {
+    let events = sync(config, task_context, new_completion_channel(1).0).await;
+    complete(&events, None).await;
+    events
+}
+
+/// Runs one failing sync and returns the error of the trigger it forwards
+/// once retries run out.
+async fn sync_error(config: Arc<OciSync>) -> String {
+    let events = sync(config, test_task_context(), new_completion_channel(1).0).await;
+    assert_eq!(
+        events.len(),
+        1,
+        "The failed trigger is forwarded once, got {}",
+        events.len()
+    );
+    events[0]
+        .error
+        .clone()
+        .expect("The forwarded trigger carries the error")
+}
+
+/// The data of the one snapshot in `events`.
+fn snapshot_of(events: &[Event]) -> serde_json::Value {
+    assert_eq!(
+        events.len(),
+        1,
+        "One snapshot per pull, got {}",
+        events.len()
+    );
+    events[0].data_as_json().expect("The snapshot is JSON")
+}
+
+fn files_of(snapshot: &serde_json::Value) -> &[serde_json::Value] {
+    snapshot["files"]
+        .as_array()
+        .expect("The snapshot lists files")
+}
+
+fn file_at<'a>(snapshot: &'a serde_json::Value, path: &str) -> &'a serde_json::Value {
+    files_of(snapshot)
+        .iter()
+        .find(|file| file["path"] == path)
+        .unwrap_or_else(|| panic!("The snapshot holds {path}"))
+}
+
+/// The content of each file of `snapshot` by path, all of them text.
+fn text_files_of(snapshot: &serde_json::Value) -> BTreeMap<&str, &str> {
+    files_of(snapshot)
+        .iter()
+        .map(|file| {
+            (
+                file["path"].as_str().expect("A file has a path"),
+                file["content"].as_str().expect("A text file has content"),
+            )
+        })
+        .collect()
+}
+
+fn decoded(file: &serde_json::Value) -> Vec<u8> {
+    let encoded = file["content_base64"]
+        .as_str()
+        .expect("A binary file has content_base64");
+    base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .expect("The content_base64 is standard base64")
+}
+
+/// The GHCR artifact shape: an empty config plus one layer per file, each
+/// titled with its path.
+#[tokio::test]
+#[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
+async fn oci_sync_emits_one_snapshot_of_titled_layers_with_the_trigger_completion() {
+    let (_registry, host) = boot_registry().await;
+    let layers = [
+        ImageLayer::new(
+            b"select 1\n".to_vec(),
+            "application/octet-stream".to_string(),
+            Some(title("queries/a.sql")),
+        ),
+        ImageLayer::new(
+            br#"{ "fields": [] }"#.to_vec(),
+            "application/octet-stream".to_string(),
+            Some(title("schemas/b.json")),
+        ),
+    ];
+    let artifact = push(&host, "flowgen/resources", &layers).await;
+
+    let (completion, mut completed) = new_completion_channel(1);
+    let events = sync(
+        config(artifact.clone()),
+        test_task_context(),
+        Arc::clone(&completion),
+    )
+    .await;
+    let snapshot = snapshot_of(&events);
+
+    assert_eq!(
+        snapshot["digest"],
+        manifest_digest(&artifact).await.as_str(),
+        "The snapshot carries the manifest digest"
+    );
+    let paths: Vec<&str> = files_of(&snapshot)
+        .iter()
+        .map(|file| file["path"].as_str().expect("A file has a path"))
+        .collect();
+    assert_eq!(
+        paths,
+        ["queries/a.sql", "schemas/b.json"],
+        "Layer titles become the paths, in manifest order"
+    );
+    assert_eq!(
+        text_files_of(&snapshot),
+        BTreeMap::from([
+            ("queries/a.sql", "select 1\n"),
+            ("schemas/b.json", r#"{ "fields": [] }"#),
+        ]),
+        "Each layer's bytes become its file's content"
+    );
+    for (file, layer) in files_of(&snapshot).iter().zip(&layers) {
+        assert_eq!(
+            file["digest"],
+            layer.sha256_digest().as_str(),
+            "Each file carries the digest of its layer"
+        );
+    }
+
+    assert!(
+        events[0]
+            .completion_tx
+            .as_ref()
+            .is_some_and(|tx| Arc::ptr_eq(tx, &completion)),
+        "The snapshot carries the trigger's completion"
+    );
+    assert!(
+        completed.try_recv().is_err(),
+        "The trigger is not completed before the snapshot is"
+    );
+    complete(&events, None).await;
+    assert!(
+        matches!(completed.try_recv(), Ok(Ok(None))),
+        "Completing the snapshot completes the trigger"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
+async fn oci_sync_unpacks_a_tar_gzip_layer_into_snapshot_files() {
+    let (_registry, host) = boot_registry().await;
+    let layer = gzip_bytes(&build_tar_bytes(&[
+        ("a.yaml", b"name: a\n"),
+        ("nested/b.yaml", b"name: b\n"),
+    ]));
+    let artifact = push_layer(
+        &host,
+        "flowgen/docker-image",
+        "application/vnd.oci.image.layer.v1.tar+gzip",
+        layer.clone(),
+    )
+    .await;
+
+    let snapshot = snapshot_of(&run_once(config(artifact), test_task_context()).await);
+
+    assert_eq!(
+        text_files_of(&snapshot),
+        BTreeMap::from([("a.yaml", "name: a\n"), ("nested/b.yaml", "name: b\n")]),
+        "Tar entry paths and contents round-trip through the extractor"
+    );
+    for file in files_of(&snapshot) {
+        assert_eq!(
+            file["digest"],
+            blob_digest(&layer).as_str(),
+            "Each tar entry carries the digest of its layer"
+        );
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
 async fn oci_sync_unpacks_uncompressed_tar_layer() {
     let (_registry, host) = boot_registry().await;
-    let tar_bytes = build_tar_bytes(&[
-        ("flows/a.yaml", b"name: a\n"),
-        ("flows/b.yaml", b"name: b\n"),
-    ]);
-
-    let reference = push_layer(
+    let artifact = push_layer(
         &host,
         "flowgen/plain-tar",
         "application/vnd.oci.image.layer.v1.tar",
-        tar_bytes,
+        build_tar_bytes(&[
+            ("flows/a.yaml", b"name: a\n"),
+            ("flows/b.yaml", b"name: b\n"),
+        ]),
     )
     .await;
 
-    let sync_config = Arc::new(OciSync {
-        name: "pull".to_string(),
-        artifact: reference,
-        ..Default::default()
-    });
-    let events = run_sync_and_collect(sync_config).await;
+    let snapshot = snapshot_of(&run_once(config(artifact), test_task_context()).await);
 
-    let mut extracted: Vec<(String, String)> = events
-        .iter()
-        .map(|e| {
-            let data = e.data_as_json().unwrap();
-            (
-                data.get("path").unwrap().as_str().unwrap().to_string(),
-                data.get("content").unwrap().as_str().unwrap().to_string(),
-            )
-        })
-        .collect();
-    extracted.sort();
     assert_eq!(
-        extracted,
-        vec![
-            ("flows/a.yaml".to_string(), "name: a\n".to_string()),
-            ("flows/b.yaml".to_string(), "name: b\n".to_string()),
-        ],
-        "uncompressed tar (no gzip) must unpack the same as tar+gzip",
+        text_files_of(&snapshot),
+        BTreeMap::from([("flows/a.yaml", "name: a\n"), ("flows/b.yaml", "name: b\n")]),
+        "An uncompressed tar unpacks the same as tar+gzip"
     );
 }
 
@@ -578,15 +505,11 @@ async fn oci_sync_unpacks_uncompressed_tar_layer() {
 #[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
 async fn oci_sync_skips_directory_symlink_hardlink_and_whiteout_entries() {
     let (_registry, host) = boot_registry().await;
-
-    // One archive that stresses every skip path documented in the 0.122
-    // changelog. Only the two Regular entries should surface downstream.
     let tar_bytes = build_tar_with_types(&[
         ("flows/", tar::EntryType::Directory, b""),
         ("flows/real.yaml", tar::EntryType::Regular, b"name: real\n"),
         ("flows/link.yaml", tar::EntryType::Symlink, b"real.yaml"),
         ("flows/hardlink.yaml", tar::EntryType::Link, b"real.yaml"),
-        // Docker whiteout marker for `flows/removed.yaml`; must be dropped.
         (
             "flows/.wh.removed.yaml",
             tar::EntryType::Regular,
@@ -598,43 +521,23 @@ async fn oci_sync_skips_directory_symlink_hardlink_and_whiteout_entries() {
             b"kind: x\n",
         ),
     ]);
-    let tar_gzip = gzip_bytes(&tar_bytes);
-
-    let reference = push_layer(
+    let artifact = push_layer(
         &host,
         "flowgen/skip-entries",
         "application/vnd.oci.image.layer.v1.tar+gzip",
-        tar_gzip,
+        gzip_bytes(&tar_bytes),
     )
     .await;
 
-    let sync_config = Arc::new(OciSync {
-        name: "pull".to_string(),
-        artifact: reference,
-        ..Default::default()
-    });
-    let events = run_sync_and_collect(sync_config).await;
+    let snapshot = snapshot_of(&run_once(config(artifact), test_task_context()).await);
 
-    let mut paths: Vec<String> = events
-        .iter()
-        .map(|e| {
-            e.data_as_json()
-                .unwrap()
-                .get("path")
-                .unwrap()
-                .as_str()
-                .unwrap()
-                .to_string()
-        })
-        .collect();
-    paths.sort();
     assert_eq!(
-        paths,
-        vec![
-            "flows/real.yaml".to_string(),
-            "processors/other.yaml".to_string()
-        ],
-        "directory, symlink, hardlink and .wh.* whiteouts must all be skipped",
+        text_files_of(&snapshot),
+        BTreeMap::from([
+            ("flows/real.yaml", "name: real\n"),
+            ("processors/other.yaml", "kind: x\n"),
+        ]),
+        "Directory, symlink, hardlink and .wh.* whiteout entries are skipped"
     );
 }
 
@@ -642,31 +545,26 @@ async fn oci_sync_skips_directory_symlink_hardlink_and_whiteout_entries() {
 #[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
 async fn oci_sync_rejects_layer_exceeding_max_file_size() {
     let (_registry, host) = boot_registry().await;
-
-    // Single file just over a 1 KiB cap — should trip `max_file_size`.
     let big_file = vec![b'a'; 2048];
-    let tar_bytes = build_tar_bytes(&[("large.yaml", &big_file)]);
-    let tar_gzip = gzip_bytes(&tar_bytes);
-
-    let reference = push_layer(
+    let artifact = push_layer(
         &host,
         "flowgen/too-big-file",
         "application/vnd.oci.image.layer.v1.tar+gzip",
-        tar_gzip,
+        gzip_bytes(&build_tar_bytes(&[("large.yaml", &big_file)])),
     )
     .await;
 
-    let sync_config = Arc::new(OciSync {
+    let err = sync_error(Arc::new(OciSync {
         name: "pull".to_string(),
-        artifact: reference,
+        artifact,
         max_file_size: 1024,
         max_total_size: 10 * 1024 * 1024,
         ..Default::default()
-    });
-    let err = run_sync_expecting_error(sync_config).await;
+    }))
+    .await;
     assert!(
         err.contains("max_file_size") || err.contains("FileTooLarge"),
-        "error must reference the per-file cap, got: {err}"
+        "The error names the per-file cap, got: {err}"
     );
 }
 
@@ -674,431 +572,246 @@ async fn oci_sync_rejects_layer_exceeding_max_file_size() {
 #[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
 async fn oci_sync_rejects_artifact_exceeding_max_total_size() {
     let (_registry, host) = boot_registry().await;
-
-    // Two files, each 800 bytes; per-file cap allows them individually
-    // but the cumulative total (1600 B) trips the 1 KiB total cap.
+    // Each file fits the per-file cap, together they exceed the total cap.
     let payload_a = vec![b'a'; 800];
     let payload_b = vec![b'b'; 800];
-    let tar_bytes = build_tar_bytes(&[("a.yaml", &payload_a), ("b.yaml", &payload_b)]);
-    let tar_gzip = gzip_bytes(&tar_bytes);
-
-    let reference = push_layer(
+    let artifact = push_layer(
         &host,
         "flowgen/too-big-total",
         "application/vnd.oci.image.layer.v1.tar+gzip",
-        tar_gzip,
+        gzip_bytes(&build_tar_bytes(&[
+            ("a.yaml", &payload_a),
+            ("b.yaml", &payload_b),
+        ])),
     )
     .await;
 
-    let sync_config = Arc::new(OciSync {
+    let err = sync_error(Arc::new(OciSync {
         name: "pull".to_string(),
-        artifact: reference,
+        artifact,
         max_file_size: 4096,
         max_total_size: 1024,
         ..Default::default()
-    });
-    let err = run_sync_expecting_error(sync_config).await;
+    }))
+    .await;
     assert!(
         err.contains("max_total_size") || err.contains("ArtifactTooLarge"),
-        "error must reference the cumulative cap, got: {err}"
+        "The error names the cumulative cap, got: {err}"
     );
 }
 
-/// Raw layer holding a non-UTF-8 blob (e.g. a WASM module, compiled
-/// artefact, image). Regression test for the pre-0.123 bug where any
-/// non-UTF-8 layer would fail the entire pull with `InvalidLayerEncoding`.
+/// A non-UTF-8 raw layer, such as a WASM module, is kept as base64 instead
+/// of failing the pull.
 #[tokio::test]
 #[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
-async fn oci_sync_emits_bytes_event_for_binary_raw_layer() {
+async fn oci_sync_base64_encodes_a_binary_raw_layer() {
     let (_registry, host) = boot_registry().await;
-
-    // Bytes that are guaranteed invalid UTF-8: a lone continuation byte
-    // followed by an unpaired surrogate high byte.
-    let binary_payload: Vec<u8> = vec![0x80, 0xFF, 0xC3, 0x28, 0xE2, 0x82, 0x28];
+    let binary: Vec<u8> = vec![0x80, 0xFF, 0xC3, 0x28, 0xE2, 0x82, 0x28];
     assert!(
-        std::str::from_utf8(&binary_payload).is_err(),
-        "payload must be invalid UTF-8 for this test to be meaningful",
+        std::str::from_utf8(&binary).is_err(),
+        "The payload is invalid UTF-8"
     );
-
-    let reference = push_layer(
+    let artifact = push_layer(
         &host,
         "flowgen/binary-raw",
         "application/octet-stream",
-        binary_payload.clone(),
+        binary.clone(),
     )
     .await;
 
-    let sync_config = Arc::new(OciSync {
-        name: "pull".to_string(),
-        artifact: reference,
-        ..Default::default()
-    });
+    let snapshot = snapshot_of(&run_once(config(artifact), test_task_context()).await);
 
-    let events = run_sync_and_collect(sync_config).await;
-    assert_eq!(events.len(), 1, "expected one event for the raw layer");
-
-    let event = &events[0];
-    match &event.data {
-        flowgen_core::event::EventData::Bytes(bytes) => {
-            assert_eq!(bytes.as_ref(), binary_payload.as_slice());
-        }
-        other => panic!("expected EventData::Bytes for binary layer, got {other:?}"),
-    }
-
-    let meta = event
-        .meta
-        .as_ref()
-        .expect("binary layer event must carry meta");
-    assert!(
-        meta.contains_key("path"),
-        "meta.path must be set for binary layer"
+    assert_eq!(files_of(&snapshot).len(), 1, "One file for the raw layer");
+    let raw = file_at(&snapshot, "layer-0");
+    assert!(raw.get("content").is_none(), "A binary file has no content");
+    assert_eq!(
+        decoded(raw),
+        binary,
+        "The content_base64 holds the layer bytes"
     );
-    assert!(
-        meta.contains_key("digest"),
-        "meta.digest must be set for binary layer"
-    );
-    assert!(
-        meta.contains_key("artifact_digest"),
-        "meta.artifact_digest must be set for binary layer",
+    assert_eq!(
+        raw["digest"],
+        blob_digest(&binary).as_str(),
+        "The file carries the digest of its layer"
     );
 }
 
-/// Tar layer whose entries include a non-UTF-8 payload. Text entries must
-/// still emit the historical JSON `FileEvent` shape; the binary entry must
-/// emit `EventData::Bytes` with path + digests in meta.
 #[tokio::test]
 #[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
-async fn oci_sync_emits_bytes_event_for_binary_tar_entry() {
+async fn oci_sync_keeps_text_and_base64_encodes_binary_tar_entries() {
     let (_registry, host) = boot_registry().await;
-
-    let text_payload = b"name: text-flow\n".to_vec();
-    let binary_payload: Vec<u8> = vec![0x80, 0xFF, 0xC3, 0x28];
+    let binary: Vec<u8> = vec![0x80, 0xFF, 0xC3, 0x28];
     assert!(
-        std::str::from_utf8(&binary_payload).is_err(),
-        "binary payload must be invalid UTF-8",
+        std::str::from_utf8(&binary).is_err(),
+        "The payload is invalid UTF-8"
     );
-
-    let tar_bytes = build_tar_bytes(&[
-        ("flows/text.yaml", &text_payload),
-        ("blobs/module.wasm", &binary_payload),
-    ]);
-    let tar_gzip = gzip_bytes(&tar_bytes);
-
-    let reference = push_layer(
+    let artifact = push_layer(
         &host,
         "flowgen/mixed-tar",
         "application/vnd.oci.image.layer.v1.tar+gzip",
-        tar_gzip,
+        gzip_bytes(&build_tar_bytes(&[
+            ("flows/text.yaml", b"name: text\n"),
+            ("blobs/module.wasm", &binary),
+        ])),
     )
     .await;
 
-    let sync_config = Arc::new(OciSync {
-        name: "pull".to_string(),
-        artifact: reference,
-        ..Default::default()
-    });
+    let snapshot = snapshot_of(&run_once(config(artifact), test_task_context()).await);
 
-    let events = run_sync_and_collect(sync_config).await;
-    assert_eq!(events.len(), 2, "expected one event per tar entry");
-
-    let mut saw_text = false;
-    let mut saw_binary = false;
-    for event in &events {
-        match &event.data {
-            flowgen_core::event::EventData::Json(_) => {
-                let data = event.data_as_json().expect("text event carries JSON data");
-                assert_eq!(
-                    data.get("path").and_then(|v| v.as_str()),
-                    Some("flows/text.yaml")
-                );
-                assert_eq!(
-                    data.get("content").and_then(|v| v.as_str()),
-                    Some("name: text-flow\n")
-                );
-                saw_text = true;
-            }
-            flowgen_core::event::EventData::Bytes(bytes) => {
-                assert_eq!(bytes.as_ref(), binary_payload.as_slice());
-                let meta = event.meta.as_ref().expect("binary event must carry meta");
-                assert_eq!(
-                    meta.get("path").and_then(|v| v.as_str()),
-                    Some("blobs/module.wasm"),
-                );
-                assert!(meta.contains_key("digest"));
-                assert!(meta.contains_key("artifact_digest"));
-                saw_binary = true;
-            }
-            other => panic!("unexpected event data variant: {other:?}"),
-        }
-    }
-    assert!(saw_text, "text tar entry must emit JSON FileEvent");
-    assert!(saw_binary, "binary tar entry must emit EventData::Bytes");
+    assert_eq!(files_of(&snapshot).len(), 2, "One file per tar entry");
+    let text = file_at(&snapshot, "flows/text.yaml");
+    assert_eq!(text["content"], "name: text\n", "A text file has content");
+    assert!(
+        text.get("content_base64").is_none(),
+        "A text file has no content_base64"
+    );
+    let wasm = file_at(&snapshot, "blobs/module.wasm");
+    assert!(
+        wasm.get("content").is_none(),
+        "A binary file has no content"
+    );
+    assert_eq!(
+        decoded(wasm),
+        binary,
+        "The content_base64 holds the entry bytes"
+    );
 }
 
-/// Pushes multiple tar+gzip layers under `<host>/<repo>:latest` without
-/// title annotations, so `oci_sync` classifies them as Docker image
-/// layers and runs the merge pass. Returns the pushable reference.
-async fn push_docker_layers(host: &str, repo: &str, layers: Vec<Vec<u8>>) -> String {
-    let reference: Reference = format!("{host}/{repo}:latest").parse().expect("reference");
-    let push_client = Client::new(ClientConfig {
-        protocol: ClientProtocol::Http,
-        ..Default::default()
-    });
-    let image_layers: Vec<ImageLayer> = layers
-        .into_iter()
-        .map(|bytes| {
-            ImageLayer::new(
-                bytes,
-                "application/vnd.oci.image.layer.v1.tar+gzip".to_string(),
-                None,
-            )
-        })
-        .collect();
-    let config = Config::oci_v1(b"{}".to_vec(), None);
-    push_client
-        .push(
-            &reference,
-            &image_layers,
-            config,
-            &RegistryAuth::Anonymous,
-            None,
-        )
-        .await
-        .expect("push docker-style multi-layer artifact");
-    reference.to_string()
-}
-
-/// Docker image layers must merge with overlay-fs semantics: later
-/// layers override earlier layers, `.wh.<name>` markers delete files,
-/// and `.wh..wh..opq` markers hide entire subtrees.
+/// Docker image layers merge with overlay semantics: later layers override
+/// earlier ones and `.wh.<name>` markers delete files.
 #[tokio::test]
 #[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
 async fn oci_sync_merges_docker_layers_with_whiteout_and_override() {
     let (_registry, host) = boot_registry().await;
-
-    // Layer 1: three files across two directories.
-    let layer1 = gzip_bytes(&build_tar_bytes(&[
+    let lower = gzip_bytes(&build_tar_bytes(&[
         ("flows/a.yaml", b"v1: a"),
         ("flows/b.yaml", b"v1: b"),
         ("configs/keep.yaml", b"v1: keep"),
     ]));
-    // Layer 2: override `a.yaml`, delete `b.yaml`, keep `keep.yaml`.
-    let layer2 = gzip_bytes(&build_tar_bytes(&[
+    let upper = gzip_bytes(&build_tar_bytes(&[
         ("flows/a.yaml", b"v2: a"),
         ("flows/.wh.b.yaml", b""),
     ]));
+    let artifact = push_docker_layers(
+        &host,
+        "flowgen/docker-merge",
+        &[lower.clone(), upper.clone()],
+    )
+    .await;
 
-    let reference = push_docker_layers(&host, "flowgen/docker-merge", vec![layer1, layer2]).await;
-
-    let sync_config = Arc::new(OciSync {
-        name: "pull".to_string(),
-        artifact: reference,
-        ..Default::default()
-    });
-
-    let events = run_sync_and_collect(sync_config).await;
-
-    let file_events: BTreeMap<String, String> = events
-        .iter()
-        .filter_map(|e| {
-            let data = e.data_as_json().ok()?;
-            let path = data.get("path")?.as_str()?.to_string();
-            let content = data.get("content")?.as_str()?.to_string();
-            Some((path, content))
-        })
-        .collect();
+    let snapshot = snapshot_of(&run_once(config(artifact), test_task_context()).await);
 
     assert_eq!(
-        file_events.len(),
-        2,
-        "expected merged output to contain exactly `flows/a.yaml` (v2) and `configs/keep.yaml`, got: {file_events:?}",
+        text_files_of(&snapshot),
+        BTreeMap::from([("configs/keep.yaml", "v1: keep"), ("flows/a.yaml", "v2: a")]),
+        "The upper layer overrides a.yaml, deletes b.yaml and keeps keep.yaml"
     );
     assert_eq!(
-        file_events.get("flows/a.yaml").map(String::as_str),
-        Some("v2: a"),
-        "upper layer must override lower layer content",
+        file_at(&snapshot, "flows/a.yaml")["digest"],
+        blob_digest(&upper).as_str(),
+        "An overridden file carries the digest of the upper layer"
     );
     assert_eq!(
-        file_events.get("configs/keep.yaml").map(String::as_str),
-        Some("v1: keep"),
-        "unmodified lower-layer file must survive the merge",
-    );
-    assert!(
-        !file_events.contains_key("flows/b.yaml"),
-        ".wh.b.yaml must delete flows/b.yaml from the merged output",
+        file_at(&snapshot, "configs/keep.yaml")["digest"],
+        blob_digest(&lower).as_str(),
+        "A kept file carries the digest of the lower layer"
     );
 }
 
-/// Opaque whiteout (`.wh..wh..opq`) hides every file in the parent
-/// directory from lower layers.
+/// An opaque whiteout (`.wh..wh..opq`) hides every file of its directory
+/// from lower layers.
 #[tokio::test]
 #[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
 async fn oci_sync_docker_opaque_whiteout_hides_lower_directory() {
     let (_registry, host) = boot_registry().await;
-
-    // Layer 1: two files under `secret/` plus one under `public/`.
-    let layer1 = gzip_bytes(&build_tar_bytes(&[
-        ("secret/one.yaml", b"one"),
-        ("secret/two.yaml", b"two"),
+    let lower = gzip_bytes(&build_tar_bytes(&[
+        ("hidden/one.yaml", b"one"),
+        ("hidden/two.yaml", b"two"),
         ("public/keep.yaml", b"keep"),
     ]));
-    // Layer 2: opaque whiteout on `secret/` + a fresh file in the
-    // same directory that must survive.
-    let layer2 = gzip_bytes(&build_tar_bytes(&[
-        ("secret/.wh..wh..opq", b""),
-        ("secret/fresh.yaml", b"fresh"),
+    let upper = gzip_bytes(&build_tar_bytes(&[
+        ("hidden/.wh..wh..opq", b""),
+        ("hidden/fresh.yaml", b"fresh"),
     ]));
+    let artifact = push_docker_layers(&host, "flowgen/docker-opaque", &[lower, upper]).await;
 
-    let reference = push_docker_layers(&host, "flowgen/docker-opaque", vec![layer1, layer2]).await;
+    let snapshot = snapshot_of(&run_once(config(artifact), test_task_context()).await);
 
-    let sync_config = Arc::new(OciSync {
-        name: "pull".to_string(),
-        artifact: reference,
-        ..Default::default()
-    });
-
-    let events = run_sync_and_collect(sync_config).await;
-    let file_events: BTreeMap<String, String> = events
-        .iter()
-        .filter_map(|e| {
-            let data = e.data_as_json().ok()?;
-            let path = data.get("path")?.as_str()?.to_string();
-            let content = data.get("content")?.as_str()?.to_string();
-            Some((path, content))
-        })
-        .collect();
-
-    assert!(
-        !file_events.contains_key("secret/one.yaml"),
-        "opaque whiteout must hide lower-layer file `secret/one.yaml`",
-    );
-    assert!(
-        !file_events.contains_key("secret/two.yaml"),
-        "opaque whiteout must hide lower-layer file `secret/two.yaml`",
-    );
     assert_eq!(
-        file_events.get("secret/fresh.yaml").map(String::as_str),
-        Some("fresh"),
-        "file added in the whiteout layer must survive",
-    );
-    assert_eq!(
-        file_events.get("public/keep.yaml").map(String::as_str),
-        Some("keep"),
-        "sibling directory must be untouched by opaque whiteout on `secret/`",
+        text_files_of(&snapshot),
+        BTreeMap::from([("hidden/fresh.yaml", "fresh"), ("public/keep.yaml", "keep")]),
+        "The opaque whiteout hides the lower hidden/ files, keeps the fresh one and the sibling directory"
     );
 }
 
-/// Shares one MemoryCache across two syncs so the second tick can hit
-/// the HEAD-check skip path. Returns downstream events from that run.
-async fn run_sync_with_shared_cache(
-    sync_config: Arc<OciSync>,
-    cache: Arc<dyn flowgen_core::cache::Cache>,
-) -> Vec<flowgen_core::event::Event> {
-    let task_manager = Arc::new(
-        flowgen_core::task::manager::TaskManagerBuilder::new()
-            .build()
-            .expect("build TaskManager"),
-    );
-    let task_context = Arc::new(
-        flowgen_core::task::context::TaskContextBuilder::new()
-            .flow_name("test_flow".to_string())
-            .task_manager(task_manager)
-            .cache(cache)
-            .build()
-            .expect("build TaskContext"),
-    );
-
-    let (trigger_tx, trigger_rx) = mpsc::channel(8);
-    let (downstream_tx, mut downstream_rx) = mpsc::channel(16);
-
-    let processor = ProcessorBuilder::new()
-        .config(sync_config)
-        .receiver(trigger_rx)
-        .sender(downstream_tx)
-        .task_id(1)
-        .task_type("oci_sync")
-        .task_context(task_context)
-        .build()
-        .await
-        .expect("build oci_sync processor");
-
-    let handle = tokio::spawn(async move {
-        use flowgen_core::task::runner::Runner;
-        processor.run().await.expect("oci_sync run must succeed");
-    });
-
-    let (completion_state, _completion_rx) = flowgen_core::event::new_completion_channel(1);
-    trigger_tx
-        .send(
-            flowgen_core::event::EventBuilder::new()
-                .data(flowgen_core::event::EventData::Json(
-                    serde_json::json!({"trigger": true}),
-                ))
-                .subject("tick".to_string())
-                .task_id(0)
-                .task_type("generate")
-                .completion_tx(completion_state)
-                .build()
-                .expect("build trigger event"),
-        )
-        .await
-        .expect("send trigger event");
-
-    let mut events = Vec::new();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while tokio::time::Instant::now() < deadline {
-        match tokio::time::timeout(Duration::from_millis(500), downstream_rx.recv()).await {
-            Ok(Some(event)) => events.push(event),
-            Ok(None) | Err(_) if !events.is_empty() => break,
-            _ => continue,
-        }
-    }
-
-    drop(trigger_tx);
-    let _ = handle.await;
-    events
-}
-
-/// Regression: the HEAD-check must actually short-circuit the second
-/// tick when the tag is unchanged. Before the fix the cache stored the
-/// per-platform manifest digest returned by `pull_manifest_and_config`,
-/// while HEAD returned the (differing) index digest for multi-arch
-/// tags — so the compare always missed and every tick re-pulled every
-/// layer. Now we cache whatever HEAD saw, so the compare hits.
+/// The digest cached is the one HEAD reports, so for a multi-arch tag it
+/// matches the index digest the next HEAD returns.
 #[tokio::test]
 #[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
 async fn oci_sync_second_tick_skips_when_manifest_unchanged() {
     let (_registry, host) = boot_registry().await;
-
-    let tar_gzip = gzip_bytes(&build_tar_bytes(&[("flows/one.yaml", b"content")]));
-    let reference = push_layer(
+    let artifact = push_layer(
         &host,
         "flowgen/skip-when-unchanged",
         "application/vnd.oci.image.layer.v1.tar+gzip",
-        tar_gzip,
+        gzip_bytes(&build_tar_bytes(&[("flows/one.yaml", b"content")])),
     )
     .await;
+    let config = config(artifact);
+    let ctx = test_task_context();
 
-    let sync_config = Arc::new(OciSync {
-        name: "pull".to_string(),
-        artifact: reference,
-        ..Default::default()
-    });
+    let first = run_once(Arc::clone(&config), Arc::clone(&ctx)).await;
+    snapshot_of(&first);
 
-    let cache: Arc<dyn flowgen_core::cache::Cache> =
-        Arc::new(flowgen_core::cache::memory::MemoryCache::new());
-
-    let first = run_sync_with_shared_cache(Arc::clone(&sync_config), Arc::clone(&cache)).await;
-    assert!(
-        !first.is_empty(),
-        "first tick must emit at least one file event"
-    );
-
-    let second = run_sync_with_shared_cache(sync_config, cache).await;
+    let second = run_once(config, ctx).await;
     assert!(
         second.is_empty(),
-        "second tick against an unchanged tag must emit zero events, got {}",
+        "The second tick against an unchanged tag emits nothing, got {}",
         second.len()
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
+async fn oci_sync_remembers_the_digest_only_once_the_flow_succeeded() {
+    let (_registry, host) = boot_registry().await;
+    let artifact = push_layer(
+        &host,
+        "flowgen/cursor",
+        "application/vnd.oci.image.layer.v1.tar+gzip",
+        gzip_bytes(&build_tar_bytes(&[("a.txt", b"a")])),
+    )
+    .await;
+    let config = config(artifact);
+    let ctx = test_task_context();
+
+    let failed = sync(
+        Arc::clone(&config),
+        Arc::clone(&ctx),
+        new_completion_channel(1).0,
+    )
+    .await;
+    snapshot_of(&failed);
+    complete(&failed, Some("boom")).await;
+
+    let retried = sync(
+        Arc::clone(&config),
+        Arc::clone(&ctx),
+        new_completion_channel(1).0,
+    )
+    .await;
+    assert_eq!(
+        retried.len(),
+        1,
+        "A failed flow leaves the digest unsaved, so the snapshot is emitted again"
+    );
+    complete(&retried, None).await;
+
+    let unchanged = sync(config, ctx, new_completion_channel(1).0).await;
+    assert!(
+        unchanged.is_empty(),
+        "A succeeded flow saves the digest, so the unchanged artifact emits nothing, got {}",
+        unchanged.len()
     );
 }
 
@@ -1111,7 +824,7 @@ async fn a_pushed_workspace_is_read_back_by_oci_sync_under_every_tag() {
     let push = Push {
         repository: format!("{host}/flowgen/workspace"),
         credentials_path: None,
-        annotations: std::collections::BTreeMap::from([(
+        annotations: BTreeMap::from([(
             "org.opencontainers.image.revision".to_string(),
             "abc123".to_string(),
         )]),
@@ -1130,20 +843,16 @@ async fn a_pushed_workspace_is_read_back_by_oci_sync_under_every_tag() {
     let pushed = push
         .push(files, &["abc123".to_string(), "latest".to_string()])
         .await
-        .expect("push workspace");
+        .expect("Push the workspace");
     assert!(pushed.digest.starts_with("sha256:"));
 
     let reference: Reference = format!("{host}/flowgen/workspace:latest")
         .parse()
-        .expect("reference");
-    let client = Client::new(ClientConfig {
-        protocol: ClientProtocol::Http,
-        ..Default::default()
-    });
-    let (manifest, digest) = client
+        .expect("Parse the reference");
+    let (manifest, digest) = push_client()
         .pull_image_manifest(&reference, &RegistryAuth::Anonymous)
         .await
-        .expect("pull pushed manifest");
+        .expect("Pull the pushed manifest");
     assert_eq!(digest, pushed.digest);
     assert_eq!(
         manifest.artifact_type.as_deref(),
@@ -1161,33 +870,30 @@ async fn a_pushed_workspace_is_read_back_by_oci_sync_under_every_tag() {
             .map(String::as_str),
         Some("abc123")
     );
+    assert_eq!(manifest.layers.len(), 1, "The workspace is one layer");
 
     for tag in ["abc123", "latest"] {
-        let events = run_sync_and_collect(Arc::new(OciSync {
-            name: "pull".to_string(),
-            artifact: format!("{host}/flowgen/workspace:{tag}"),
-            ..Default::default()
-        }))
+        let events = run_once(
+            config(format!("{host}/flowgen/workspace:{tag}")),
+            test_task_context(),
+        )
         .await;
-        let mut extracted: Vec<(String, String)> = events
-            .iter()
-            .map(|e| {
-                let data = e.data_as_json().unwrap();
-                assert_eq!(data["artifact_digest"], pushed.digest.as_str(), "tag {tag}");
-                (
-                    data["path"].as_str().unwrap().to_string(),
-                    data["content"].as_str().unwrap().to_string(),
-                )
-            })
-            .collect();
-        extracted.sort();
+        let snapshot = snapshot_of(&events);
+        assert_eq!(snapshot["digest"], pushed.digest.as_str(), "Tag {tag}");
         assert_eq!(
-            extracted,
-            vec![
-                ("flows/a.yaml".to_string(), "name: a\n".to_string()),
-                ("resources/scripts/s.rhai".to_string(), "event".to_string()),
-            ],
-            "tag {tag}"
+            text_files_of(&snapshot),
+            BTreeMap::from([
+                ("flows/a.yaml", "name: a\n"),
+                ("resources/scripts/s.rhai", "event"),
+            ]),
+            "Tag {tag}"
         );
+        for file in files_of(&snapshot) {
+            assert_eq!(
+                file["digest"],
+                manifest.layers[0].digest.as_str(),
+                "Tag {tag}: each file carries the digest of the workspace layer"
+            );
+        }
     }
 }

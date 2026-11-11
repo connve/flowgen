@@ -15,7 +15,6 @@ flow:
     description: "Receives shipped orders over an HTTP webhook and triggers a Braze campaign for each customer, passing the order and tracking link as trigger properties."
     tags: ["braze", "messaging", "webhook", "example"]
   tasks:
-
     # POST /api/flowgen/workers/v1/braze/shipments
     - http_endpoint:
         name: receive_shipments

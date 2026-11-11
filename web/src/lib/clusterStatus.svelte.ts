@@ -1,4 +1,4 @@
-import { apiUrl, errorMessage, failure, type ClusterStatus } from '$lib/api';
+import { errorMessage, getClusterStatus, type ClusterStatus } from '$lib/api';
 import { m } from '$lib/paraglide/messages.js';
 
 const POLL_MS = 15_000;
@@ -16,9 +16,7 @@ export function unreachableCount(status: ClusterStatus): number {
 export function pollClusterStatus(): () => void {
 	const load = async () => {
 		try {
-			const res = await fetch(apiUrl('api/cluster'));
-			if (!res.ok) throw await failure(res);
-			cluster.status = await res.json();
+			cluster.status = (await getClusterStatus()).data;
 			cluster.error = null;
 		} catch (err) {
 			cluster.status = null;

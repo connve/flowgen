@@ -1,16 +1,13 @@
 <script lang="ts">
 	import { base } from '$app/paths';
-	import CopyButton from '$lib/CopyButton.svelte';
-	import IconButton from '$lib/IconButton.svelte';
-	import Inspector from '$lib/Inspector.svelte';
+	import { CopyButton, IconButton, Inspector, Loading, StateMessage } from '@connve/ui';
 	import ResourceViewer from '$lib/ResourceViewer.svelte';
-	import StateMessage from '$lib/StateMessage.svelte';
 	import ActivityDetails, {
 		activityJson,
 		activitySummary,
 		type Activity
 	} from '$lib/flow/ActivityDetails.svelte';
-	import { apiUrl, encodePath, errorMessage, failure } from '$lib/api';
+	import { encodePath, errorMessage, getResource, type ResourceContent } from '$lib/api';
 	import { m } from '$lib/paraglide/messages.js';
 
 	interface Props {
@@ -22,13 +19,7 @@
 
 	let { resource = $bindable(null), activity = $bindable(null) }: Props = $props();
 
-	interface ResourcePreview {
-		key: string;
-		extension: string | null;
-		content: string;
-	}
-
-	let content = $state<ResourcePreview | null>(null);
+	let content = $state<ResourceContent | null>(null);
 	let loading = $state(false);
 	let error = $state<string | null>(null);
 
@@ -39,13 +30,9 @@
 		if (key === null) return;
 		let current = true;
 		loading = true;
-		fetch(apiUrl(`api/resources/${encodePath(key)}`))
-			.then(async (response) => {
-				if (!response.ok) throw await failure(response);
-				return response.json();
-			})
-			.then((found: ResourcePreview) => {
-				if (current) content = found;
+		getResource({ path: { key } })
+			.then(({ data }) => {
+				if (current) content = data;
 			})
 			.catch((err) => {
 				if (current) error = errorMessage(err, m.flow_resource_load_failed({ key }));
@@ -100,9 +87,7 @@
 		{/snippet}
 		{#if resource}
 			{#if loading}
-				<div class="flex justify-center py-12">
-					<span class="loading loading-spinner loading-md text-primary"></span>
-				</div>
+				<Loading size="md" />
 			{:else if error}
 				<StateMessage tone="oops" title={m.flow_resource_load_failed_title()} message={error} />
 			{:else if content}

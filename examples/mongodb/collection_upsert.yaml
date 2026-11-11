@@ -9,7 +9,6 @@ flow:
     description: "Upserts customers in MongoDB by applying incoming events as update documents, then publishes the resulting document as a NATS event."
     tags: ["mongo", "upsert", "example"]
   tasks:
-
     - nats_jetstream_subscribe:
         name: consume_events
         credentials_path: /etc/nats/credentials.json

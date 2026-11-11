@@ -91,6 +91,23 @@ impl InprocRegistry {
         self.table.contains_key(flow)
     }
 
+    /// The flows callable here directly inside `folder`, such as
+    /// `system/hubs/connve` for `system/hubs`, in name order.
+    pub fn flows_within(&self, folder: &str) -> Vec<String> {
+        let prefix = format!("{}/", folder.trim_end_matches('/'));
+        let mut flows: Vec<String> = self
+            .table
+            .iter()
+            .map(|entry| entry.key().clone())
+            .filter(|flow| match flow.strip_prefix(&prefix) {
+                Some(name) => !name.is_empty() && !name.contains('/'),
+                None => false,
+            })
+            .collect();
+        flows.sort();
+        flows
+    }
+
     /// How long a call to `flow` may take; `None` when `flow` is not
     /// registered here or its calls are unbounded.
     pub fn ack_timeout(&self, flow: &str) -> Option<Duration> {
@@ -195,6 +212,31 @@ mod tests {
             callers: default_callers("a/b"),
             cancellation_token: tokio_util::sync::CancellationToken::new(),
         }
+    }
+
+    #[test]
+    fn flows_are_listed_only_directly_inside_a_folder() {
+        let registry = InprocRegistry::new();
+        for flow in [
+            "system/hubs/b",
+            "system/hubs/a",
+            "system/hubs/a/c",
+            "system/hubsx/d",
+            "system/commit",
+        ] {
+            let (tx, _rx) = mpsc::channel(1);
+            registry.register(flow.to_string(), registration(tx, None));
+        }
+
+        assert_eq!(
+            registry.flows_within("system/hubs"),
+            vec!["system/hubs/a", "system/hubs/b"]
+        );
+        assert_eq!(
+            registry.flows_within("system/hubs/"),
+            registry.flows_within("system/hubs")
+        );
+        assert!(registry.flows_within("other").is_empty());
     }
 
     #[tokio::test]

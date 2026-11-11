@@ -14,7 +14,7 @@ use tokio::sync::mpsc::{Receiver, Sender};
 pub struct Request {
     /// The unique name of the task.
     pub name: String,
-    /// Identity of the flow to call, e.g. `system/publish_workspace`.
+    /// Identity of the flow to call, e.g. `system/commit_workspace`.
     pub flow: String,
     /// Optional list of upstream task names this task depends on.
     #[serde(default)]

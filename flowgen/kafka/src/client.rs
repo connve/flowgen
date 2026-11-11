@@ -75,12 +75,8 @@ pub struct SslCredentials {
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Error reading credentials file '{path}': {source}")]
-    ReadCredentials {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
+    #[error(transparent)]
+    ReadCredentials(flowgen_core::credentials::Error),
     #[error("Error parsing credentials file: {source}")]
     ParseCredentials {
         #[source]
@@ -164,11 +160,11 @@ impl SecurityProtocol {
     }
 }
 
-fn read_credentials(path: &PathBuf) -> Result<Credentials, Error> {
-    let raw = std::fs::read_to_string(path).map_err(|source| Error::ReadCredentials {
-        path: path.clone(),
-        source,
-    })?;
+/// The credentials at `path`, read on a blocking thread, as the keychain and the file system block.
+async fn read_credentials(path: &std::path::Path) -> Result<Credentials, Error> {
+    let raw = flowgen_core::credentials::read_async(path)
+        .await
+        .map_err(Error::ReadCredentials)?;
     serde_json::from_str(&raw).map_err(|source| Error::ParseCredentials { source })
 }
 
@@ -315,7 +311,7 @@ fn with_default_port(broker: &str) -> String {
 /// Builds a client builder from a broker list and an optional credentials path.
 ///
 /// `timeout` bounds connecting, each request, and the backoff between retries.
-pub fn client_builder(
+pub async fn client_builder(
     credentials_path: &Option<PathBuf>,
     brokers: &str,
     timeout: Duration,
@@ -338,7 +334,7 @@ pub fn client_builder(
     let Some(path) = credentials_path else {
         return Ok(builder);
     };
-    let credentials = read_credentials(path)?;
+    let credentials = read_credentials(path).await?;
     let protocol_name = credentials
         .security_protocol()
         .ok_or(Error::NoCredentials)?;
@@ -383,7 +379,8 @@ impl flowgen_core::client::Client for Client {
             Some(brokers) => brokers.clone(),
             None => DEFAULT_KAFKA_BROKERS.to_string(),
         };
-        let client = client_builder(&self.credentials_path, &brokers, self.timeout)?
+        let client = client_builder(&self.credentials_path, &brokers, self.timeout)
+            .await?
             .build()
             .await
             .map_err(|source| Error::Connect {
@@ -528,20 +525,20 @@ mod tests {
         assert_eq!(clamp_timeout(max), max);
     }
 
-    #[test]
-    fn test_empty_credentials_are_rejected() {
+    #[tokio::test]
+    async fn test_empty_credentials_are_rejected() {
         let (_dir, path) = credentials_file("{}");
 
-        let result = client_builder(&path, "localhost:9092", Duration::from_secs(1));
+        let result = client_builder(&path, "localhost:9092", Duration::from_secs(1)).await;
 
         assert!(matches!(result, Err(Error::NoCredentials)));
     }
 
-    #[test]
-    fn test_sasl_protocol_without_sasl_block_is_rejected() {
+    #[tokio::test]
+    async fn test_sasl_protocol_without_sasl_block_is_rejected() {
         let (_dir, path) = credentials_file(r#"{ "security_protocol": "SASL_PLAINTEXT" }"#);
 
-        let result = client_builder(&path, "localhost:9092", Duration::from_secs(1));
+        let result = client_builder(&path, "localhost:9092", Duration::from_secs(1)).await;
 
         assert!(matches!(result, Err(Error::MissingSaslCredentials { .. })));
     }

@@ -28,7 +28,6 @@ flow:
     description: "Exposes an OpenAI-compatible chat completions endpoint that routes the client model to a downstream provider and streams the completion back as SSE."
     tags: ["ai-gateway", "openai", "llm-proxy", "streaming", "example"]
   tasks:
-
     - llm_proxy:
         name: flowgen_openai
         models: [glm-4.6, kimi-k2.7-code]

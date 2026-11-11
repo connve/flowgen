@@ -1,74 +1,22 @@
 {{- $worker := index .Values "flowgen" -}}
 {{- if $worker.enabled }}
-{{- if $worker.http_server }}
-apiVersion: v1
-kind: Service
-metadata:
-  name: {{ include "flowgen.fullname" . }}-http-server
-  labels:
-    {{- include "flowgen.labels" . | nindent 4 }}
-spec:
-  type: {{ $worker.http_server.type }}
-  selector:
-    {{- include "flowgen.selectorLabels" . | nindent 4 }}
-  ports:
-  - port: {{ $worker.http_server.port }}
-    targetPort: http
-    protocol: TCP
-    name: http
-{{- end }}
-{{- if $worker.mcp_server }}
+{{- $root := . -}}
+{{- range $key, $server := include "flowgen.servers" . | fromYaml }}
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "flowgen.fullname" . }}-mcp-server
+  name: {{ include "flowgen.fullname" $root }}-{{ $key | replace "_" "-" }}
   labels:
-    {{- include "flowgen.labels" . | nindent 4 }}
+    {{- include "flowgen.labels" $root | nindent 4 }}
 spec:
-  type: {{ $worker.mcp_server.type }}
+  type: {{ $server.type }}
   selector:
-    {{- include "flowgen.selectorLabels" . | nindent 4 }}
+    {{- include "flowgen.selectorLabels" $root | nindent 4 }}
   ports:
-  - port: {{ $worker.mcp_server.port }}
-    targetPort: mcp
+  - port: {{ $server.port }}
+    targetPort: {{ $server.name }}
     protocol: TCP
-    name: mcp
-{{- end }}
-{{- if $worker.ai_gateway }}
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: {{ include "flowgen.fullname" . }}-ai-gateway
-  labels:
-    {{- include "flowgen.labels" . | nindent 4 }}
-spec:
-  type: {{ $worker.ai_gateway.type }}
-  selector:
-    {{- include "flowgen.selectorLabels" . | nindent 4 }}
-  ports:
-  - port: {{ $worker.ai_gateway.port }}
-    targetPort: ai-gateway
-    protocol: TCP
-    name: ai-gateway
-{{- end }}
-{{- if $worker.web }}
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: {{ include "flowgen.fullname" . }}-web
-  labels:
-    {{- include "flowgen.labels" . | nindent 4 }}
-spec:
-  type: {{ $worker.web.type }}
-  selector:
-    {{- include "flowgen.selectorLabels" . | nindent 4 }}
-  ports:
-  - port: {{ $worker.web.port }}
-    targetPort: web
-    protocol: TCP
-    name: web
+    name: {{ $server.name }}
 {{- end }}
 {{- end }}

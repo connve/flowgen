@@ -12,7 +12,6 @@ flow:
     description: "Exposes a SOSL search across Account and Contact records as an MCP tool callable by LLM agents."
     tags: ["salesforce", "sosl", "mcp", "tool", "example"]
   tasks:
-
     - mcp_tool:
         name: salesforce_search
         description: "Search Salesforce records across Account and Contact objects using a search term."

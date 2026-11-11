@@ -13,7 +13,6 @@ flow:
     tags: ["bigquery", "gcp", "upsert", "nats", "example"]
   require_leader_election: true
   tasks:
-
     # One batch at a time; `delay` throttles between batches.
     - nats_jetstream_subscribe:
         name: consume_batch

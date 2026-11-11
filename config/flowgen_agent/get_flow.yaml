@@ -1,0 +1,22 @@
+# Flowgen Agent tool: reads one deployed flow's YAML.
+flow:
+  labels:
+    display_name: "Get Flow"
+    description: "Returns a deployed flow's YAML and task summary for Flowgen Agent."
+    tags: ["mcp", "agent", "flowgen"]
+  tasks:
+    - mcp_tool:
+        name: get_flow
+        description: "Get a deployed flow by identity (its path in flows/ without the extension)."
+        input_schema:
+          type: object
+          properties:
+            identity:
+              type: string
+              description: "Flow identity, e.g. orders/sync."
+          required: [identity]
+
+    - http_request:
+        name: fetch
+        endpoint: "{{env.FLOWGEN_URL}}/api/flows/{{event.data.identity}}"
+        method: GET

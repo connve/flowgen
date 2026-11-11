@@ -93,9 +93,7 @@ pub struct Completion {
     /// Example: "http://localhost:11434/v1" for Ollama, "http://localhost:1234/v1" for LM Studio.
     pub endpoint: Option<String>,
     /// Optional HTTP headers sent with every request (`provider: custom` /
-    /// Ollama only), same shape as `http_endpoint.headers`. Used, for
-    /// example, to send `X-Flowgen-Client` when the downstream endpoint is
-    /// another flowgen `llm_proxy` scoped by `headers`.
+    /// Ollama only), same shape as `http_endpoint.headers`.
     #[serde(default)]
     pub headers: Option<std::collections::HashMap<String, String>>,
     /// Optional system prompt to set context for the AI (supports resource loading).
@@ -315,16 +313,14 @@ struct ReasoningEffortParams {
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct McpServerConfig {
-    /// MCP server endpoint URL (e.g., "http://localhost:3001/mcp").
+    /// MCP server endpoint URL (e.g., "http://localhost:3001/mcp"); supports `{{env.VAR_NAME}}` templates.
     pub url: String,
     /// Optional path to credentials file for authenticating with the MCP server.
     /// Uses the same format as http_request credentials (JSON file with
     /// `bearer_auth` and/or `basic_auth` fields).
     pub credentials_path: Option<std::path::PathBuf>,
     /// Optional HTTP headers sent with every request to this MCP server,
-    /// same shape as `http_endpoint.headers`. Used, for example, to send
-    /// `X-Flowgen-Client` so the server can scope which tools this agent
-    /// can see and call via the tool's `headers` field.
+    /// same shape as `http_endpoint.headers`.
     pub headers: Option<std::collections::HashMap<String, String>>,
     /// Calls this server with the signed-in user's token as the bearer, so it
     /// must trust the same identity provider.
@@ -397,6 +393,8 @@ impl ManagedToolSink for AllowedTools {
 }
 
 impl ConfigExt for Completion {}
+
+impl ConfigExt for McpServerConfig {}
 
 /// AI provider options.
 ///
@@ -500,18 +498,8 @@ pub enum Error {
     },
     #[error("Missing credentials path for provider: {provider}")]
     MissingCredentialsPath { provider: String },
-    #[error("Failed to read credentials file at {path:?}: {source}")]
-    ReadCredentials {
-        path: std::path::PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("Failed to parse credentials file at {path:?}: {source}")]
-    ParseCredentials {
-        path: std::path::PathBuf,
-        #[source]
-        source: serde_json::Error,
-    },
+    #[error(transparent)]
+    Credentials(flowgen_core::credentials::Error),
     #[error("Rig client error: {}", _0)]
     RigClient(String),
     #[error("Completion generation failed: {message}")]
@@ -1187,19 +1175,11 @@ async fn build_agent_client(
         .map_err(|source| Error::AgentClient { source })
 }
 
-/// Loads credentials from a JSON file.
+/// Loads credentials from a JSON file, or its keychain entry.
 async fn load_credentials(path: &std::path::Path) -> Result<Credentials, Error> {
-    let content = tokio::fs::read_to_string(path)
+    flowgen_core::credentials::load_credentials(path)
         .await
-        .map_err(|e| Error::ReadCredentials {
-            path: path.to_path_buf(),
-            source: e,
-        })?;
-
-    serde_json::from_str::<Credentials>(&content).map_err(|e| Error::ParseCredentials {
-        path: path.to_path_buf(),
-        source: e,
-    })
+        .map_err(Error::Credentials)
 }
 
 /// Handles individual completion operations.
@@ -2205,13 +2185,22 @@ impl flowgen_core::task::runner::Runner for Processor {
     /// connections open on their first request.
     async fn init(&self) -> Result<Self::EventHandler, Self::Error> {
         validate_mcp_servers(&self.config)?;
-        let toolset = match user_mcp_server(&self.config) {
+        let mut config = (*self.config).clone();
+        config.mcp_servers = self
+            .config
+            .mcp_servers
+            .iter()
+            .map(|server| server.render(&std::collections::HashMap::<String, String>::new()))
+            .collect::<Result<_, _>>()
+            .map_err(|source| Error::ConfigRender { source })?;
+        let config = Arc::new(config);
+        let toolset = match user_mcp_server(&config) {
             Some(_) => None,
-            None => Some(Arc::new(Toolset::connect(&self.config, None).await?)),
+            None => Some(Arc::new(Toolset::connect(&config, None).await?)),
         };
 
         Ok(EventHandler {
-            config: Arc::clone(&self.config),
+            config,
             task_id: self.task_id,
             tx: self.tx.clone(),
             task_type: self.task_type,

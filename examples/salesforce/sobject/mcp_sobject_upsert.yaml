@@ -12,7 +12,6 @@ flow:
     description: "Exposes a Salesforce record upsert by external ID as an MCP tool callable by LLM agents."
     tags: ["salesforce", "upsert", "mcp", "tool", "example"]
   tasks:
-
     - mcp_tool:
         name: salesforce_upsert
         description: "Create or update a Salesforce record by external ID."

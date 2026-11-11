@@ -11,7 +11,6 @@ flow:
     tags: ["bigquery", "gcp", "storage-write", "webhook", "example"]
   require_leader_election: true
   tasks:
-
     # POST /api/flowgen/workers/v1/webhooks/events; each POST becomes one event.
     - http_endpoint:
         name: receive_webhook

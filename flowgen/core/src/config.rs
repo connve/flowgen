@@ -188,6 +188,16 @@ fn render_with_value(template: &str, data_value: &serde_json::Value) -> Result<S
         .map_err(|e| Error::Render { source: e })
 }
 
+/// Deserializes an optional path, reading an empty one as unset, so a
+/// template such as `{{env.CREDENTIALS}}` that renders empty leaves it out.
+pub fn optional_path<'de, D>(deserializer: D) -> Result<Option<std::path::PathBuf>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let path: Option<std::path::PathBuf> = serde::Deserialize::deserialize(deserializer)?;
+    Ok(path.filter(|path| !path.as_os_str().is_empty()))
+}
+
 /// Extension trait for configuration types that support template rendering.
 ///
 /// Enables configuration structures to render themselves as Handlebars templates

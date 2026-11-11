@@ -29,6 +29,7 @@ flowgen_oci = { path = "../oci" }
 flowgen_braze = { path = "../braze" }
 flowgen_klaviyo = { path = "../klaviyo" }
 flowgen_kafka = { path = "../kafka" }
+flowgen_kv_store = { path = "../kv-store" }
 async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["full"] }
@@ -67,6 +68,7 @@ reqwest = { workspace = true }
 oauth2 = { workspace = true }
 secrecy = { workspace = true, features = ["serde"] }
 time = { workspace = true }
+webbrowser = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

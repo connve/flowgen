@@ -14,6 +14,8 @@ use flowgen_core::task::runner::Runner;
 use flowgen_core::task::{Task, TaskError, TaskIo, TaskMeta};
 use std::sync::Arc;
 
+/// Artifacts in an OCI Image Layout folder on this machine.
+pub mod layout;
 pub mod push;
 /// Registry credentials and client setup shared by both tasks.
 pub mod registry;

@@ -19,7 +19,6 @@ flow:
     description: "Accepts merge instructions over an HTTP webhook and merges a duplicate record into a master record via the SOAP API."
     tags: ["salesforce", "merge", "http", "soap-api", "example"]
   tasks:
-
     - http_endpoint:
         name: receive_request
         method: POST

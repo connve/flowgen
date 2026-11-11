@@ -11,13 +11,15 @@ let logsLimit = $state(LOGS_LIMIT_DEFAULT);
 // Default filters: warn + error only. Info/debug/trace hidden until the
 // operator explicitly widens the filter — matches how the Flows page
 // leans on error/warning counters over ambient info noise.
-export const logsLevels = $state<Record<LogRecord['level'], boolean>>({
+export const LOGS_LEVELS_DEFAULT: Readonly<Record<LogRecord['level'], boolean>> = {
 	info: false,
 	warn: true,
 	error: true,
 	debug: false,
 	trace: false,
-});
+};
+
+export const logsLevels = $state<Record<LogRecord['level'], boolean>>({ ...LOGS_LEVELS_DEFAULT });
 
 export function getLogsLimit(): number {
 	return logsLimit;

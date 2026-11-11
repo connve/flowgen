@@ -1,5 +1,5 @@
 <script lang="ts" module>
-	import StatusDot from '$lib/StatusDot.svelte';
+	import { StatusDot } from '@connve/ui';
 	import { levelLabel, levelVariant, type ActivityLevel } from '$lib/logRecord';
 	import { formatDuration } from '$lib/toolRuns.svelte';
 
@@ -35,7 +35,7 @@
 </script>
 
 <script lang="ts">
-	import InspectorSection from '$lib/InspectorSection.svelte';
+	import { InspectorSection } from '@connve/ui';
 	import { formatAbsolute, formatRelative } from '$lib/time';
 	import { m } from '$lib/paraglide/messages.js';
 

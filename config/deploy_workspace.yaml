@@ -1,0 +1,69 @@
+# Deploys the latest release from FLOWGEN_RELEASES: mirrors its flows and
+# resources into the system cache, deleting what the release no longer holds.
+# flowgen loads them from the cache and reloads them when they change.
+flow:
+  labels:
+    display_name: "Deploy Workspace"
+    description: "Mirrors the flows and resources of the latest release into the system cache."
+    tags: ["system", "oci-sync", "kv-store"]
+  require_leader_election: true
+  tasks:
+    - generate:
+        name: tick
+        interval: "5s"
+
+    # Emits every file of the release when latest points at a new one.
+    - oci_sync:
+        name: read_release
+        artifact: "{{env.FLOWGEN_RELEASES}}:latest"
+        credentials_path: "{{env.FLOWGEN_REGISTRY_CREDENTIALS}}"
+
+    # Splits the release into cache entries.
+    - script:
+        name: to_entries
+        code: |
+          let flows = [];
+          let resources = [];
+          for file in event.data.files {
+              if file.content == () { throw `${file.path} is not text`; }
+              if file.path.starts_with("flows/") {
+                  let key = regex_replace(file.path.sub_string(6), "\\.(yaml|yml|json)$", "");
+                  flows.push(#{ key: key, value: file.content });
+              } else if file.path.starts_with("resources/") {
+                  resources.push(#{ key: file.path.sub_string(10), value: file.content });
+              }
+          }
+          #{ flows: flows, resources: resources }
+
+    - script:
+        name: flow_entries
+        code: |
+          #{ entries: event.data.flows }
+
+    # A release always holds the system flows, so an empty list deletes nothing.
+    - kv_store:
+        name: apply_flows
+        url: "{{env.FLOWGEN_CACHE_URL}}"
+        credentials_path: "{{env.FLOWGEN_CACHE_CREDENTIALS}}"
+        bucket: "{{env.FLOWGEN_SYSTEM_BUCKET}}"
+        operation: put
+        key_prefix: "flows."
+        prune: true
+
+    - script:
+        name: resource_entries
+        code: |
+          #{ entries: event.data.resources }
+        depends_on: [to_entries]
+
+    # A workspace may hold no resources, so an empty list prunes them all.
+    - kv_store:
+        name: apply_resources
+        url: "{{env.FLOWGEN_CACHE_URL}}"
+        credentials_path: "{{env.FLOWGEN_CACHE_CREDENTIALS}}"
+        bucket: "{{env.FLOWGEN_SYSTEM_BUCKET}}"
+        operation: put
+        key_prefix: "resources."
+        prune: true
+        allow_empty: true
+        depends_on: [resource_entries]

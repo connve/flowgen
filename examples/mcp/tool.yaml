@@ -10,7 +10,6 @@ flow:
     description: "Exposes a callable MCP tool that takes a name argument and returns a personalised greeting built by a Rhai script as the tool result."
     tags: ["mcp", "tool", "script", "example"]
   tasks:
-
     # LLM-facing tool. Arguments arrive as event.data on tools/call.
     - mcp_tool:
         name: greet_user

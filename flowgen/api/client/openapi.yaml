@@ -368,8 +368,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                $ref: "#/components/schemas/ModelList"
         "404":
           description: "`web.agents` is not enabled."
         "502":
@@ -394,12 +393,12 @@ paths:
         "404":
           description: "`web.agents` is not enabled."
 
-  /api/agents/conversations:
+  /api/agents/sessions:
     get:
-      operationId: listConversations
-      summary: List stored Agents chat conversations.
+      operationId: listSessions
+      summary: List stored Agents chat sessions.
       description: |
-        Returns conversation summaries (no message bodies) for the built-in
+        Returns session summaries (no message bodies) for the built-in
         Agents chat, newest first. History is our UI's own store in the
         configured system cache — the gateway proxy stays stateless. A
         persistence flow can copy these into a database for long-term
@@ -407,31 +406,31 @@ paths:
       tags: [agents]
       responses:
         "200":
-          description: Conversation summaries, newest first.
+          description: Session summaries, newest first.
           content:
             application/json:
               schema:
                 type: object
-                required: [conversations]
+                required: [sessions]
                 properties:
-                  conversations:
+                  sessions:
                     type: array
                     items:
-                      $ref: "#/components/schemas/ConversationSummary"
+                      $ref: "#/components/schemas/SessionSummary"
         "404":
           description: "`web.agents` is not enabled."
         "503":
-          description: The conversation store is unavailable.
+          description: The session store is unavailable.
 
-  /api/agents/conversations/stream:
+  /api/agents/sessions/stream:
     get:
-      operationId: streamConversations
-      summary: Live Agents chat conversations.
+      operationId: streamSessions
+      summary: Live Agents chat sessions.
       description: |
-        Server-Sent Events with the conversations `GET /api/agents/conversations`
-        lists: a `conversations` event with every `ConversationSummary` on
-        connect, then a `conversation` event with one `ConversationSummary`
-        for each created or changed conversation and a `removed` event with
+        Server-Sent Events with the sessions `GET /api/agents/sessions`
+        lists: a `sessions` event with every `SessionSummary` on
+        connect, then a `session` event with one `SessionSummary`
+        for each created or changed session and a `removed` event with
         the id of each deleted or expired one.
       tags: [agents]
       responses:
@@ -444,40 +443,40 @@ paths:
         "404":
           description: "`web.agents` is not enabled."
         "503":
-          description: The conversation store is unavailable.
+          description: The session store is unavailable.
 
-  /api/agents/conversations/{id}:
+  /api/agents/sessions/{id}:
     parameters:
       - name: id
         in: path
         required: true
-        description: Client-supplied conversation id (`[A-Za-z0-9_-]+`, not `stream`).
+        description: Client-supplied session id (`[A-Za-z0-9_-]+`, not `stream`).
         schema:
           type: string
     get:
-      operationId: getConversation
-      summary: Fetch one conversation with its full message history.
+      operationId: getSession
+      summary: Fetch one session with its full message history.
       tags: [agents]
       responses:
         "200":
-          description: The conversation.
+          description: The session.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Conversation"
+                $ref: "#/components/schemas/Session"
         "400":
-          description: The conversation id is invalid.
+          description: The session id is invalid.
         "404":
-          description: No conversation with that id, or `web.agents` is not enabled.
+          description: No session with that id, or `web.agents` is not enabled.
         "503":
-          description: The conversation store is unavailable.
+          description: The session store is unavailable.
     put:
-      operationId: putConversation
-      summary: Create or overwrite a conversation.
+      operationId: putSession
+      summary: Create or overwrite a session.
       description: |
         The path id is authoritative and `updatedAt` is server-stamped, so
         neither is read from the body. The TTL
-        (`web.agents.conversation_history_ttl`) is refreshed on every write,
+        (`web.agents.session_history_ttl`) is refreshed on every write,
         so the expiry window counts from the last activity.
       tags: [agents]
       requestBody:
@@ -485,73 +484,73 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/ConversationUpsert"
+              $ref: "#/components/schemas/SessionUpsert"
       responses:
         "204":
-          description: The conversation was stored.
+          description: The session was stored.
         "400":
-          description: The conversation id is invalid.
+          description: The session id is invalid.
         "404":
           description: "`web.agents` is not enabled."
         "503":
-          description: The conversation store is unavailable.
+          description: The session store is unavailable.
     patch:
-      operationId: updateConversation
-      summary: Rename a conversation or move it to a folder.
+      operationId: updateSession
+      summary: Rename a session or move it to a folder.
       description: |
         `updatedAt` and the unread state stay as they are, so the
-        conversation keeps its place in the list.
+        session keeps its place in the list.
       tags: [agents]
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/ConversationUpdate"
+              $ref: "#/components/schemas/SessionUpdate"
       responses:
         "204":
-          description: The conversation was updated.
+          description: The session was updated.
         "400":
-          description: The conversation id or the title is invalid.
+          description: The session id or the title is invalid.
         "404":
-          description: No conversation with that id, or `web.agents` is not enabled.
+          description: No session with that id, or `web.agents` is not enabled.
         "500":
-          description: Corrupt conversation — the stored conversation can't be read.
+          description: Corrupt session — the stored session can't be read.
         "503":
-          description: The conversation store is unavailable.
+          description: The session store is unavailable.
     delete:
-      operationId: deleteConversation
-      summary: Delete a conversation.
+      operationId: deleteSession
+      summary: Delete a session.
       description: |
         Deletes it with the caller's read state and folder, and with every
-        user's for a shared conversation. Idempotent — deleting a missing id
+        user's for a shared session. Idempotent — deleting a missing id
         still succeeds.
       tags: [agents]
       responses:
         "204":
-          description: The conversation is gone.
+          description: The session is gone.
         "400":
-          description: The conversation id is invalid.
+          description: The session id is invalid.
         "404":
           description: "`web.agents` is not enabled."
         "503":
-          description: The conversation store is unavailable.
+          description: The session store is unavailable.
 
-  /api/agents/conversations/{id}/reply:
+  /api/agents/sessions/{id}/reply:
     parameters:
       - name: id
         in: path
         required: true
-        description: Conversation id; a new id starts a conversation.
+        description: Session id; a new id starts a session.
         schema:
           type: string
     post:
       operationId: startReply
       summary: Send a message and have the agent reply.
       description: |
-        Adds the user's message to the conversation and starts the agent's
+        Adds the user's message to the session and starts the agent's
         reply on the server, so it goes on when the browser leaves. The
-        reply is saved into the conversation as it arrives and at least every
+        reply is saved into the session as it arrives and at least every
         `web.agents.reply_save_interval`; follow it with `GET`. A reply not
         saved for ten save intervals counts as interrupted, and a new message
         settles it. The reply ends with an `error` when the AI gateway fails,
@@ -568,21 +567,21 @@ paths:
         "202":
           description: The reply started.
         "400":
-          description: The conversation id is invalid or the message is empty.
+          description: The session id is invalid or the message is empty.
         "404":
           description: "`web.agents` is not enabled."
         "409":
-          description: The conversation already has a reply in progress, on this or another pod.
+          description: The session already has a reply in progress, on this or another pod.
         "500":
-          description: Corrupt conversation — the stored conversation can't be read.
+          description: Corrupt session — the stored session can't be read.
         "503":
-          description: The conversation store or the AI gateway is unavailable.
+          description: The session store or the AI gateway is unavailable.
     get:
       operationId: followReply
       summary: Follow the reply in progress.
       description: |
         Server-Sent Events of the reply this pod is writing: a `message`
-        event with the `ConversationMessage` so far on connect, then one per
+        event with the `SessionMessage` so far on connect, then one per
         change, the last without `pending`.
       tags: [agents]
       responses:
@@ -593,70 +592,70 @@ paths:
               schema:
                 type: string
         "400":
-          description: The conversation id is invalid.
+          description: The session id is invalid.
         "404":
           description: |
-            The caller has no conversation with that id, no reply is in
+            The caller has no session with that id, no reply is in
             progress on this pod, or `web.agents` is not enabled.
         "503":
-          description: The conversation store is unavailable.
+          description: The session store is unavailable.
     delete:
       operationId: stopReply
       summary: Stop the reply in progress.
       description: |
-        A reply another pod writes is marked stopped in the conversation, and
+        A reply another pod writes is marked stopped in the session, and
         that pod stops at its next save.
       tags: [agents]
       responses:
         "204":
           description: The reply stopped.
         "400":
-          description: The conversation id is invalid.
+          description: The session id is invalid.
         "404":
           description: |
-            The caller has no conversation with that id, no reply is in
+            The caller has no session with that id, no reply is in
             progress, or `web.agents` is not enabled.
         "500":
-          description: Corrupt conversation — the stored conversation can't be read.
+          description: Corrupt session — the stored session can't be read.
         "503":
-          description: The conversation store is unavailable.
+          description: The session store is unavailable.
 
-  /api/agents/conversations/{id}/read:
+  /api/agents/sessions/{id}/read:
     parameters:
       - name: id
         in: path
         required: true
-        description: Conversation id.
+        description: Session id.
         schema:
           type: string
     put:
-      operationId: markConversationRead
-      summary: Mark a conversation read for the caller.
+      operationId: markSessionRead
+      summary: Mark a session read for the caller.
       description: Other users' unread state doesn't change.
       tags: [agents]
       responses:
         "204":
-          description: The conversation is read for the caller.
+          description: The session is read for the caller.
         "400":
-          description: The conversation id is invalid.
+          description: The session id is invalid.
         "404":
-          description: No conversation with that id, or `web.agents` is not enabled.
+          description: No session with that id, or `web.agents` is not enabled.
         "503":
-          description: The conversation store is unavailable.
+          description: The session store is unavailable.
     delete:
-      operationId: markConversationUnread
-      summary: Mark a conversation unread for the caller.
+      operationId: markSessionUnread
+      summary: Mark a session unread for the caller.
       description: Other users' unread state doesn't change.
       tags: [agents]
       responses:
         "204":
-          description: The conversation is unread for the caller.
+          description: The session is unread for the caller.
         "400":
-          description: The conversation id is invalid.
+          description: The session id is invalid.
         "404":
-          description: No conversation with that id, or `web.agents` is not enabled.
+          description: No session with that id, or `web.agents` is not enabled.
         "503":
-          description: The conversation store is unavailable.
+          description: The session store is unavailable.
 
   /api/workspace/validate:
     post:
@@ -684,12 +683,82 @@ paths:
         "500":
           description: Validating the files stopped unexpectedly.
 
+  /api/workspace/test:
+    post:
+      operationId: testScript
+      summary: Run a Rhai script on sample events without deploying it.
+      description: |
+        Runs the script as the `script` task runs it, on each sample as
+        `event.data`, with an in-memory `ctx.cache`. Its imports resolve in
+        the `resources/…` files of the request first, then in the deployed
+        resources.
+      tags: [workspace]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ScriptTest"
+      responses:
+        "200":
+          description: One outcome per sample, in order.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScriptTestResult"
+        "400":
+          description: No samples or more than 100, an invalid draft path, a script that could not start, or a test past 30 seconds.
+
+  /api/hubs:
+    get:
+      operationId: listHubs
+      summary: The hubs new flows and resources can start from.
+      description: |
+        One per flow `system/<hub>_hub` running on this instance, named by its
+        `display_name`.
+      tags: [workspace]
+      responses:
+        "200":
+          description: The hubs, by id.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Hubs"
+
+  /api/hubs/{hub}/templates:
+    parameters:
+      - name: hub
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: listHubTemplates
+      summary: The templates of a hub.
+      description: |
+        Calls the hub's flow, `system/<hub>_hub`, and groups the files it
+        returns by their top folder: each folder with a `template.yaml` is a
+        template holding its `flows/` and `resources/` files. Nothing is
+        stored; a template becomes a change like any other.
+      tags: [workspace]
+      responses:
+        "200":
+          description: The hub's templates, by name.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HubTemplates"
+        "404":
+          description: No hub with that id runs on this instance.
+        "502":
+          description: The hub's flow failed, such as when its catalog cannot be pulled.
+
   /api/workspace/file:
     get:
       operationId: getWorkspaceFile
       summary: The version of a file a change to it is based on.
       description: |
-        What the instance runs, with every published change that is not
+        What the instance runs, with every committed change that is not
         deployed yet applied on top, so an edit made right after an approval
         builds on that commit. `content` is null when the file does not exist.
       tags: [workspace]
@@ -771,6 +840,24 @@ paths:
         "503":
           description: The change store is unavailable, or the deployed content of a file cannot be read.
 
+  /api/changes/stream:
+    get:
+      operationId: streamDeployments
+      summary: Releases and deployments as they happen.
+      description: |
+        Server-Sent Events: a `deployment` event each time a commit is
+        released or a flow or resource that flowgen loads from the cache
+        changes, after which the `deployment` of committed changes may have
+        moved on.
+      tags: [changes]
+      responses:
+        "200":
+          description: Long-lived event stream.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+
   /api/changes/{id}:
     parameters:
       - name: id
@@ -839,7 +926,7 @@ paths:
       description: |
         Only its proposer may add files; without `web.auth`, anyone. Every
         file must belong to the change's target. A replaced file keeps the
-        deployed content recorded when it was first added, so publishing
+        deployed content recorded when it was first added, so committing
         fails when the file changed since. All files are validated again.
       tags: [workspace]
       requestBody:
@@ -882,7 +969,7 @@ paths:
           format: int64
     post:
       operationId: approveChange
-      summary: Approve a pending change and publish it, or publish a failed one again.
+      summary: Approve a pending change and commit it, or commit a failed one again.
       description: |
         With `web.auth` set, requires a signed-in user's session; machine
         keys are refused. When the change's target sets
@@ -890,17 +977,17 @@ paths:
         them. The change's files must still belong to the target it was
         proposed for under the current `web.authoring.targets`.
 
-        Calls the target's `web.authoring.targets[].publish_flow` with
+        Calls the target's `web.authoring.targets[].commit_flow` with
         `{id, target, title, author: {name, email}, files: [{path, content, previous}]}`
         and records its result. `author` comes from the approver's `name` and
         `email` claims, else their user id; `content` null deletes the file
         and `previous` null marks a new one. A `failed` change, or one left
-        `publishing` past the `ack_timeout` of the publish flow's
+        `committing` past the `ack_timeout` of the commit flow's
         `inproc_endpoint`, can be approved again.
       tags: [workspace]
       responses:
         "200":
-          description: The change after publishing, `published` or `failed`.
+          description: The change after committing, `committed` or `failed`.
           content:
             application/json:
               schema:
@@ -914,12 +1001,12 @@ paths:
         "409":
           description: |
             The change cannot be approved in its status (including
-            `publishing` before the publish flow's `ack_timeout` passed), has
+            `committing` before the commit flow's `ack_timeout` passed), has
             invalid files, was decided by another request, was edited after
             `updatedAt`, or its files no longer belong to the target it was
             proposed for.
         "500":
-          description: Publishing stopped unexpectedly, or the change could not be encoded or diffed.
+          description: Committing stopped unexpectedly, or the change could not be encoded or diffed.
         "503":
           description: The change store is unavailable.
 
@@ -1348,6 +1435,42 @@ components:
           minimum: 0
           description: Flows running on the pod. Absent when it is unreachable.
 
+    ModelList:
+      type: object
+      required: [object, data]
+      properties:
+        object:
+          type: string
+          description: Always `list`.
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Model"
+
+    Model:
+      type: object
+      required: [id, protocol]
+      properties:
+        id:
+          type: string
+          description: "`<proxy>/<model>`, or the proxy's name when it declares no models."
+        object:
+          type: string
+        created:
+          type: integer
+          format: int64
+        owned_by:
+          type: string
+        protocol:
+          type: string
+          description: Wire protocol the proxy speaks, `openai` or `anthropic`.
+        display_name:
+          type: string
+          description: The proxy flow's `labels.display_name`, when set.
+        description:
+          type: string
+          description: The proxy flow's `labels.description`, when set.
+
     VersionInfo:
       type: object
       required: [version]
@@ -1355,6 +1478,9 @@ components:
         version:
           type: string
           description: SemVer version derived from `CARGO_PKG_VERSION`.
+        latest:
+          type: string
+          description: The newest released version, when it is newer than `version`.
 
     ConfigInfo:
       type: object
@@ -1489,6 +1615,59 @@ components:
           items:
             $ref: "#/components/schemas/WorkspaceFile"
 
+    Hub:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: string
+          description: The hub's name before `_hub` in its flow, `system/<id>_hub`.
+        name:
+          type: string
+
+    Hubs:
+      type: object
+      required: [hubs]
+      properties:
+        hubs:
+          type: array
+          items:
+            $ref: "#/components/schemas/Hub"
+
+    HubTemplate:
+      type: object
+      required: [slug, name, tags, files]
+      properties:
+        slug:
+          type: string
+          description: The template's folder in the catalog.
+        name:
+          type: string
+        description:
+          type: string
+        category:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        readme:
+          type: string
+        files:
+          type: array
+          description: Its `flows/` and `resources/` files, by their path in the workspace.
+          items:
+            $ref: "#/components/schemas/WorkspaceFile"
+
+    HubTemplates:
+      type: object
+      required: [templates]
+      properties:
+        templates:
+          type: array
+          items:
+            $ref: "#/components/schemas/HubTemplate"
+
     ValidationIssue:
       type: object
       required: [path, message]
@@ -1510,6 +1689,43 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ValidationIssue"
+
+    ScriptTest:
+      type: object
+      required: [script, samples]
+      properties:
+        script:
+          type: string
+          description: The Rhai script.
+        samples:
+          type: array
+          description: The `event.data` of each sample event.
+          items: {}
+        files:
+          type: array
+          description: Draft files; `resources/…` ones are imported before the deployed resources.
+          items:
+            $ref: "#/components/schemas/WorkspaceFile"
+
+    ScriptTestOutcome:
+      type: object
+      properties:
+        events:
+          type: array
+          description: The `event.data` of each event the script emitted.
+          items: {}
+        error:
+          type: string
+          description: Why the script failed on the sample.
+
+    ScriptTestResult:
+      type: object
+      required: [outcomes]
+      properties:
+        outcomes:
+          type: array
+          items:
+            $ref: "#/components/schemas/ScriptTestOutcome"
 
     ChangeProposal:
       type: object
@@ -1537,16 +1753,18 @@ components:
 
     ChangeStatus:
       type: string
-      enum: [pending, rejected, publishing, published, failed]
+      enum: [pending, rejected, committing, committed, failed]
 
     ChangeDeployment:
       type: string
-      enum: [waiting, deployed]
+      enum: [waiting, released, deployed]
       description: |
-        A published change against what this instance runs: `waiting` while a
-        file still runs as before, `deployed` otherwise, including when a file
-        has changed again since. Set only on a `published` change whose
-        target has `track_deployment` on.
+        Where a committed change is on its way to this instance: `waiting`
+        until its commit is released, `released` once a release flow records
+        it under `releases.<commit>` in the system bucket, and `deployed` when
+        no file runs as before, including when a file has changed again
+        since. Set only on a `committed` change whose target has
+        `track_deployment` on.
 
     ChangeFile:
       type: object
@@ -1609,15 +1827,15 @@ components:
         result:
           type: object
           additionalProperties: true
-          description: What the publish flow returned, e.g. the commit and digest.
+          description: What the commit flow returned, `{commit, changed}`.
         error:
           type: string
-          description: Why publishing failed.
+          description: Why committing failed.
         deployment:
           $ref: "#/components/schemas/ChangeDeployment"
         stalled:
           type: boolean
-          description: Publishing ran past the `ack_timeout` of the publish flow's `inproc_endpoint`, so approving the change again retries it.
+          description: Committing ran past the `ack_timeout` of the commit flow's `inproc_endpoint`, so approving the change again retries it.
 
     ChangeSummary:
       type: object
@@ -1649,9 +1867,9 @@ components:
         deployment:
           $ref: "#/components/schemas/ChangeDeployment"
 
-    ConversationMessage:
+    SessionMessage:
       type: object
-      description: One message in an Agents chat conversation.
+      description: One message in an Agents chat session.
       required: [role, content, at]
       properties:
         role:
@@ -1679,9 +1897,9 @@ components:
           type: boolean
           description: The user stopped the agent's reply before it finished.
 
-    ConversationUpdate:
+    SessionUpdate:
       type: object
-      description: Body for `PATCH /api/agents/conversations/{id}`; fields left out stay as they are.
+      description: Body for `PATCH /api/agents/sessions/{id}`; fields left out stay as they are.
       properties:
         title:
           type: string
@@ -1689,12 +1907,12 @@ components:
         folder:
           type: string
           description: |
-            The caller's folder for the conversation, as `a/b`. Empty files
+            The caller's folder for the session, as `a/b`. Empty files
             it in no folder. Other users' folders don't change.
 
     ReplyRequest:
       type: object
-      description: Body for `POST /api/agents/conversations/{id}/reply`.
+      description: Body for `POST /api/agents/sessions/{id}/reply`.
       required: [content, model]
       properties:
         content:
@@ -1704,53 +1922,53 @@ components:
           type: string
           description: The gateway model id of the agent that replies.
 
-    Conversation:
+    Session:
       type: object
-      description: A stored Agents chat conversation with its full history.
+      description: A stored Agents chat session with its full history.
       required: [id, title, messages, updatedAt]
       properties:
         id:
           type: string
-          description: Client-supplied conversation id (`[A-Za-z0-9_-]+`).
+          description: Client-supplied session id (`[A-Za-z0-9_-]+`).
         title:
           type: string
-          description: Human-readable conversation title.
+          description: Human-readable session title.
         messages:
           type: array
           items:
-            $ref: "#/components/schemas/ConversationMessage"
+            $ref: "#/components/schemas/SessionMessage"
         model:
           type: string
-          description: The gateway model id last used for this conversation.
+          description: The gateway model id last used for this session.
         origin:
-          $ref: "#/components/schemas/ConversationOrigin"
+          $ref: "#/components/schemas/SessionOrigin"
         unread:
           type: boolean
           description: |
-            Whether the caller hasn't read the conversation since it changed.
+            Whether the caller hasn't read the session since it changed.
             A flow that writes it sets `true`, so it is unread for everyone who
             hasn't read it since. Missing means read.
         folder:
           type: string
           description: |
-            The folder the conversation is filed in, as `a/b`. A flow that
-            writes the conversation can set it; each user can move it to
+            The folder the session is filed in, as `a/b`. A flow that
+            writes the session can set it; each user can move it to
             their own folder, as `GET` returns it for them.
         updatedAt:
           type: integer
           format: int64
           description: Last write time, epoch milliseconds (server-stamped).
 
-    ConversationOrigin:
+    SessionOrigin:
       type: string
       enum: [user, agent]
       description: |
-        Who opened the conversation: the user in the chat, or a flow on an
+        Who opened the session: the user in the chat, or a flow on an
         agent's behalf. Missing means `user`.
 
-    ConversationSummary:
+    SessionSummary:
       type: object
-      description: A conversation without its messages, for the list view.
+      description: A session without its messages, for the list view.
       required: [id, title, updatedAt, messageCount]
       properties:
         id:
@@ -1763,22 +1981,22 @@ components:
           description: Last write time, epoch milliseconds.
         messageCount:
           type: integer
-          description: Number of messages in the conversation.
+          description: Number of messages in the session.
         origin:
-          $ref: "#/components/schemas/ConversationOrigin"
+          $ref: "#/components/schemas/SessionOrigin"
         unread:
           type: boolean
         folder:
           type: string
-          description: The folder the caller filed the conversation in, as `a/b`.
+          description: The folder the caller filed the session in, as `a/b`.
 
-    ConversationUpsert:
+    SessionUpsert:
       type: object
       description: |
-        Body for `PUT /api/agents/conversations/{id}`. `id` and `updatedAt`
+        Body for `PUT /api/agents/sessions/{id}`. `id` and `updatedAt`
         are set by the server (path is authoritative, timestamp is
         server-stamped), so they are not part of this body. The writer has
-        read the conversation.
+        read the session.
       required: [title, messages]
       properties:
         title:
@@ -1786,12 +2004,12 @@ components:
         messages:
           type: array
           items:
-            $ref: "#/components/schemas/ConversationMessage"
+            $ref: "#/components/schemas/SessionMessage"
         model:
           type: string
-          description: The gateway model id last used for this conversation.
+          description: The gateway model id last used for this session.
         origin:
-          $ref: "#/components/schemas/ConversationOrigin"
+          $ref: "#/components/schemas/SessionOrigin"
 
     LogSpan:
       type: object

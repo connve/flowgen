@@ -1,8 +1,7 @@
 <script lang="ts">
 	import Icon from '@iconify/svelte';
-	import StatusDot from '$lib/StatusDot.svelte';
-	import PaneResizer from '$lib/PaneResizer.svelte';
-	import { activityHeight } from '$lib/paneSize.svelte';
+	import { IconButton, PaneResizer, StatusDot } from '@connve/ui';
+	import { activityHeight } from '$lib/flow/activityHeight';
 	import {
 		activityLevels,
 		getFlowActivityLimit,
@@ -127,9 +126,21 @@
 		scrollTop = el.scrollTop;
 	}
 
-	function toggleLevel(level: ActivityLevel, e: MouseEvent) {
+	// Like a Grafana legend: a click shows only that level, a click on the
+	// only level shown restores the defaults, and ⌘/Ctrl/Shift-click adds or
+	// removes one level.
+	function clickLevel(level: ActivityLevel, e: MouseEvent) {
 		e.stopPropagation();
-		levelFilter[level] = !levelFilter[level];
+		if (e.metaKey || e.ctrlKey || e.shiftKey) {
+			levelFilter[level] = !levelFilter[level];
+			return;
+		}
+		const shown = (Object.keys(levelFilter) as ActivityLevel[]).filter((key) => levelFilter[key]);
+		if (shown.length === 1 && shown[0] === level) {
+			resetActivityLevels();
+			return;
+		}
+		for (const key of Object.keys(levelFilter) as ActivityLevel[]) levelFilter[key] = key === level;
 	}
 
 	function clearFilters() {
@@ -222,16 +233,12 @@
 					{/if}
 				</label>
 			{:else}
-				<div class="tooltip tooltip-left" data-tip={m.activity_search_placeholder()}>
-					<button
-						type="button"
-						class="flex h-8 w-8 items-center justify-center rounded-md text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content"
-						aria-label={m.activity_search_placeholder()}
-						onclick={() => (searchOpen = true)}
-					>
-						<Icon icon="tabler:search" class="h-5 w-5" />
-					</button>
-				</div>
+				<IconButton
+					icon="tabler:search"
+					label={m.activity_search_placeholder()}
+					tooltip="left"
+					onclick={() => (searchOpen = true)}
+				/>
 			{/if}
 			<div class="dropdown dropdown-end dropdown-top">
 				<button
@@ -271,7 +278,7 @@
 						type="button"
 						class="chip {levelChipClass(level, levelFilter[level])}"
 						aria-pressed={levelFilter[level]}
-						onclick={(e) => toggleLevel(level, e)}
+						onclick={(e) => clickLevel(level, e)}
 					>
 						<span>{levelLabel(level)}</span>
 						{#if levelFilter[level]}

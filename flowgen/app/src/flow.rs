@@ -1981,7 +1981,6 @@ mod tests {
                 arguments: Vec::new(),
                 template: Some(flowgen_core::resource::Source::Inline("body".to_string())),
                 messages: None,
-                headers: std::collections::HashMap::new(),
                 depends_on: None,
                 retry: None,
             })
@@ -2042,7 +2041,6 @@ mod tests {
                 arguments: Vec::new(),
                 template: Some(flowgen_core::resource::Source::Inline("body".to_string())),
                 messages: None,
-                headers: std::collections::HashMap::new(),
                 depends_on: None,
                 retry: None,
             })

@@ -1,0 +1,18 @@
+# Flowgen Agent tool: lists the deployed flows.
+flow:
+  labels:
+    display_name: "List Flows"
+    description: "Lists the deployed flows with their status for Flowgen Agent."
+    tags: ["mcp", "agent", "flowgen"]
+  tasks:
+    - mcp_tool:
+        name: list_flows
+        description: "List the deployed flows: identity, display name, status, task count."
+        input_schema:
+          type: object
+          properties: {}
+
+    - http_request:
+        name: fetch
+        endpoint: "{{env.FLOWGEN_URL}}/api/flows"
+        method: GET

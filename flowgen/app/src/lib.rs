@@ -5,7 +5,7 @@
 //! management. It coordinates multiple processing flows and manages shared
 //! resources like HTTP servers and caches.
 
-/// Agent replies the server writes into Agents conversations.
+/// Agent replies the server writes into Agents sessions.
 pub mod agent_reply;
 /// Application lifecycle and flow orchestration.
 pub mod app;
@@ -17,10 +17,16 @@ pub mod config;
 pub mod connections;
 /// Flow execution and task management.
 pub mod flow;
+/// Hubs: templates to start new flows and resources from, read through hub flows.
+pub mod hubs;
+/// Running without a config file, on a workspace in the home folder.
+pub mod local;
 /// Browser-facing OIDC login for the web UI.
 pub mod login;
 /// Hot-reload reconciler for cache-sourced flows.
 pub mod reconciler;
+/// The newest flowgen release, for the web UI's update notice.
+pub mod releases;
 /// Validation of flow and resource files without running them.
 pub mod validation;
 /// Hot-reload watcher for cache-sourced flows.

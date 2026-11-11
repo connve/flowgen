@@ -1,4 +1,5 @@
-import { apiUrl, type UserContext } from '$lib/api';
+import { ApiError, authMe, type UserContext } from '$lib/api';
+import { authPrefix, loginUrl } from '$lib/urls';
 
 // `user` is null both when logged out and when auth is not configured;
 // `enabled` tells them apart (GET /auth/me 404s without `web.auth`), since
@@ -21,16 +22,18 @@ const sessionChecked = new Promise<void>((resolve) => {
 // waits for it, and nothing redirects without auth enabled: a 401 can also
 // come from an upstream, such as an AI provider rejecting its key.
 export function interceptUnauthorized() {
-	const authPrefix = `${apiUrl('auth')}/`;
+	const prefix = authPrefix();
 	const realFetch = window.fetch.bind(window);
 	window.fetch = async (...args: Parameters<typeof fetch>) => {
 		const response = await realFetch(...args);
 		const url = args[0] instanceof Request ? args[0].url : String(args[0]);
-		if (response.status === 401 && !url.startsWith(authPrefix)) {
+		const path = new URL(url, window.location.href).pathname;
+		if (response.status === 401 && !path.startsWith(prefix)) {
 			await sessionChecked;
 			if (auth.enabled) {
-				const here = window.location.pathname + window.location.search + window.location.hash;
-				window.location.href = `${apiUrl('auth/login')}?return_to=${encodeURIComponent(here)}`;
+				window.location.href = loginUrl(
+					window.location.pathname + window.location.search + window.location.hash
+				);
 			}
 		}
 		return response;
@@ -39,11 +42,11 @@ export function interceptUnauthorized() {
 
 export async function checkSession(fetcher: typeof fetch) {
 	try {
-		const res = await fetcher(apiUrl('auth/me'));
-		auth.enabled = res.status !== 404;
-		if (res.ok) auth.user = await res.json();
-	} catch {
+		auth.user = (await authMe({ fetch: fetcher })).data;
+		auth.enabled = true;
+	} catch (err) {
 		// Without an answer the user counts as logged out and nothing redirects.
+		auth.enabled = err instanceof ApiError && err.status !== 404;
 	} finally {
 		resolveChecked();
 		// A logged-out user with auth enabled is about to be redirected, so

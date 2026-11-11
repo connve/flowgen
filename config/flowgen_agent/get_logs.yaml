@@ -1,0 +1,41 @@
+# Flowgen Agent tool: reads a flow's recent logs.
+flow:
+  labels:
+    display_name: "Get Logs"
+    description: "Returns a flow's recent logs so Flowgen Agent can check a deployment."
+    tags: ["mcp", "agent", "flowgen"]
+  tasks:
+    - mcp_tool:
+        name: get_logs
+        description: "Get the latest logs of one flow, by identity. Warnings and errors unless levels says otherwise."
+        input_schema:
+          type: object
+          properties:
+            identity:
+              type: string
+            levels:
+              type: array
+              description: "Levels to keep. Defaults to warn and error."
+              items:
+                type: string
+                enum: [trace, debug, info, warn, error]
+            limit:
+              type: integer
+              description: "How many records, newest first. Defaults to 200, at most 1000."
+              minimum: 1
+              maximum: 1000
+          required: [identity]
+
+    # Fills in the defaults the agent left out.
+    - script:
+        name: query
+        code: |
+          let levels = if type_of(event.data.levels) == "array" && event.data.levels.len() > 0 { event.data.levels } else { ["warn", "error"] };
+          let limit = if type_of(event.data.limit) == "i64" { event.data.limit.max(1).min(1000) } else { 200 };
+          event.data.query = levels.map(|level| `levels=${level}`).reduce(|query, part| `${query}&${part}`, `limit=${limit}`);
+          event
+
+    - http_request:
+        name: fetch
+        endpoint: "{{env.FLOWGEN_URL}}/api/logs?flow={{event.data.identity}}&{{event.data.query}}"
+        method: GET

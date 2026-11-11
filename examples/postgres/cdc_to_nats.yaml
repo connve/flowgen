@@ -11,7 +11,6 @@ flow:
     description: "Reads every insert, update and delete of the orders publication and publishes each change to a NATS JetStream subject."
     tags: ["postgres", "cdc", "nats", "example"]
   tasks:
-
     # Row changes; the slot is created on first start.
     - postgres_cdc:
         name: watch_orders

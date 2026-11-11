@@ -5,18 +5,23 @@
 	import { onMount } from 'svelte';
 	import { SvelteSet } from 'svelte/reactivity';
 	import FlowDag from '$lib/dag/FlowDag.svelte';
-	import Inspector from '$lib/Inspector.svelte';
-	import StatusDot from '$lib/StatusDot.svelte';
-	import StateMessage from '$lib/StateMessage.svelte';
-	import { apiUrl, encodePath, errorMessage, failure } from '$lib/api';
+	import {
+		FolderTree,
+		IconButton,
+		Inspector,
+		ListHeader,
+		Loading,
+		SidePane,
+		StateMessage,
+		StatusDot,
+		buildTree,
+		isMobile
+	} from '@connve/ui';
+	import { encodePath, errorMessage, getConnection, getFlow, isStatus, listFlows } from '$lib/api';
 	import { formatRelative as fmtRelativeMs } from '$lib/time';
 	import { activitiesFor, allMetrics, releaseFlowSubscription } from '$lib/activityStore.svelte';
 	import Icon from '@iconify/svelte';
 	import { m } from '$lib/paraglide/messages.js';
-	import FolderTree from '$lib/FolderTree.svelte';
-	import ListHeader from '$lib/ListHeader.svelte';
-	import SidePane from '$lib/SidePane.svelte';
-	import { isMobile } from '$lib/mobile';
 	import { pageTitle } from '$lib/pageTitle';
 	import { connectorByName } from '$lib/connectors';
 	import type {
@@ -27,8 +32,6 @@
 		FlowSummary as Flow,
 		FlowDetail
 	} from '$lib/api';
-	import { buildTree } from '$lib/tree';
-	import IconButton from '$lib/IconButton.svelte';
 	import {
 		authoringEnabled,
 		authoringTargets,
@@ -149,9 +152,9 @@
 		authoringEnabled().then((enabled) => (authoring = enabled));
 		authoringTargets().then((found) => (targets = found));
 
-		load<Flow[]>('api/flows')
-			.then((found) => {
-				flows = found;
+		listFlows()
+			.then(({ data }) => {
+				flows = data;
 			})
 			.catch((err) => {
 				error = errorMessage(err, m.flows_load_failed());
@@ -167,12 +170,6 @@
 			releaseFlowSubscription();
 		};
 	});
-
-	async function load<T>(path: string): Promise<T> {
-		const response = await fetch(apiUrl(path));
-		if (!response.ok) throw await failure(response);
-		return response.json();
-	}
 
 	// Shallow routing leaves `page.url` as is, so opening a preview keeps the filter.
 	let connectionId = $derived(page.url.searchParams.get('connection'));
@@ -203,13 +200,13 @@
 
 	// A link to a connection no loaded flow uses any more shows every flow.
 	async function loadConnection(id: string): Promise<Connection | null> {
-		const response = await fetch(apiUrl(`api/connections/${encodeURIComponent(id)}`));
-		if (response.status === 404) {
+		try {
+			return (await getConnection({ path: { id } })).data;
+		} catch (err) {
+			if (!isStatus(err, 404)) throw err;
 			clearConnection();
 			return null;
 		}
-		if (!response.ok) throw await failure(response);
-		return response.json();
 	}
 
 	function clearConnection() {
@@ -236,10 +233,12 @@
 			selectedLoading = true;
 		}
 		try {
-			const response = await fetch(apiUrl(`api/flows/${encodePath(path)}`));
-			if (response.status === 404) throw new Error(m.flow_not_found({ path }));
-			if (!response.ok) throw await failure(response);
-			const detail: FlowDetail = await response.json();
+			const detail = await getFlow({ path: { path } }).then(
+				({ data }) => data,
+				(err) => {
+					throw isStatus(err, 404) ? new Error(m.flow_not_found({ path })) : err;
+				}
+			);
 			flowCache.set(path, detail);
 			if (pendingFlow !== path) return;
 			selected = path;
@@ -326,7 +325,8 @@
 
 	// Modal breadcrumb parts derived from `selected` (the currently open flow path).
 	let selectedSegments = $derived(selected ? selected.split('/') : []);
-	let selectedLeaf = $derived(selectedSegments[selectedSegments.length - 1] ?? '');	let sidebarTree = $derived(buildTree<Flow>(scopedFlows, (f) => f.path));
+	let selectedLeaf = $derived(selectedSegments[selectedSegments.length - 1] ?? '');
+	let sidebarTree = $derived(buildTree<Flow>(scopedFlows, (f) => f.path));
 
 	// Table rows: `filtered` (already respects status and tags) further
 	// narrowed to `selectedFolder` when set.
@@ -408,6 +408,7 @@
 		count={m.flows_count({ count: visibleFlows.length })}
 		pending={authoring ? pending.length : null}
 		pendingLabel={m.flows_pending_changes({ count: pending.length })}
+		pendingHref="{base}/changes"
 		newHref="{base}/edit?new=flow{selectedFolder ? `&folder=${encodePath(selectedFolder)}` : ''}"
 	/>
 	<div class="flex flex-wrap items-center gap-2">
@@ -542,9 +543,7 @@
 
 	<div class="flex min-h-0 flex-1 flex-col overflow-y-auto px-6 pb-6">
 	{#if loading || connectionLoading}
-		<div class="flex justify-center py-12">
-			<span class="loading loading-spinner loading-lg text-primary"></span>
-		</div>
+		<Loading />
 	{:else if error}
 		<StateMessage tone="oops" title={m.flows_load_failed()} message={error} />
 	{:else if flows.length === 0}
@@ -706,9 +705,7 @@
 				/>
 			{/snippet}
 			{#if selectedLoading}
-				<div class="flex justify-center py-12">
-					<span class="loading loading-spinner loading-md text-primary"></span>
-				</div>
+				<Loading size="md" />
 			{:else if selectedError}
 				<StateMessage tone="oops" title={m.flow_load_failed_title()} message={selectedError} />
 			{:else if selectedDetail}

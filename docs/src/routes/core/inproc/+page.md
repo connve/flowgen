@@ -27,7 +27,7 @@ A flow can't call itself, directly or through other flows: if `a` calls `b` and 
 
 The caller's event data becomes this task's event data, and its `meta` is merged in, so `event.meta.auth` carries the caller's user.
 
-By default a flow in a folder accepts calls only from flows in the same top-level folder: `system/publish_workspace` can be called by `system/...` flows but not by `user/...` flows. A flow outside any folder accepts every caller. Flowgen itself, such as an [authoring](/docs/flowgen/concepts/authoring) approval, may always call. Set `callers` to open a shared flow to other folders:
+By default a flow in a folder accepts calls only from flows in the same top-level folder: `system/commit_workspace` can be called by `system/...` flows but not by `user/...` flows. A flow outside any folder accepts every caller. Flowgen itself, such as an [authoring](/docs/flowgen/concepts/authoring) approval, may always call. Set `callers` to open a shared flow to other folders:
 
 ```yaml
 # platform/enrich_customer.yaml, callable from user flows too

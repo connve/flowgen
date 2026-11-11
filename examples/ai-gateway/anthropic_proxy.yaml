@@ -24,7 +24,6 @@ flow:
     description: "Exposes an Anthropic Messages-compatible endpoint that routes the client model to a downstream provider and streams the completion back in Anthropic wire format."
     tags: ["ai-gateway", "anthropic", "llm-proxy", "streaming", "example"]
   tasks:
-
     - llm_proxy:
         name: flowgen_anthropic
         models: [glm-4.6, kimi-k2.7-code]

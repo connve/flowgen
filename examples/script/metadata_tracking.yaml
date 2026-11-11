@@ -8,7 +8,6 @@ flow:
     tags: ["script", "metadata", "validation", "chaining", "example"]
   require_leader_election: true
   tasks:
-
     - generate:
         name: trigger
         interval: 5s

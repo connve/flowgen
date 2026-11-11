@@ -52,12 +52,11 @@ tar -tzf /tmp/configs/blobs/sha256/*   # or /tmp/configs/*/layer.tar on older Do
 
 ## Flow
 
-[`examples/oci/sync_workspace.yaml`](https://github.com/connve/flowgen/blob/main/examples/oci/sync_workspace.yaml) mirrors the artifact into the system cache:
+[`config/deploy_workspace.yaml`](https://github.com/connve/flowgen/blob/main/config/deploy_workspace.yaml) mirrors the latest release in `FLOWGEN_RELEASES`, a local OCI Image Layout or a registry, into the system cache; see [Lifecycle flows](/docs/flowgen/concepts/authoring#lifecycle-flows) for its variables:
 
-1. A [`buffer`](/docs/flowgen/core/buffer) with `flush_on_completion` collects each pull into one batch.
-2. A script routes each file by its top-level directory. `flows/*` are keyed by the path with the `flows/` prefix and the file extension stripped, so `flows/orders/sync.yaml` becomes `orders/sync`, matching the flow's path-based identity. `resources/*` are keyed by the path with the `resources/` prefix stripped. Any other file is dropped.
-3. Two [`nats_kv_store`](/docs/flowgen/nats/kv-store) entry puts with `prune: true` write new and changed keys and delete the keys the artifact no longer holds.
+1. A script routes each file of the pull by its top-level directory. `flows/*` are keyed by the path with the `flows/` prefix and the file extension stripped, so `flows/orders/sync.yaml` becomes `orders/sync`, matching the flow's path-based identity. `resources/*` are keyed by the path with the `resources/` prefix stripped. Any other file is dropped.
+2. Two [`kv_store`](/docs/flowgen/kv-store/kv-store) entry puts with `prune: true` write new and changed keys and delete the keys the artifact no longer holds.
 
-A batch cut short by the buffer `timeout` is skipped, and the flows put leaves `allow_empty` off, so a partial or empty pull deletes no flows.
+`oci_sync` emits every file of an artifact in one event, and the flows put leaves `allow_empty` off, so an empty pull deletes no flows.
 
 When the manifest digest has not changed, `oci_sync` skips the layer fetch, so a tick without changes costs one manifest `HEAD`. See [Resources](/docs/flowgen/concepts/resources) for how the runtime reads back from `resources.*`.

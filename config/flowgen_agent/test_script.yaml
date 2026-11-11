@@ -1,0 +1,41 @@
+# Flowgen Agent tool: runs a Rhai script on sample events without deploying it.
+flow:
+  labels:
+    display_name: "Test Script"
+    description: "Runs a draft Rhai script on sample events and returns what it emits, for Flowgen Agent."
+    tags: ["mcp", "agent", "flowgen"]
+  tasks:
+    - mcp_tool:
+        name: test_script
+        description: "Run a Rhai script on sample events, each sample being event.data. Returns, per sample, the events it emitted or its error."
+        input_schema:
+          type: object
+          properties:
+            script:
+              type: string
+              description: "The Rhai script."
+            samples:
+              type: array
+              description: 'The event.data of each sample event, e.g. [{"n": 1}].'
+              items:
+                type: object
+            files:
+              type: array
+              description: "Draft resources the script imports, e.g. resources/scripts/helpers.rhai."
+              items:
+                type: object
+                properties:
+                  path:
+                    type: string
+                  content:
+                    type: string
+                required: [path, content]
+          required: [script, samples]
+
+    - http_request:
+        name: test
+        endpoint: "{{env.FLOWGEN_URL}}/api/workspace/test"
+        method: POST
+        payload:
+          from_event: true
+          send_as: json

@@ -7,7 +7,6 @@ flow:
     description: "Callable sub-flow that masks a contact's email and phone."
     tags: ["inproc", "script", "example"]
   tasks:
-
     - inproc_endpoint:
         name: on_call
 

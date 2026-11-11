@@ -13,7 +13,6 @@ flow:
     description: "Registers slash-command prompt templates (single- and multi-message, with argument completions) that the MCP server serves to clients via prompts/list and prompts/get."
     tags: ["mcp", "prompts", "completion", "example"]
   tasks:
-
     # Single-message prompt. `template` renders as one user turn.
     - mcp_prompt:
         name: explain_query

@@ -5,9 +5,12 @@
 	import ResourceViewer from '$lib/ResourceViewer.svelte';
 	import CodeEditor from '$lib/CodeEditor.svelte';
 	import FlowDag from '$lib/dag/FlowDag.svelte';
-	import CopyButton from '$lib/CopyButton.svelte';
+	import { CopyButton, Segmented } from '@connve/ui';
 	import type { Activity } from '$lib/flow/ActivityDetails.svelte';
 	import ActivityPanel from '$lib/flow/ActivityPanel.svelte';
+	import ConfigFields from '$lib/flow/ConfigFields.svelte';
+	import ConfigViewSwitch from '$lib/ConfigViewSwitch.svelte';
+	import { configView } from '$lib/configView.svelte';
 	import { m } from '$lib/paraglide/messages.js';
 
 	interface Props {
@@ -123,24 +126,14 @@
 <svelte:window bind:innerWidth={windowWidth} />
 
 {#snippet viewSwitch()}
-	<div
-		class="flex items-center gap-0.5 rounded-full border border-base-300 bg-base-200/50 p-0.5 text-xs"
-		role="group"
-		aria-label={m.flow_view_label()}
-	>
-		{#each [{ id: 'graph' as const, label: m.flow_graph_heading() }, { id: 'config' as const, label: m.flow_config_heading() }] as opt (opt.id)}
-			<button
-				type="button"
-				class="h-6 rounded-full px-3 transition-colors {view === opt.id
-					? 'bg-base-100 font-medium shadow-sm'
-					: 'text-base-content/60 hover:text-base-content'}"
-				aria-pressed={view === opt.id}
-				onclick={() => (view = opt.id)}
-			>
-				{opt.label}
-			</button>
-		{/each}
-	</div>
+	<Segmented
+		label={m.flow_view_label()}
+		options={[
+			{ id: 'graph', label: m.flow_graph_heading() },
+			{ id: 'config', label: m.flow_config_heading() }
+		]}
+		bind:value={view}
+	/>
 {/snippet}
 
 <div class="flex min-h-0 flex-1 flex-col">
@@ -190,11 +183,23 @@
 				{:else}
 					<span class="text-xs font-medium text-base-content/50">{m.flow_config_heading()}</span>
 				{/if}
-				<CopyButton text={yaml} label={m.flow_copy_yaml()} />
+				<div class="flex items-center gap-2">
+					{#if !editable}
+						<ConfigViewSwitch />
+					{/if}
+					<CopyButton text={yaml} label={m.flow_copy_yaml()} />
+				</div>
 			</div>
-			<div bind:this={yamlPane} class="flex min-h-0 flex-1 flex-col overflow-auto bg-base-200">
+			<div
+				bind:this={yamlPane}
+				class="flex min-h-0 flex-1 flex-col overflow-auto {!editable && configView.value === 'fields'
+					? 'bg-base-100'
+					: 'bg-base-200'}"
+			>
 				{#if editable}
 					<CodeEditor bind:value={yaml} extension="yaml" label={m.flow_config_editor_label()} />
+				{:else if configView.value === 'fields'}
+					<ConfigFields {yaml} onResourceClick={openResource} />
 				{:else}
 					<ResourceViewer
 						content={yaml}

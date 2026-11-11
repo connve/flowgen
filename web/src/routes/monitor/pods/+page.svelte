@@ -1,7 +1,5 @@
 <script lang="ts">
-	import Inspector from '$lib/Inspector.svelte';
-	import StatusDot from '$lib/StatusDot.svelte';
-	import StateMessage from '$lib/StateMessage.svelte';
+	import { Inspector, Loading, StateMessage, StatusDot } from '@connve/ui';
 	import { cluster } from '$lib/clusterStatus.svelte';
 	import { m } from '$lib/paraglide/messages.js';
 	import { pageTitle } from '$lib/pageTitle';
@@ -30,9 +28,7 @@
 
 <div class="flex min-h-0 flex-1 flex-col overflow-y-auto px-6 pb-6">
 	{#if !cluster.loaded}
-		<div class="flex justify-center py-12">
-			<span class="loading loading-spinner loading-lg text-primary"></span>
-		</div>
+		<Loading />
 	{:else if !cluster.status}
 		<StateMessage
 			tone="oops"

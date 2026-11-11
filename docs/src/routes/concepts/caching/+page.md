@@ -7,15 +7,14 @@ Flowgen provides a cache for state management, deduplication, and leader electio
 | Backend | Description |
 |---|---|
 | **NATS JetStream KV** | Distributed key-value store. Shared across all replicas. |
-| **In-memory** | Local HashMap. Single-node deployments. Lost on restart. |
+| **redb** | A local file. One process. Kept across restarts. The default. |
 
-If NATS cache is enabled but fails to connect, flowgen falls back to in-memory automatically. If cache is disabled or not configured, in-memory is used.
+Without a `cache` section, flowgen uses a redb file at `.flowgen/state.redb`. If NATS is configured but flowgen cannot connect, it does not start.
 
 ## Configuration
 
 ```yaml
 cache:
-  enabled: true
   type: nats
   credentials_path: /etc/nats/credentials.json
   url: "{{env.NATS_URL}}"
@@ -29,13 +28,13 @@ cache:
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `enabled` | bool | required | Enable distributed cache. |
-| `type` | string | required | Cache backend: `nats`. |
+| `type` | string | `redb` | Cache backend: `nats` or `redb`. |
+| `path` | string | `.flowgen/state.redb` | The file of a `redb` cache. |
 | `credentials_path` | string | optional | Path to NATS credentials. |
 | `url` | string | `localhost:4222` | NATS server URL. |
 | `runtime.db_name` | string | `flowgen_cache` | KV bucket for flow state — the one `ctx.cache` reads and writes. |
-| `system.db_name` | string | `flowgen_system` | KV bucket for leader-election leases, peer registration, and the cluster mode token. Created whenever the cache is enabled. |
-| `history` | int | 64 | Historical entries retained per key. Server caps at 64. |
+| `system.db_name` | string | `flowgen_system` | KV bucket for leader-election leases, peer registration, and the cluster mode token. |
+| `history` | int | 64 | Historical entries retained per key in a NATS bucket. Server caps at 64. |
 | `tombstone_ttl` | duration | `1h` | TTL for delete markers. Enables per-key TTL on entries. |
 
 Coordination state lives in its own bucket so a flow's script cannot read or overwrite another pod's lease. `ctx.cache` only ever reaches the runtime bucket.

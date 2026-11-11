@@ -1,0 +1,23 @@
+# The Connve hub: templates to start new flows and resources from, read
+# when the web UI lists them and returned without being stored. A template
+# becomes a change like any other, validated and approved before it runs.
+# Another hub is another flow in flows/system/ named <id>_hub, with its own artifact.
+flow:
+  labels:
+    display_name: "Connve Hub"
+    description: "Templates for new flows and resources from the Connve hub."
+    tags: ["system", "hub", "oci-sync"]
+  tasks:
+    # The web UI calls it in-process; it has no HTTP route.
+    - inproc_endpoint:
+        name: on_request
+        ack_timeout: 60s
+
+    # Returns the hub's flowgen catalog for this version of flowgen. One
+    # attempt, so the web UI shows why a hub is unavailable instead of waiting.
+    - oci_sync:
+        name: read_hub
+        artifact: "ghcr.io/connve/hub/flowgen:{{env.FLOWGEN_VERSION}}"
+        force_pull: true
+        retry:
+          max_attempts: 1

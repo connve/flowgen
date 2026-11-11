@@ -1,5 +1,192 @@
 # Changelog
 
+## 0.155.0
+
+### Breaking
+
+- Without a `cache` section, the cache is a local redb file at
+  `.flowgen/state.redb`, kept across restarts.
+- `cache.enabled` is removed; a config that sets it fails to load.
+- Agents conversations are sessions: the API is under `/api/agents/sessions`,
+  a flow opens one under `<cache_prefix>.sessions.`, and
+  `web.agents.conversation_history_ttl` is `web.agents.session_history_ttl`.
+- Approving a change commits it: `web.authoring.targets[].publish_flow` is
+  `commit_flow`, defaulting to `system/commit_workspace`, and a change moves
+  through `committing` and `committed` in place of `publishing` and
+  `published`.
+- `git_sync` emits one event per sync, `{commit, files}`, and `oci_sync`
+  one per pull, `{digest, files}`, with a binary file's content in
+  `content_base64`. `iterate` with `iterate_key: files` gives one event per
+  file.
+- `kv_store` requires `url`, and a `put` of one key returns `{key}`.
+- `git_sync` reads `repository`, a URL or a path, in place of
+  `repository_url`.
+- Helm chart 0.21.0 writes the app config from `flowgen.config.settings`, a
+  map with defaults for a cluster, in place of the `config.inline` string;
+  the container ports and Services follow the servers it enables, with
+  `flowgen.services.<server>.type`, in place of `flowgen.http_server`,
+  `mcp_server`, `ai_gateway`, `web` and `health.port`. `flowgen.systemFlows`
+  runs the system flows with their repository, releases and credentials.
+- `flows.cache` and `resources.cache` take only `enabled`: flows and
+  resources are read from the system bucket, under `flows.` and
+  `resources.`, where the deploy flow writes them.
+- `llm_proxy`, `mcp_tool`, `mcp_resource` and `mcp_prompt` have no `headers`
+  field: every client of the AI gateway or MCP server sees every proxy and
+  tool. An MCP toolset URL gives an agent the tools of one folder, and `auth`
+  controls who may call.
+
+### Added
+
+- `git_sync` and `oci_sync` remember a commit or digest once every task
+  after them handled its event without an error, so a failed flow syncs it
+  again on the next tick.
+- `kv_store` checks its config when the flow loads: `get` and `delete` need
+  `key`, a `put` needs `key` or `key_prefix`, a `prune` prefix ends in `.`
+  or `/`, keys use letters, digits and `-/_=.`, and the `url` names a redb
+  file or a NATS server. A `ttl` on a NATS bucket without per-key TTL fails
+  the task at start. `history` sets the values a NATS bucket it creates
+  keeps per key, 1 by default.
+- Hot reload reads the flow keys again each time its watch starts, so
+  changes made while the cache connection was lost are applied.
+- Servers on a loopback `host` answer `403` to a request whose `Host` or
+  `Origin` names another machine.
+- The MCP server's notification stream (`GET` on the MCP path) checks the
+  same credentials as its requests, and answers `409` to a second stream for
+  a session that has one open.
+- `kv_store` tasks on the same NATS server and credentials share one
+  connection.
+- `oci_push` to an OCI Image Layout writes each blob to a draft renamed into
+  place, and writes a stored blob that does not match its digest again.
+- Saving a file in the web UI formats YAML at 120 columns, the width the
+  repository's example and system flows are formatted at.
+- Concepts → Hubs documents hub flows and catalogs.
+- The commit, release and deploy flows in `config/` run on one machine and
+  in a cluster alike, reading the repository, releases, cache and credentials
+  from `FLOWGEN_REPOSITORY`, `FLOWGEN_WORKSPACE_PATH`, `FLOWGEN_RELEASES`,
+  `FLOWGEN_CACHE_URL`, `FLOWGEN_SYSTEM_BUCKET` and the `*_CREDENTIALS`
+  variables. A run sets the ones it knows unless they are set already.
+- `flows.system: true` runs this version's system flows under `system/`
+  without a workspace holding them, as in a cluster; a mounted flow with the
+  same identity takes their place.
+- An empty `credentials_path` in `git_push`, `git_sync`, `oci_push`,
+  `oci_sync` and `kv_store` means none, and a `git_push` author with an empty
+  name is unset.
+- `POST /api/workspace/test` runs at most 100 samples for at most 30 seconds.
+- Templates lists only the hubs that return templates, and starts a blank
+  file when none does. A template's files join the user's pending change,
+  which opens for review.
+- A committed change has Revert, which proposes a change restoring what each
+  file held before it, and names the files changed since instead. Each file
+  of a pending change has Edit, which opens it with its pending content and
+  saves into that change.
+- A new file starts without a name and is saved as `untitled` when none is
+  given. A flow's extension typed in the name is dropped, and a path pasted
+  from `flows/` or `resources/` replaces the folders.
+
+- `flowgen` without `--config` runs on the workspace in `FLOWGEN_HOME`, or
+  `~/flowgen`, created as a git repository on the first run, with the web UI,
+  HTTP server, MCP server and AI gateway on `127.0.0.1`, and opens the web UI.
+- `host` sets the address every server listens on; `0.0.0.0` by default.
+- A run without `--config` reads a `credentials_path` that has no file from
+  the system keychain, under the `flowgen` service and the file's absolute
+  path. Relative paths start at the workspace.
+- `cache.type: redb` keeps the cache in a local file at `cache.path`, so flow
+  state, leases and TTLs last across restarts without NATS. One process opens
+  the file. `type` defaults to `redb`.
+- The web UI shows a flow's config and the app config as fields, with YAML
+  one click away.
+- The web UI edits flows and resources in a code editor: Tab indents, Enter
+  keeps the indent, and saving formats YAML, JSON and Markdown with two-space
+  indents and at most one blank line, keeping comments.
+- `kv_store` gets, puts, lists and deletes keys in a redb file
+  (`url: redb://<path>`) or on a NATS server (any other `url`).
+- `git_push` and `git_sync` take `repository`, a URL or a path to a
+  repository on the same machine. For a path, `branch` defaults to the
+  checked-out branch. `git_push` commits to that branch and updates its
+  files and their index entries, keeping work staged in other files, as the
+  machine's git user unless `author` is set; `git_sync` emits the files
+  committed at the tip of the branch.
+- A new workspace in an existing folder keeps its files and commits what
+  `flows/` and `resources/` hold, and `.flowgen/` is added to its
+  `.gitignore`. A repository without commits becomes a workspace too.
+- A committed change shows `released` once a release flow records its commit
+  under `releases.<commit>` in the system bucket, then `deployed`. The changes
+  view follows it live through `GET /api/changes/stream`.
+- `oci_push` writes to and `oci_sync` reads from an OCI Image Layout folder on
+  the same machine, `oci-layout://<folder>`, without a registry.
+- A new workspace holds `flows/system/commit_workspace.yaml`,
+  `release_workspace.yaml` and `deploy_workspace.yaml`: an approved change is
+  committed, each commit is released to `.flowgen/releases`, and the latest
+  release is deployed to the cache and reloaded. Each run starts these three
+  from the last commit, so a broken one is fixed by a commit and a restart.
+  New flow and New resource are on.
+- A new workspace holds Flowgen Agent, `flows/system/flowgen_agent.yaml`,
+  in the Agents chat, with its tools in `flows/system/flowgen_agent/`: list and read
+  flows, resources and logs, validate files, test scripts, and propose a
+  change. It asks the AI gateway for the model `default`.
+- `http_request` calls `http://` endpoints as well as `https://` ones.
+- In Logs and a flow's activity, clicking a level shows only that level and
+  clicking it again restores the default levels; ⌘-, Ctrl- or Shift-click
+  adds or removes one level.
+- `POST /api/workspace/test` runs a Rhai script on sample events, as
+  `flowgen test` does, importing the draft resources it is sent before the
+  deployed ones; a machine key may call it.
+- Every run sets `FLOWGEN_URL`, `FLOWGEN_MCP_URL` and
+  `FLOWGEN_AI_GATEWAY_URL` to the addresses of its own servers, unless they
+  are set already.
+- `ai_completion` `mcp_servers[].url` supports `{{env.VAR_NAME}}` templates.
+- The MCP server sends `notifications/tools/list_changed` when a tool starts
+  or stops, and returns `Mcp-Session-Id` from `initialize`, so an agent that
+  connects before its tools start picks them up.
+- `flowgen bootstrap` commits the system flows of this version where a
+  workspace lacks them or holds other content, such as in one an earlier
+  version created, in one commit. It lists them in `.system-flows` at the
+  root of the workspace, and deletes a system flow an earlier bootstrap
+  listed that this version no longer has; other flows in `flows/system/`
+  stay. A run on a workspace without the lifecycle
+  flows stops and names the command; a run on one whose system flows differ
+  names it too.
+- A new flow or resource can start from a hub's template: Templates in the
+  editor of a new file lists them. A hub is a flow `flows/system/<id>_hub.yaml`
+  that returns its catalog's files when the web UI asks, through an
+  `inproc_endpoint`; a new workspace has `connve_hub.yaml`, reading
+  `ghcr.io/connve/hub/flowgen:<version>`, and `flowgen bootstrap` adds it to
+  an older one. A template becomes one change with its files, validated and
+  approved like any other. `GET /api/hubs` and `GET /api/hubs/{hub}/templates`
+  list them.
+- A new flow's file name follows its display name, as `order_sync.yaml`,
+  until the name is edited. The path shows its folders and the name apart.
+- Every run sets `FLOWGEN_VERSION` to its version, for flows to pick what
+  matches it.
+- `flowgen test <script.rhai> --data <file or folder>` runs a Rhai script on
+  sample events as the `script` task runs it, with its module imports and an
+  in-memory `ctx.cache`, prints what each sample emits or the error it raised,
+  and exits with `1` when one fails.
+- `flowgen <folder>` and `flowgen bootstrap <folder>` run a workspace in any
+  folder. A folder inside a git repository is a workspace of that
+  repository, so one repository holds a folder per environment; its changes
+  commit and release only that folder. The lifecycle flows read the
+  repository and folder from `FLOWGEN_REPOSITORY` and
+  `FLOWGEN_WORKSPACE_PATH`, which a run sets. Without a folder, the workspace
+  is `FLOWGEN_HOME` or `~/flowgen`, its own repository.
+- The web UI shows when a newer flowgen release is out, next to the version,
+  linked to its release notes. `web.update_check` sets where and how often it
+  checks, or turns the check off.
+- Duplicate, in the editor's more actions, opens a copy of a flow or resource
+  as `<name>_copy`, or `<name>_copy_2` and on when that is taken.
+- The Agents page without models links to Templates to add one, and its New
+  button is off until a model is available.
+- The Templates button of a new file is off, with the reason, when no hub
+  answers with templates.
+
+### Fixed
+
+- Listing the keys of a NATS bucket fails when the key stream breaks
+  partway, so a `kv_store` `list` or prune never acts on part of the keys.
+- With the System theme, a page of the web UI opens in the system's light or
+  dark theme from its first paint.
+- A local run opens the browser once the web UI accepts connections.
+
 ## 0.154.0
 
 ### Breaking

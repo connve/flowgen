@@ -47,20 +47,17 @@ async fn start_nats() -> (ContainerAsync<GenericImage>, String) {
 fn app_config_with_cache(url: String) -> AppConfig {
     AppConfig {
         cache: Some(CacheOptions {
-            enabled: true,
             cache_type: CacheType::Nats,
             credentials_path: None,
             url,
+            path: std::path::PathBuf::from(".flowgen/state.redb"),
             db_name: None,
             runtime: BucketOptions::default(),
             system: SystemBucketOptions::default(),
             history: Some(64),
             tombstone_ttl: Some(Duration::from_secs(3600)),
         }),
-        flows: FlowOptions {
-            path: None,
-            cache: None,
-        },
+        flows: FlowOptions::default(),
         resources: None,
         http_server: None,
         mcp_server: None,
@@ -70,6 +67,7 @@ fn app_config_with_cache(url: String) -> AppConfig {
         retry: None,
         telemetry: None,
         shutdown_timeout: flowgen::config::default_shutdown_timeout(),
+        host: flowgen::config::default_host(),
         ai_budget: None,
     }
 }
@@ -111,30 +109,6 @@ async fn init_cache_propagates_tombstone_ttl_to_every_bucket_it_creates() {
     probe_bucket_supports_ttl(runtime, "runtime").await;
     probe_bucket_supports_ttl(flows, "flows").await;
     probe_bucket_supports_ttl(resources, "resources").await;
-}
-
-#[tokio::test]
-#[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
-async fn init_cache_falls_back_to_memory_when_cache_is_disabled() {
-    // Sanity check: when `cache.enabled: false`, `init_cache` must
-    // return the in-memory backend even if a NATS URL is
-    // configured, so the app boots offline.
-    let mut config = app_config_with_cache("nats://unreachable.example:4222".to_string());
-    if let Some(cache) = config.cache.as_mut() {
-        cache.enabled = false;
-    }
-
-    let cache = App::init_cache(&config, None)
-        .await
-        .expect("memory fallback init");
-    cache
-        .put("probe", Bytes::from_static(b"ok"), None)
-        .await
-        .expect("memory backend must accept puts");
-    assert_eq!(
-        &cache.get("probe").await.expect("get").expect("present")[..],
-        b"ok"
-    );
 }
 
 #[tokio::test]

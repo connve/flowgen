@@ -57,13 +57,6 @@ pub struct LlmProxy {
     /// bare id, leaving the model choice to the routing script.
     #[serde(default)]
     pub models: Vec<String>,
-    /// HTTP headers a request must carry, with matching values, for this
-    /// proxy to be visible on `GET <path>/models` and reachable at all.
-    /// All declared headers must match (AND). An empty map (the default)
-    /// means every caller can reach it. A caller missing a required header
-    /// gets the same 404 as an unknown proxy name.
-    #[serde(default)]
-    pub headers: std::collections::HashMap<String, String>,
     /// Wire protocol exposed for this task. Defaults to OpenAI-compatible.
     #[serde(default)]
     pub protocol: Protocol,
@@ -291,7 +284,6 @@ mod tests {
         Arc::new(LlmProxy {
             name: "test_proxy".to_string(),
             models: Vec::new(),
-            headers: std::collections::HashMap::new(),
             protocol: Protocol::Openai,
             credentials_path: None,
             auth: None,
@@ -485,7 +477,6 @@ mod tests {
         let cfg = LlmProxy {
             name: "gw".to_string(),
             models: vec!["glm-4.6".to_string(), "kimi-k2.7-code".to_string()],
-            headers: std::collections::HashMap::new(),
             protocol: Protocol::Openai,
             credentials_path: Some(PathBuf::from("/c.json")),
             auth: None,

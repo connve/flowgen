@@ -341,8 +341,8 @@ pub fn router(
 }
 
 /// Binds the internal endpoint on `0.0.0.0:port`.
-pub async fn bind(port: u16) -> Result<tokio::net::TcpListener, Error> {
-    let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
+pub async fn bind(host: &str, port: u16) -> Result<tokio::net::TcpListener, Error> {
+    let listener = tokio::net::TcpListener::bind((host, port))
         .await
         .map_err(|source| Error::BindListener { port, source })?;
     info!(port, "Bound cluster server");

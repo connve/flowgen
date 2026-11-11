@@ -67,6 +67,11 @@ pub enum Error {
         #[source]
         source: async_nats::error::Error<async_nats::jetstream::kv::WatchErrorKind>,
     },
+    #[error("KV keys listing stopped partway: {source}")]
+    KVKeysStream {
+        #[source]
+        source: async_nats::jetstream::kv::WatcherError,
+    },
     #[error("KV watch subscription error: {source}")]
     KVWatch {
         #[source]
@@ -141,7 +146,7 @@ pub struct Cache {
 
 impl Cache {
     /// Connects to NATS and initializes the KV bucket.
-    pub async fn init(mut self, bucket: &str) -> Result<Self, Error> {
+    pub async fn init(self, bucket: &str) -> Result<Self, Error> {
         let mut builder = crate::client::ClientBuilder::new();
         builder.url(self.url.clone());
         if let Some(path) = self.credentials_path.clone() {
@@ -157,7 +162,15 @@ impl Cache {
         let jetstream = client
             .jetstream
             .ok_or_else(|| Error::MissingJetStreamContext)?;
+        self.init_on(jetstream, bucket).await
+    }
 
+    /// Initializes the KV bucket on a JetStream connection shared with other tasks.
+    pub async fn init_on(
+        mut self,
+        jetstream: async_nats::jetstream::Context,
+        bucket: &str,
+    ) -> Result<Self, Error> {
         self.bucket = bucket.to_string();
         self.store = Some(self.open_bucket(&jetstream).await?);
         self.jetstream = Some(jetstream);
@@ -229,6 +242,14 @@ impl Cache {
             return Err(error);
         }
         op().await
+    }
+
+    /// Whether the bucket keeps a TTL per key, which needs NATS 2.11+.
+    pub fn allows_ttl(&self) -> bool {
+        match &self.store {
+            Some(store) => store.stream.cached_info().config.allow_message_ttl,
+            None => false,
+        }
     }
 
     fn store(&self) -> Result<&async_nats::jetstream::kv::Store, flowgen_core::cache::Error> {
@@ -452,10 +473,13 @@ impl Cache {
             flowgen_core::cache::CacheError::GetFailed(Box::new(Error::KVKeys { source: e }))
         })?;
         while let Some(result) = key_stream.next().await {
-            if let Ok(key) = result {
-                if key.starts_with(prefix) {
-                    keys.push(key);
-                }
+            let key = result.map_err(|e| {
+                flowgen_core::cache::CacheError::ListKeysFailed(Box::new(Error::KVKeysStream {
+                    source: e,
+                }))
+            })?;
+            if key.starts_with(prefix) {
+                keys.push(key);
             }
         }
         Ok(keys)

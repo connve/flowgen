@@ -59,6 +59,6 @@ With `initial_copy: true`, the task notes the current position in the oplog, rea
 
 The documents are emitted in batches of `copy_batch_size`: each batch is one event with `operation_type: copy` and its documents as an array in `event.data`; add `iterate` after the task for one event per document. Up to 64 batches go through the flow at a time, collection by collection, without a defined order inside a collection. Views and `system.` collections are not copied.
 
-The copy runs when the cache holds no resume token: on the first start, after a copy that did not finish, and when the oplog no longer holds the stored position. Documents already emitted by an unfinished copy are emitted again. With the in-memory cache, used when no [`cache`](/docs/flowgen/concepts/configuration#cache) is configured, the token is lost on restart, so every start copies again.
+The copy runs when the cache holds no resume token: on the first start, after a copy that did not finish, and when the oplog no longer holds the stored position. Documents already emitted by an unfinished copy are emitted again.
 
 The copy reads each collection through one cursor. When the flow holds a document longer than the server keeps an idle session, the server closes the cursor and the copy starts over. When the copy takes longer than the oplog keeps changes, the stream cannot continue from the noted position and the copy runs again; size the oplog to hold the changes made during a copy.

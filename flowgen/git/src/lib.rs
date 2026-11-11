@@ -14,6 +14,7 @@ pub mod push;
 /// HTTPS credentials and shallow clones shared by the git tasks.
 pub mod remote;
 pub mod sync;
+pub mod workspace;
 
 /// The connector of this crate's task types.
 pub const CONNECTOR: Connector = Connector {
@@ -27,9 +28,19 @@ impl TaskMeta for push::GitPush {
     const CONNECTOR: Connector = CONNECTOR;
     const CPU_INTENSIVE: bool = true;
 
+    fn validate(&self) -> Result<(), TaskError> {
+        if !self.templated() {
+            self.destination()?;
+        }
+        Ok(())
+    }
+
     fn connections(&self) -> Vec<Connection> {
-        vec![Connection::new(CONNECTOR, self.credentials_path.as_deref())
-            .target(&[&self.repository_url])]
+        let connection = Connection::new(CONNECTOR, self.credentials_path.as_deref());
+        match self.destination() {
+            Ok(push::Destination::Remote(url, _)) => vec![connection.target(&[url])],
+            Ok(push::Destination::Local(_)) | Err(_) => Vec::new(),
+        }
     }
 }
 
@@ -37,9 +48,19 @@ impl TaskMeta for sync::GitSync {
     const CONNECTOR: Connector = CONNECTOR;
     const CPU_INTENSIVE: bool = true;
 
+    fn validate(&self) -> Result<(), TaskError> {
+        if !self.templated() {
+            self.source()?;
+        }
+        Ok(())
+    }
+
     fn connections(&self) -> Vec<Connection> {
-        vec![Connection::new(CONNECTOR, self.credentials_path.as_deref())
-            .target(&[&self.repository_url])]
+        let connection = Connection::new(CONNECTOR, self.credentials_path.as_deref());
+        match self.source() {
+            Ok(sync::Source::Remote(url)) => vec![connection.target(&[url])],
+            Ok(sync::Source::Local(_)) | Err(_) => Vec::new(),
+        }
     }
 }
 

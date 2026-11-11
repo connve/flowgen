@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { page } from '$app/state';
-	import StateMessage from '$lib/StateMessage.svelte';
+	import { StateMessage } from '@connve/ui';
 	import { m } from '$lib/paraglide/messages.js';
 	import { pageTitle } from '$lib/pageTitle';
 </script>

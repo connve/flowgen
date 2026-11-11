@@ -11,7 +11,6 @@ flow:
     description: "Consumes forwarded emails from NATS, converts JSON to Avro using an inline schema, and archives them to the object store partitioned by EventDate."
     tags: ["cloudflare", "email", "nats", "object-store", "example"]
   tasks:
-
     - nats_jetstream_subscribe:
         name: start_subscription
         credentials_path: /etc/nats/credentials.json

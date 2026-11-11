@@ -10,7 +10,6 @@ flow:
     tags: ["postgres", "write", "upsert", "example"]
   require_leader_election: true
   tasks:
-
     # Tick every 5 minutes.
     - generate:
         name: tick

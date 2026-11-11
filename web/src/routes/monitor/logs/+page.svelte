@@ -2,12 +2,16 @@
 	import { onDestroy, onMount, tick } from 'svelte';
 	import { base } from '$app/paths';
 	import Icon from '@iconify/svelte';
-	import CopyButton from '$lib/CopyButton.svelte';
-	import StatusDot from '$lib/StatusDot.svelte';
-	import Inspector from '$lib/Inspector.svelte';
-	import InspectorSection from '$lib/InspectorSection.svelte';
-	import StateMessage from '$lib/StateMessage.svelte';
-	import { apiUrl, encodePath, errorMessage, failure, type LogRecord } from '$lib/api';
+	import {
+		CopyButton,
+		IconButton,
+		Inspector,
+		InspectorSection,
+		StateMessage,
+		StatusDot
+	} from '@connve/ui';
+	import { encodePath, errorMessage, listLogs, type LogRecord } from '$lib/api';
+	import { logsStream } from '$lib/urls';
 	import { formatRelative } from '$lib/time';
 	import { formatDuration } from '$lib/toolRuns.svelte';
 	import { rafBatch } from '$lib/rafBatch';
@@ -21,7 +25,12 @@
 		timestampMs,
 	} from '$lib/logRecord';
 	import { LOGS_LIMIT_MAX, clampLogsLimit } from '$lib/logsLimit';
-	import { getLogsLimit, logsLevels, setLogsLimit } from '$lib/logsPageState.svelte';
+	import {
+		getLogsLimit,
+		LOGS_LEVELS_DEFAULT,
+		logsLevels,
+		setLogsLimit,
+	} from '$lib/logsPageState.svelte';
 	import { m } from '$lib/paraglide/messages.js';
 	import { pageTitle } from '$lib/pageTitle';
 
@@ -124,14 +133,23 @@
 	let topPad = $derived(startIdx * ROW_HEIGHT);
 	let bottomPad = $derived(Math.max(0, (filtered.length - endIdx) * ROW_HEIGHT));
 
-	function toggleLevel(level: Level) {
-		levelFilter[level] = !levelFilter[level];
-		if (levelFilter[level]) {
-			void loadLevels([level], logsLimit);
-		} else {
-			rows = rows.filter((row) => row.record.level !== level);
-			if (selected?.level === level) selected = null;
-		}
+	// Like a Grafana legend: a click shows only that level, a click on the
+	// only level shown restores the defaults, and ⌘/Ctrl/Shift-click adds or
+	// removes one level.
+	function clickLevel(level: Level, event: MouseEvent) {
+		const toggle = event.metaKey || event.ctrlKey || event.shiftKey;
+		const solo = selectedLevels().length === 1 && levelFilter[level];
+		const next: Record<Level, boolean> = toggle
+			? { ...levelFilter, [level]: !levelFilter[level] }
+			: solo
+				? { ...LOGS_LEVELS_DEFAULT }
+				: { info: false, warn: false, error: false, debug: false, trace: false, [level]: true };
+		const added = LEVELS.filter((key) => next[key] && !levelFilter[key]);
+		const removed = LEVELS.filter((key) => !next[key] && levelFilter[key]);
+		for (const key of LEVELS) levelFilter[key] = next[key];
+		rows = rows.filter((row) => !removed.includes(row.record.level));
+		if (selected && removed.includes(selected.level)) selected = null;
+		void loadLevels(added, logsLimit);
 		connectStream();
 	}
 
@@ -155,9 +173,7 @@
 	async function loadLevel(level: Level, limit: number) {
 		const request = ++levelRequests[level];
 		try {
-			const res = await fetch(apiUrl(`api/logs?limit=${limit}&levels=${level}`));
-			if (!res.ok) throw await failure(res);
-			const body = (await res.json()) as LogRecord[];
+			const { data: body } = await listLogs({ query: { limit, levels: [level] } });
 			loadError = null;
 			if (request !== levelRequests[level] || !levelFilter[level]) return;
 			const fresh = body.map((record) => ({ id: nextId++, record }));
@@ -205,8 +221,7 @@
 		source = null;
 		const levels = selectedLevels();
 		if (levels.length === 0) return;
-		const query = levels.map((level) => `levels=${level}`).join('&');
-		source = new EventSource(apiUrl(`api/logs/stream?${query}`));
+		source = new EventSource(logsStream({ levels }));
 		source.addEventListener('log', (ev) => {
 			try {
 				flushLogs(JSON.parse(ev.data) as LogRecord);
@@ -338,28 +353,14 @@
 						{/if}
 					</label>
 				{:else}
-					<div class="tooltip tooltip-bottom" data-tip={m.logs_search_placeholder()}>
-						<button
-							type="button"
-							class="flex h-8 w-8 items-center justify-center rounded-md text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content"
-							aria-label={m.logs_search_placeholder()}
-							onclick={() => (searchOpen = true)}
-						>
-							<Icon icon="tabler:search" class="h-5 w-5" />
-						</button>
-					</div>
+					<IconButton
+						icon="tabler:search"
+						label={m.logs_search_placeholder()}
+						onclick={() => (searchOpen = true)}
+					/>
 				{/if}
 				{#if !atTop && live}
-					<div class="tooltip tooltip-bottom" data-tip={m.logs_jump_to_latest()}>
-						<button
-							type="button"
-							class="flex h-8 w-8 items-center justify-center rounded-md text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content"
-							aria-label={m.logs_jump_to_latest()}
-							onclick={resume}
-						>
-							<Icon icon="tabler:arrow-up" class="h-5 w-5" />
-						</button>
-					</div>
+					<IconButton icon="tabler:arrow-up" label={m.logs_jump_to_latest()} onclick={resume} />
 				{/if}
 				<div class="tooltip tooltip-bottom" data-tip={live ? m.logs_tail_pause() : m.logs_tail_resume()}>
 					<button
@@ -371,7 +372,7 @@
 						onclick={() => (live = !live)}
 					>
 						<span
-							class="h-2 w-2 rounded-full {live ? 'animate-pulse bg-success' : 'bg-base-content/30'}"
+							class="h-2 w-2 rounded-full {live ? 'animate-pulse bg-primary' : 'bg-base-content/30'}"
 							aria-hidden="true"
 						></span>
 						{live ? m.logs_live() : m.logs_paused()}
@@ -420,7 +421,7 @@
 						type="button"
 						class="chip {levelChipClass(key, levelFilter[key])}"
 						aria-pressed={levelFilter[key]}
-						onclick={() => toggleLevel(key)}
+						onclick={(event) => clickLevel(key, event)}
 					>
 						<span>{levelLabel(key)}</span>
 						{#if levelFilter[key]}

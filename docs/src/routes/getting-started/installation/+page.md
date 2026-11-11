@@ -4,7 +4,7 @@
 
 Flowgen runs in two shapes depending on what you need:
 
-- **Single-node / local.** One process, in-memory cache, no leader
+- **Single-node / local.** One process, cache in a local redb file, no leader
   election needed. Suits development, edge boxes, small batch jobs,
   and anywhere a single replica is enough. Installation paths below
   (binary, source, Docker) all work in this mode out of the box.
@@ -38,9 +38,8 @@ filesystem source wins.
   changes without restarting the worker — push to the branch and
   watcher restarts only the affected flows. Works with any HTTPS Git
   host (GitHub, GitLab, Bitbucket, Gitea, self-hosted). See
-  [Git Sync](https://connve.com/docs/flowgen/git/sync) and the
-  [`examples/git/sync_workspace.yaml`](https://github.com/connve/flowgen/blob/main/examples/git/sync_workspace.yaml)
-  bootstrap.
+  [Git Sync](https://connve.com/docs/flowgen/git/sync) and
+  [Loading flows from Git](https://connve.com/docs/flowgen/git/guides/loading-flows).
 - **OCI artifact sync.** Same hot-reload shape as Git, but the
   workspace is packaged as an OCI artifact and pulled from an OCI
   registry (GHCR, ECR, GAR, Artifactory, Harbor). OCI registries
@@ -51,9 +50,8 @@ filesystem source wins.
   flowgen-native `{username, password}` shape and the standard
   Docker `config.json` payload, so the same `imagePullSecrets`
   Secret authenticates artifact pulls. See
-  [OCI Sync](https://connve.com/docs/flowgen/oci/sync) and the
-  [`examples/oci/sync_workspace.yaml`](https://github.com/connve/flowgen/blob/main/examples/oci/sync_workspace.yaml)
-  bootstrap.
+  [OCI Sync](https://connve.com/docs/flowgen/oci/sync) and
+  [Loading flows from OCI](https://connve.com/docs/flowgen/oci/guides/loading-flows).
 
 Hot-reload requires a system cache that supports key watches (the
 filesystem source does not). In single-node mode the filesystem path
@@ -134,7 +132,28 @@ helm repo add connve https://helm.connve.com
 helm install flowgen connve/flowgen
 ```
 
-See the [Helm chart values](https://github.com/connve/flowgen/blob/main/charts/flowgen/values.yaml) for configuration options.
+See the [Helm chart values](https://github.com/connve/flowgen/blob/main/charts/flowgen/values.yaml) for configuration options. `flowgen.config.settings` is the app config, with defaults for a cluster: a NATS cache, and flows and resources from the cache. Set the keys to change; each server it enables gets its port and a Service. `flowgen.systemFlows` runs the [lifecycle flows](/docs/flowgen/concepts/authoring#lifecycle-flows), Flowgen Agent and the hubs, with their repository, releases and credentials:
+
+```yaml
+flowgen:
+  config:
+    settings:
+      cache:
+        url: "nats://nats.nats:4222"
+      web:
+        enabled: true
+        auth: { ... }
+        authoring:
+          enabled: true
+  systemFlows:
+    enabled: true
+    repository: https://github.com/acme/workspace.git
+    releases: ghcr.io/acme/workspace
+    gitCredentials:
+      secretName: workspace-git
+    registryCredentials:
+      secretName: workspace-registry
+```
 
 ## Verify
 

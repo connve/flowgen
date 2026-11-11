@@ -1,0 +1,55 @@
+# Releases each new commit of the workspace to FLOWGEN_RELEASES, an OCI Image
+# Layout on this machine by default or a registry, tagged with the commit and
+# latest, and records it under releases.<commit> in the system cache. Leave
+# it out when the repository's CI releases instead.
+flow:
+  labels:
+    display_name: "Release Workspace"
+    description: "Releases each new commit of the workspace as an OCI artifact."
+    tags: ["system", "git-sync", "oci-push", "authoring"]
+  require_leader_election: true
+  tasks:
+    - generate:
+        name: tick
+        interval: "5s"
+
+    # Emits the files committed in the workspace folder when the branch has a new commit.
+    - git_sync:
+        name: read_workspace
+        repository: "{{env.FLOWGEN_REPOSITORY}}"
+        path: "{{env.FLOWGEN_WORKSPACE_PATH}}"
+        credentials_path: "{{env.FLOWGEN_GIT_CREDENTIALS}}"
+
+    # Keeps the flows and resources, the files a release deploys.
+    - script:
+        name: to_release
+        code: |
+          let files = [];
+          for file in event.data.files {
+              if file.path.starts_with("flows/") || file.path.starts_with("resources/") {
+                  files.push(file);
+              }
+          }
+          #{ commit: event.data.commit, files: files }
+
+    - oci_push:
+        name: release
+        repository: "{{env.FLOWGEN_RELEASES}}"
+        credentials_path: "{{env.FLOWGEN_REGISTRY_CREDENTIALS}}"
+        tags: ["{{event.data.commit}}", "latest"]
+        annotations:
+          org.opencontainers.image.revision: "{{event.data.commit}}"
+
+    - script:
+        name: to_record
+        code: |
+          #{ commit: event.data.commit, content: event.data.digest }
+
+    # The one record of what is released, read by the changes view.
+    - kv_store:
+        name: record_release
+        url: "{{env.FLOWGEN_CACHE_URL}}"
+        credentials_path: "{{env.FLOWGEN_CACHE_CREDENTIALS}}"
+        bucket: "{{env.FLOWGEN_SYSTEM_BUCKET}}"
+        operation: put
+        key: "releases.{{event.data.commit}}"

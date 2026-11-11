@@ -15,6 +15,95 @@ struct Manifest {
     kind: String,
     metadata: Option<serde_yaml::Value>,
     spec: Option<serde_yaml::Value>,
+    data: Option<serde_yaml::Value>,
+}
+
+/// The `config.yaml` the chart renders, as flowgen loads it.
+fn app_config(manifests: &[Manifest]) -> flowgen::config::AppConfig {
+    let yaml = manifests
+        .iter()
+        .find(|m| {
+            m.kind == "ConfigMap"
+                && m.data
+                    .as_ref()
+                    .is_some_and(|d| d.get("config.yaml").is_some())
+        })
+        .and_then(|m| m.data.as_ref())
+        .and_then(|d| d.get("config.yaml"))
+        .and_then(|v| v.as_str())
+        .expect("chart should render config.yaml")
+        .to_string();
+    flowgen::config::AppConfig::load(
+        config::File::from_str(&yaml, config::FileFormat::Yaml),
+        config::Environment::with_prefix("FLOWGEN_CHART_TEST_UNSET"),
+    )
+    .expect("flowgen should load the rendered config")
+}
+
+fn env_value(container: &serde_yaml::Value, name: &str) -> Option<String> {
+    container
+        .get("env")
+        .and_then(|e| e.as_sequence())?
+        .iter()
+        .find(|e| e.get("name").and_then(|n| n.as_str()) == Some(name))
+        .and_then(|e| e.get("value"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
+#[test]
+fn the_default_config_loads_in_flowgen() {
+    let config = app_config(&render(""));
+    assert!(config.flows.cache.is_some_and(|cache| cache.enabled));
+    assert!(!config.flows.system);
+}
+
+#[test]
+fn system_flows_run_from_flowgen_with_their_variables_and_credentials() {
+    let manifests = render(
+        r#"flowgen:
+  systemFlows:
+    enabled: true
+    repository: https://git.example.com/a.git
+    workspacePath: workspace/
+    releases: registry.example.com/a
+    gitCredentials:
+      secretName: git
+    registryCredentials:
+      secretName: registry
+"#,
+    );
+    assert!(app_config(&manifests).flows.system);
+
+    let deployment = find_deployment(&manifests);
+    let pod = pod_spec(&deployment);
+    let container = container(pod);
+    for (name, value) in [
+        ("FLOWGEN_REPOSITORY", "https://git.example.com/a.git"),
+        ("FLOWGEN_WORKSPACE_PATH", "workspace/"),
+        ("FLOWGEN_RELEASES", "registry.example.com/a"),
+        (
+            "FLOWGEN_GIT_CREDENTIALS",
+            "/etc/flowgen/system-flows/git/git.json",
+        ),
+        (
+            "FLOWGEN_REGISTRY_CREDENTIALS",
+            "/etc/flowgen/system-flows/registry/registry.json",
+        ),
+    ] {
+        assert_eq!(env_value(container, name).as_deref(), Some(value), "{name}");
+    }
+    let secrets: Vec<&str> = pod
+        .get("volumes")
+        .and_then(|v| v.as_sequence())
+        .expect("pod should have volumes")
+        .iter()
+        .filter_map(|v| v.get("secret")?.get("secretName")?.as_str())
+        .collect();
+    assert!(
+        secrets.contains(&"git") && secrets.contains(&"registry"),
+        "{secrets:?}"
+    );
 }
 
 fn render(values: &str) -> Vec<Manifest> {
@@ -149,9 +238,11 @@ fn service_port(svc: &Manifest) -> u64 {
 fn ai_gateway_service_renders_when_configured() {
     let manifests = render(
         r#"flowgen:
-  ai_gateway:
-    type: ClusterIP
-    port: 3002
+  config:
+    settings:
+      ai_gateway:
+        enabled: true
+        port: 3002
 "#,
     );
     let svc = service_named(&manifests, "-ai-gateway").expect("ai-gateway Service should render");
@@ -168,13 +259,25 @@ fn ai_gateway_service_omitted_by_default() {
 fn web_service_renders_when_configured() {
     let manifests = render(
         r#"flowgen:
-  web:
-    type: ClusterIP
-    port: 8080
+  config:
+    settings:
+      web:
+        enabled: true
+        port: 8080
+  services:
+    web:
+      type: LoadBalancer
 "#,
     );
     let svc = service_named(&manifests, "-web").expect("web Service should render");
     assert_eq!(service_port(&svc), 8080);
+    assert_eq!(
+        svc.spec
+            .as_ref()
+            .and_then(|s| s.get("type"))
+            .and_then(|t| t.as_str()),
+        Some("LoadBalancer")
+    );
 }
 
 #[test]
@@ -211,16 +314,16 @@ fn container(pod: &serde_yaml::Value) -> &serde_yaml::Value {
         .expect("pod spec should have at least one container")
 }
 
-/// Regression: `http_server` is declared `Option<HttpServerOptions>` in
-/// the app config, so setting it to null in values.yaml must render a
-/// valid chart without a `nil pointer evaluating interface {}.port` from
-/// helm. Both the containerPort declaration and the Service manifest have
-/// to be guarded on the section being present.
+/// Regression: `http_server` is `Option<HttpServerOptions>` in the app
+/// config, so removing it from the settings must render a valid chart
+/// without the `http` port or its Service.
 #[test]
 fn http_server_disabled_renders_without_port_or_service() {
     let manifests = render(
         r#"flowgen:
-  http_server: null
+  config:
+    settings:
+      http_server: null
 "#,
     );
 
@@ -357,9 +460,11 @@ fn cluster_port_declared_without_network_policy_by_default() {
 fn cluster_network_policy_limits_cluster_port_to_flowgen_pods() {
     let manifests = render(
         r#"flowgen:
-  web:
-    type: ClusterIP
-    port: 8080
+  config:
+    settings:
+      web:
+        enabled: true
+        port: 8080
   cluster:
     networkPolicy: true
 "#,

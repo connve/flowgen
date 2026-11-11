@@ -3,14 +3,17 @@
 	import { base } from '$app/paths';
 	import Icon from '@iconify/svelte';
 	import {
-		apiUrl,
 		encodePath,
+		listChanges,
+		listConnections,
+		listFlows,
+		listResources,
 		type ChangeSummary,
 		type Connection,
 		type FlowSummary,
 		type ResourceSummary
 	} from '$lib/api';
-	import { agentConversations } from '$lib/agentConversations.svelte';
+	import { agentSessions } from '$lib/agentSessions.svelte';
 	import { authoringEnabled } from '$lib/changes';
 	import { connectorByName } from '$lib/connectors';
 	import { m } from '$lib/paraglide/messages.js';
@@ -39,25 +42,21 @@
 	let connections = $state<Connection[]>([]);
 	let changes = $state<ChangeSummary[]>([]);
 
-	async function list<T>(path: string, field?: string): Promise<T[]> {
-		try {
-			const res = await fetch(apiUrl(path));
-			if (!res.ok) return [];
-			const body = await res.json();
-			return (field ? body[field] : body) ?? [];
-		} catch {
-			return [];
-		}
+	function list<T>(call: Promise<{ data: T[] | undefined }>): Promise<T[]> {
+		return call.then(
+			({ data }) => data ?? [],
+			() => []
+		);
 	}
 
 	async function load() {
 		loading = flows.length === 0;
 		const enabled = await authoringEnabled();
 		[flows, resources, connections, changes] = await Promise.all([
-			list<FlowSummary>('api/flows'),
-			list<ResourceSummary>('api/resources'),
-			list<Connection>('api/connections'),
-			enabled ? list<ChangeSummary>('api/changes', 'changes') : Promise.resolve([])
+			list(listFlows()),
+			list(listResources()),
+			list(listConnections()),
+			enabled ? list(listChanges().then(({ data }) => ({ data: data.changes }))) : Promise.resolve([])
 		]);
 		authoring = enabled;
 		loading = false;
@@ -90,7 +89,7 @@
 
 	let actions = $derived<Result[]>(
 		[
-			agents ? { label: m.agents_new_conversation(), icon: 'tabler:prompt', href: '/agents' } : null,
+			agents ? { label: m.agents_new_session(), icon: 'tabler:prompt', href: '/agents' } : null,
 			authoring ? { label: m.editor_new_flow(), icon: 'tabler:binary-tree', href: '/edit?new=flow' } : null,
 			authoring ? { label: m.editor_new_resource(), icon: 'tabler:file-code', href: '/edit?new=resource' } : null
 		]
@@ -100,12 +99,12 @@
 
 	// Groups in the order of the navigation tabs.
 	let items = $derived<Result[]>([
-		...agentConversations.list.map((conversation) => ({
+		...agentSessions.list.map((session) => ({
 			group: m.nav_agents(),
-			label: conversation.title,
-			detail: conversation.folder ?? undefined,
+			label: session.title,
+			detail: session.folder ?? undefined,
 			icon: 'tabler:message-2',
-			href: `${base}/agents/${encodeURIComponent(conversation.id)}`
+			href: `${base}/agents/${encodeURIComponent(session.id)}`
 		})),
 		...flows.map((flow) => ({
 			group: m.nav_flows(),

@@ -1,0 +1,21 @@
+# Flowgen Agent tool: reads one deployed resource.
+flow:
+  labels:
+    display_name: "Get Resource"
+    description: "Returns a deployed resource (script, query, schema) for Flowgen Agent."
+    tags: ["mcp", "agent", "flowgen"]
+  tasks:
+    - mcp_tool:
+        name: get_resource
+        description: "Get a deployed resource by key (its path in resources/), e.g. scripts/route.rhai."
+        input_schema:
+          type: object
+          properties:
+            key:
+              type: string
+          required: [key]
+
+    - http_request:
+        name: fetch
+        endpoint: "{{env.FLOWGEN_URL}}/api/resources/{{event.data.key}}"
+        method: GET

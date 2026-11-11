@@ -179,13 +179,7 @@ async fn cleanup_stale_cache_entries(ctx: &ReconcilerContext) {
         return;
     }
 
-    let prefix = ctx
-        .app_config
-        .flows
-        .cache
-        .as_ref()
-        .map(|c| c.prefix.as_str())
-        .unwrap_or(crate::config::DEFAULT_FLOWS_CACHE_PREFIX);
+    let prefix = crate::config::FLOWS_CACHE_PREFIX;
 
     let keys = match ctx.cache.list_keys(prefix).await {
         Ok(k) => k,
@@ -196,7 +190,7 @@ async fn cleanup_stale_cache_entries(ctx: &ReconcilerContext) {
     };
 
     for key in keys {
-        let flow_name = match derive_flow_name(&key, ctx) {
+        let flow_name = match derive_flow_name(&key) {
             Some(name) => name,
             None => continue,
         };
@@ -303,7 +297,7 @@ async fn reconcile_together(events: Vec<(String, WatchEvent)>, ctx: &ReconcilerC
 async fn reconcile_put(key: &str, value: bytes::Bytes, ctx: &ReconcilerContext) {
     // Gate by the cache prefix so non-flow keys are ignored entirely. The
     // derived name is only used until we have the parsed yaml.
-    let flow_id = match derive_flow_name(key, ctx) {
+    let flow_id = match derive_flow_name(key) {
         Some(name) => name,
         None => return,
     };
@@ -479,7 +473,7 @@ fn runs_source(flow_id: &str, source: Option<&str>, ctx: &ReconcilerContext) -> 
 
 /// Handles a `Delete` event: stops the flow and deregisters its routes/tools.
 async fn reconcile_delete(key: &str, ctx: &ReconcilerContext) {
-    let flow_name = match derive_flow_name(key, ctx) {
+    let flow_name = match derive_flow_name(key) {
         Some(name) => name,
         None => return,
     };
@@ -573,24 +567,20 @@ impl StoppedFlow {
     }
 }
 
-/// Derives a flow name from a cache key by stripping the configured flow prefix.
+/// Derives a flow name from a cache key by stripping the flow prefix.
 ///
 /// The remainder is returned verbatim — it is the same `flow.name` the sync
 /// bootstrap appended when writing the key, so registry lookups on delete
 /// events round-trip cleanly for any character `flow.name` permits.
-fn derive_flow_name(key: &str, ctx: &ReconcilerContext) -> Option<String> {
-    let prefix = ctx
-        .app_config
-        .flows
-        .cache
-        .as_ref()
-        .map(|c| c.prefix.as_str())
-        .unwrap_or(crate::config::DEFAULT_FLOWS_CACHE_PREFIX);
-
-    key.strip_prefix(&format!("{prefix}."))
+fn derive_flow_name(key: &str) -> Option<String> {
+    key.strip_prefix(&format!("{}.", crate::config::FLOWS_CACHE_PREFIX))
         .map(str::to_string)
         .or_else(|| {
-            warn!(key = %key, prefix = %prefix, "Watch event key does not match flow prefix, ignoring");
+            warn!(
+                key = %key,
+                prefix = crate::config::FLOWS_CACHE_PREFIX,
+                "Watch event key does not match flow prefix, ignoring"
+            );
             None
         })
 }
@@ -610,18 +600,15 @@ fn parse_flow_config(key: &str, value: &bytes::Bytes) -> Result<(FlowConfigRaw, 
 /// Builds a minimal `ReconcilerContext` for tests that only exercise
 /// `derive_flow_name` and `parse_flow_config`.
 #[cfg(test)]
-fn test_context(prefix: &str) -> ReconcilerContext {
+fn test_context() -> ReconcilerContext {
     use flowgen_core::cache::memory::MemoryCache;
 
     let app_config = crate::config::AppConfig {
         cache: None,
         flows: crate::config::FlowOptions {
             path: None,
-            cache: Some(crate::config::FlowCacheOptions {
-                enabled: true,
-                prefix: prefix.to_string(),
-                db_name: "test".to_string(),
-            }),
+            cache: Some(crate::config::FlowCacheOptions { enabled: true }),
+            system: false,
         },
         resources: None,
         http_server: None,
@@ -632,6 +619,7 @@ fn test_context(prefix: &str) -> ReconcilerContext {
         retry: None,
         telemetry: None,
         shutdown_timeout: crate::config::default_shutdown_timeout(),
+        host: crate::config::default_host(),
         ai_budget: None,
     };
 
@@ -707,68 +695,23 @@ mod tests {
 
     #[test]
     fn derive_flow_name_strips_prefix() {
-        let ctx = test_context("flowgen.flows");
-        let name = derive_flow_name("flowgen.flows.my-flow", &ctx);
-        assert_eq!(name, Some("my-flow".to_string()));
+        assert_eq!(
+            derive_flow_name("flows.my-flow"),
+            Some("my-flow".to_string())
+        );
     }
 
     #[test]
     fn derive_flow_name_preserves_dots() {
-        let ctx = test_context("flowgen.flows");
-        let name = derive_flow_name("flowgen.flows.my.nested.flow", &ctx);
-        assert_eq!(name, Some("my.nested.flow".to_string()));
+        assert_eq!(
+            derive_flow_name("flows.my.nested.flow"),
+            Some("my.nested.flow".to_string())
+        );
     }
 
     #[test]
     fn derive_flow_name_returns_none_for_non_matching_prefix() {
-        let ctx = test_context("flowgen.flows");
-        let name = derive_flow_name("flowgen.resources.tpl", &ctx);
-        assert!(name.is_none());
-    }
-
-    #[test]
-    fn derive_flow_name_uses_default_prefix_when_cache_config_is_none() {
-        let app_config = crate::config::AppConfig {
-            cache: None,
-            flows: crate::config::FlowOptions {
-                path: None,
-                cache: None,
-            },
-            resources: None,
-            http_server: None,
-            mcp_server: None,
-            ai_gateway: None,
-            web: None,
-            health: Default::default(),
-            retry: None,
-            telemetry: None,
-            shutdown_timeout: crate::config::default_shutdown_timeout(),
-            ai_budget: None,
-        };
-
-        let shared: Arc<dyn Cache> = Arc::new(flowgen_core::cache::memory::MemoryCache::new());
-        let holder_identity = "test-pod".to_string();
-        let ctx = ReconcilerContext {
-            cache: Arc::clone(&shared),
-            system_cache: Arc::clone(&shared),
-            runtime_cache: Arc::clone(&shared),
-            app_config: Arc::new(app_config),
-            resource_loader: None,
-            servers: FlowServers::default(),
-            filesystem_flow_paths: Arc::new(HashSet::new()),
-            flow_registry: Arc::new(RwLock::new(HashMap::new())),
-            client_registry: Arc::new(flowgen_core::client_registry::ClientRegistry::new()),
-            peer_registry: Arc::new(flowgen_core::peer::PeerRegistry::new(
-                shared,
-                holder_identity.clone(),
-            )),
-            holder_identity,
-            shutdown: CancellationToken::new(),
-            stopping: Default::default(),
-        };
-
-        let name = derive_flow_name("flows.default-test", &ctx);
-        assert_eq!(name, Some("default-test".to_string()));
+        assert!(derive_flow_name("resources.tpl").is_none());
     }
 
     // -- parse_flow_config --------------------------------------------------
@@ -856,18 +799,15 @@ flow:
 
     // -- cleanup_stale_cache_entries ------------------------------------------
 
-    fn test_context_with_fs_flows(prefix: &str, fs_flows: HashSet<String>) -> ReconcilerContext {
+    fn test_context_with_fs_flows(fs_flows: HashSet<String>) -> ReconcilerContext {
         use flowgen_core::cache::memory::MemoryCache;
 
         let app_config = crate::config::AppConfig {
             cache: None,
             flows: crate::config::FlowOptions {
                 path: None,
-                cache: Some(crate::config::FlowCacheOptions {
-                    enabled: true,
-                    prefix: prefix.to_string(),
-                    db_name: "test".to_string(),
-                }),
+                cache: Some(crate::config::FlowCacheOptions { enabled: true }),
+                system: false,
             },
             resources: None,
             http_server: None,
@@ -878,6 +818,7 @@ flow:
             retry: None,
             telemetry: None,
             shutdown_timeout: crate::config::default_shutdown_timeout(),
+            host: crate::config::default_host(),
             ai_budget: None,
         };
 
@@ -906,45 +847,31 @@ flow:
     #[tokio::test]
     async fn cleanup_stale_cache_entries_deletes_filesystem_shadowed_keys() {
         let fs_flows = HashSet::from(["my-flow".to_string(), "other-flow".to_string()]);
-        let ctx = test_context_with_fs_flows("flowgen.flows", fs_flows);
+        let ctx = test_context_with_fs_flows(fs_flows);
 
         // Populate cache with entries: two match filesystem flows, one does not.
         ctx.cache
-            .put("flowgen.flows.my-flow", bytes::Bytes::from("a"), None)
+            .put("flows.my-flow", bytes::Bytes::from("a"), None)
             .await
             .unwrap();
         ctx.cache
-            .put("flowgen.flows.other-flow", bytes::Bytes::from("b"), None)
+            .put("flows.other-flow", bytes::Bytes::from("b"), None)
             .await
             .unwrap();
         ctx.cache
-            .put(
-                "flowgen.flows.cache-only-flow",
-                bytes::Bytes::from("c"),
-                None,
-            )
+            .put("flows.cache-only-flow", bytes::Bytes::from("c"), None)
             .await
             .unwrap();
 
         cleanup_stale_cache_entries(&ctx).await;
 
         // Filesystem-shadowed entries should be deleted.
-        assert!(ctx
-            .cache
-            .get("flowgen.flows.my-flow")
-            .await
-            .unwrap()
-            .is_none());
-        assert!(ctx
-            .cache
-            .get("flowgen.flows.other-flow")
-            .await
-            .unwrap()
-            .is_none());
+        assert!(ctx.cache.get("flows.my-flow").await.unwrap().is_none());
+        assert!(ctx.cache.get("flows.other-flow").await.unwrap().is_none());
         // Cache-only entry should remain.
         assert!(ctx
             .cache
-            .get("flowgen.flows.cache-only-flow")
+            .get("flows.cache-only-flow")
             .await
             .unwrap()
             .is_some());
@@ -952,22 +879,17 @@ flow:
 
     #[tokio::test]
     async fn cleanup_stale_cache_entries_skips_when_no_filesystem_flows() {
-        let ctx = test_context_with_fs_flows("flowgen.flows", HashSet::new());
+        let ctx = test_context_with_fs_flows(HashSet::new());
 
         ctx.cache
-            .put("flowgen.flows.some-flow", bytes::Bytes::from("a"), None)
+            .put("flows.some-flow", bytes::Bytes::from("a"), None)
             .await
             .unwrap();
 
         cleanup_stale_cache_entries(&ctx).await;
 
         // Nothing should be deleted when there are no filesystem flows.
-        assert!(ctx
-            .cache
-            .get("flowgen.flows.some-flow")
-            .await
-            .unwrap()
-            .is_some());
+        assert!(ctx.cache.get("flows.some-flow").await.unwrap().is_some());
     }
 
     #[tokio::test]
@@ -976,14 +898,10 @@ flow:
         // must round-trip exactly so the cache entry is recognised as
         // shadowed and removed.
         let fs_flows = HashSet::from(["nested.flow.name".to_string()]);
-        let ctx = test_context_with_fs_flows("flowgen.flows", fs_flows);
+        let ctx = test_context_with_fs_flows(fs_flows);
 
         ctx.cache
-            .put(
-                "flowgen.flows.nested.flow.name",
-                bytes::Bytes::from("a"),
-                None,
-            )
+            .put("flows.nested.flow.name", bytes::Bytes::from("a"), None)
             .await
             .unwrap();
 
@@ -991,7 +909,7 @@ flow:
 
         assert!(ctx
             .cache
-            .get("flowgen.flows.nested.flow.name")
+            .get("flows.nested.flow.name")
             .await
             .unwrap()
             .is_none());
@@ -1003,7 +921,7 @@ flow:
     /// to make a mix-up observable.
     #[tokio::test]
     async fn rebuilt_flow_leases_from_the_system_cache_not_the_flow_cache() {
-        let mut ctx = test_context("flows");
+        let mut ctx = test_context();
         let flow_cache: Arc<dyn Cache> = Arc::new(flowgen_core::cache::memory::MemoryCache::new());
         let system_cache: Arc<dyn Cache> =
             Arc::new(flowgen_core::cache::memory::MemoryCache::new());
@@ -1068,7 +986,7 @@ flow:
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_reload_cut_short_by_shutdown_releases_the_lease_and_starts_nothing() {
-        let ctx = test_context("flows");
+        let ctx = test_context();
         let led_flow = |interval: &str| {
             bytes::Bytes::from(format!(
                 "flow:\n  require_leader_election: true\n  tasks:\n    - generate:\n        name: tick\n        interval: {interval}\n"
@@ -1133,7 +1051,7 @@ flow:
 
     #[tokio::test(flavor = "multi_thread")]
     async fn hot_reload_replaces_running_flow() {
-        let ctx = test_context("flows");
+        let ctx = test_context();
 
         reconcile_put("flows.overlap", versioned_flow_yaml(1), &ctx).await;
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -1152,7 +1070,7 @@ flow:
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_renamed_flow_stops_before_its_new_name_starts() {
-        let ctx = test_context("flows");
+        let ctx = test_context();
         let cancellation_token = CancellationToken::new();
         let stopping = cancellation_token.clone();
         let registry = Arc::clone(&ctx.flow_registry);
@@ -1208,7 +1126,7 @@ flow:
 
     #[tokio::test(flavor = "multi_thread")]
     async fn hot_reload_replaces_running_flow_after_the_registry_lock_is_poisoned() {
-        let ctx = test_context("flows");
+        let ctx = test_context();
 
         reconcile_put("flows.poisoned", versioned_flow_yaml(1), &ctx).await;
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -1234,7 +1152,7 @@ flow:
 
     #[tokio::test(flavor = "multi_thread")]
     async fn hot_reload_with_the_same_source_keeps_the_flow_running() {
-        let ctx = test_context("flows");
+        let ctx = test_context();
         let started_at = |ctx: &ReconcilerContext| {
             ctx.flow_registry
                 .read()
@@ -1269,7 +1187,7 @@ flow:
 
     #[tokio::test(flavor = "multi_thread")]
     async fn hot_reload_with_failing_init_keeps_old_flow_running() {
-        let ctx = test_context("flows");
+        let ctx = test_context();
         let broken = bytes::Bytes::from(
             r#"
 flow:
@@ -1312,7 +1230,7 @@ flow:
 
     #[tokio::test(flavor = "multi_thread")]
     async fn hot_reload_keeps_webhook_route_registered() {
-        let mut ctx = test_context("flows");
+        let mut ctx = test_context();
         let server = Arc::new(flowgen_http::server::EndpointServer::new(
             "/api".to_string(),
         ));
@@ -1362,7 +1280,7 @@ flow:
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_flow_whose_task_fails_starts_again() {
-        let ctx = with_fast_retry(test_context("flows"));
+        let ctx = with_fast_retry(test_context());
         let yaml = r#"
 flow:
   tasks:
@@ -1395,7 +1313,7 @@ flow:
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_restarted_webhook_flow_registers_its_route_again() {
-        let mut ctx = with_fast_retry(test_context("flows"));
+        let mut ctx = with_fast_retry(test_context());
         let server = Arc::new(flowgen_http::server::EndpointServer::new(
             "/api".to_string(),
         ));
@@ -1442,7 +1360,7 @@ flow:
     #[tokio::test(flavor = "multi_thread")]
     async fn a_failed_flow_with_a_buffer_behind_a_webhook_restarts_without_waiting_for_the_stop_timeout(
     ) {
-        let mut ctx = with_fast_retry(test_context("flows"));
+        let mut ctx = with_fast_retry(test_context());
         ctx.servers.http_server = Some(Arc::new(flowgen_http::server::EndpointServer::new(
             "/api".to_string(),
         )));

@@ -17,7 +17,6 @@ flow:
     description: "Consumes CDC change events from NATS and fans each one out in parallel to an object-store archive and a BigQuery upsert table, acking only after all sinks commit."
     tags: ["salesforce", "cdc", "bigquery", "object-store", "example"]
   tasks:
-
     - nats_jetstream_subscribe:
         name: start_subscription
         credentials_path: /etc/nats/credentials.json

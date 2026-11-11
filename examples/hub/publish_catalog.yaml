@@ -1,0 +1,23 @@
+# Publishes a hub's flowgen catalog, the template folders under flowgen/ in
+# the repository at HUB_REPOSITORY, to a local OCI Image Layout, tagged with
+# this version of flowgen, on each new commit. local_hub.yaml reads it.
+flow:
+  labels:
+    display_name: "Publish Hub Catalog"
+    description: "Publishes a hub's flowgen catalog to a local OCI Image Layout on each new commit."
+    tags: ["hub", "git-sync", "oci-push", "example"]
+  tasks:
+    - generate:
+        name: tick
+        interval: "5s"
+
+    # Emits every committed file of the catalog when the branch has a new commit.
+    - git_sync:
+        name: read_catalog
+        repository: "{{env.HUB_REPOSITORY}}"
+        path: "flowgen/"
+
+    - oci_push:
+        name: publish
+        repository: "oci-layout://.flowgen/hub"
+        tags: ["{{env.FLOWGEN_VERSION}}"]

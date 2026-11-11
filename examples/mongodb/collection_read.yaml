@@ -8,7 +8,6 @@ flow:
     description: "Reads active customers from MongoDB every 30 seconds and publishes each as a NATS event."
     tags: ["mongo", "read", "example"]
   tasks:
-
     - generate:
         name: tick
         interval: 30s

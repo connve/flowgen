@@ -65,12 +65,6 @@ pub struct Resource {
     /// `completion/complete`.
     #[serde(default)]
     pub parameters: Vec<Parameter>,
-    /// HTTP headers a request must carry, with matching values, for this
-    /// resource to be visible on `resources/list` and readable at all. All
-    /// declared headers must match (AND). An empty map (the default) means
-    /// every caller can see and read it.
-    #[serde(default)]
-    pub headers: std::collections::HashMap<String, String>,
     /// Standard task wiring; resource tasks rarely depend on anything.
     #[serde(default)]
     pub depends_on: Option<Vec<String>>,
@@ -268,7 +262,6 @@ impl Runner for Processor {
             body,
             parameters,
             resource_loader: self.task_context.resource_loader.clone(),
-            headers: cfg.headers.clone(),
             cancellation_token: self.task_context.stop_reading.clone(),
         };
 
@@ -363,7 +356,6 @@ mod tests {
             mime_type: default_mime_type(),
             content: Source::Inline(content.to_string()),
             parameters: vec![],
-            headers: std::collections::HashMap::new(),
             depends_on: None,
             retry: None,
         }

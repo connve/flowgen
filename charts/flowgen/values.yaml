@@ -76,27 +76,11 @@ flowgen:
     seccompProfile:
       type: RuntimeDefault
 
-  http_server:
-    type: ClusterIP
-    port: 3000
-
-  # MCP server service configuration (optional).
-  # Only exposed when mcp_server is enabled in the worker config.
-  # mcp_server:
-  #   type: ClusterIP
-  #   port: 3001
-
-  # AI gateway service configuration (optional).
-  # Only exposed when ai_gateway is enabled in the worker config.
-  # ai_gateway:
-  #   type: ClusterIP
-  #   port: 3002
-
-  # Admin web UI service configuration (optional).
-  # Only exposed when web is enabled in the worker config.
-  # web:
-  #   type: ClusterIP
-  #   port: 8080
+  # The type of the Service of each server `config.settings` enables, by its
+  # settings key; ClusterIP when unset. The port is the server's.
+  services: {}
+    # web:
+    #   type: LoadBalancer
 
   # Internal port pods read each other's logs and counters from in cluster
   # mode (no Service). Match `telemetry.backend.port`.
@@ -105,13 +89,9 @@ flowgen:
     # Admits the cluster port only from flowgen pods; blocks ports not declared here.
     networkPolicy: false
 
-  # Kubernetes liveness/readiness listener. Independent from the API
-  # listeners so probes keep working regardless of which surfaces are
-  # enabled. Endpoints: /livez (always 200), /readyz (200 once startup
-  # has finished), /healthz (alias of /livez for pre-1.16 convention).
+  # Probes of the health listener at `config.settings.health.port`: /livez
+  # (always 200), /readyz (200 once startup has finished).
   health:
-    port: 8081
-
     # Probe tuning. Set timeoutSeconds explicitly on all three: the
     # Kubernetes default is 1s, which restarts a worker that is merely busy.
     probes:
@@ -143,26 +123,49 @@ flowgen:
 
   config:
     path: /etc/app/config.yaml
-    # Reference existing ConfigMap created externally.
-    # When set, this takes precedence over inline values.
-    # Example: existingConfigMap: my-config
+    # A ConfigMap holding `config.yaml`, managed outside the chart. The chart
+    # still reads which servers to expose, and their ports, from `settings`.
     existingConfigMap: ""
-    # Inline config for pure Helm deployments without external ConfigMap management.
-    # This value is only used when existingConfigMap is empty.
-    # Example:
-    #   inline: |
-    #     flows:
-    #       path: "/etc/app/flows"
-    #     resources:
-    #       path: "/etc/app/resources"
-    #     telemetry:
-    #       enabled: true
-    #       backend:
-    #         type: remote
-    #         endpoint: "http://otel-collector:4317"
-    #       service_name: "flowgen"
-    #       metrics_export_interval: "60s"
-    inline: ""
+    # The app config, written to `config.yaml`. Set any key to change it; see
+    # https://connve.com/docs/flowgen/concepts/configuration. `APP_` variables
+    # in `env` override single keys too, e.g. APP_WEB__AUTH__CLIENT_SECRET.
+    settings:
+      cache:
+        type: nats
+        url: "nats://nats:4222"
+        # credentials_path: /etc/nats/credentials.json
+      flows:
+        path: /etc/app/flows
+        # The flows the deploy flow writes, in the system bucket.
+        cache:
+          enabled: true
+      resources:
+        path: /etc/app/resources
+        cache:
+          enabled: true
+      http_server:
+        enabled: true
+        port: 3000
+      health:
+        enabled: true
+        port: 8081
+      # mcp_server:
+      #   enabled: true
+      #   port: 3001
+      # ai_gateway:
+      #   enabled: true
+      #   port: 3002
+      # web:
+      #   enabled: true
+      #   port: 8080
+      #   path: /flowgen
+      #   auth: { ... }
+      #   authoring:
+      #     enabled: true
+      #   agents:
+      #     enabled: true
+      # telemetry:
+      #   enabled: true
 
   # Environment variables passed to the container.
   # Also accessible in flow configs via {{env.VAR_NAME}}.
@@ -184,6 +187,33 @@ flowgen:
   # - name: LOG_FORMAT
   #   value: "json"  # Force JSON logging (recommended for production)
   env: []
+
+  # This version's system flows, run from flowgen itself (`flows.system`): the
+  # commit, release and deploy flows of the workspace, Flowgen Agent and its
+  # tools, and the hubs. The values become the variables the flows read; see
+  # https://connve.com/docs/flowgen/concepts/authoring#lifecycle-flows.
+  # Approved changes are committed as who approved them, so `config.settings`
+  # needs `web.auth` and `web.authoring`; Flowgen Agent needs `mcp_server`,
+  # `ai_gateway` and `web.agents`.
+  systemFlows:
+    enabled: false
+    # FLOWGEN_REPOSITORY: the workspace repository's URL.
+    repository: ""
+    # FLOWGEN_WORKSPACE_PATH: the workspace folder in it, ending in `/`;
+    # empty for the whole repository.
+    workspacePath: ""
+    # FLOWGEN_RELEASES: the registry repository releases are pushed to and
+    # deployed from, e.g. ghcr.io/acme/workspace.
+    releases: ""
+    # Secret holding the git credentials file ({token, username?}).
+    gitCredentials:
+      secretName: ""
+      key: git.json
+    # Secret holding the registry credentials file ({username, password} or a
+    # Docker config.json).
+    registryCredentials:
+      secretName: ""
+      key: registry.json
 
   # Flow and resource configuration management.
   # Supports three deployment methods for managing flow and resource files.
@@ -255,7 +285,6 @@ flowgen:
   volumes:
     config:
       enabled: true
-      configMapName: config
       mountPath: /etc/app
     flows:
       enabled: true
