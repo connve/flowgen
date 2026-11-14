@@ -18,7 +18,7 @@ Bulk query jobs for extracting large datasets from Salesforce.
 - salesforce_bulkapi_query_job:
     name: export_accounts
     operation: create
-    credentials_path: /etc/salesforce/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
     query: "SELECT Id, Name, Industry FROM Account"
 ```
 
@@ -78,12 +78,12 @@ flow:
     - salesforce_bulkapi_query_job:
         name: create_job
         operation: create
-        credentials_path: /etc/salesforce/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
         query: "SELECT Id, Name, Industry FROM Account WHERE LastModifiedDate = TODAY"
 
     - salesforce_bulkapi_query_job:
         name: get_results
         operation: get_results
-        credentials_path: /etc/salesforce/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
         job_id: "{{event.data.id}}"
 ```

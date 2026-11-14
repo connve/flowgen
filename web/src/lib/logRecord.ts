@@ -129,23 +129,81 @@ export function timestampMs(record: LogRecord): number | null {
 	return Number.isFinite(parsed) ? parsed : null;
 }
 
-// Chip CSS classes for a level toggle button, shared by `/logs` and the
-// per-flow Activity panel so neither drifts on colors. `inactive` covers
-// both "toggled off" and hover states the caller doesn't otherwise style.
-export function levelChipClass(level: ActivityLevel, active: boolean): string {
-	if (!active) return 'chip-inactive';
+const LEVEL_ORDER: ActivityLevel[] = ['info', 'warn', 'error', 'debug', 'trace'];
+
+// How a level chip shows: shown by default (`rest`), picked, or hidden (`off`).
+export type LevelChip = 'rest' | 'picked' | 'off';
+
+// The levels picked: those shown, unless they are exactly the defaults.
+function pickedLevels(
+	filter: Record<ActivityLevel, boolean>,
+	defaults: Readonly<Record<ActivityLevel, boolean>>
+): ActivityLevel[] {
+	if (LEVEL_ORDER.every((level) => filter[level] === defaults[level])) return [];
+	return LEVEL_ORDER.filter((level) => filter[level]);
+}
+
+export function levelChip(
+	filter: Record<ActivityLevel, boolean>,
+	defaults: Readonly<Record<ActivityLevel, boolean>>,
+	level: ActivityLevel
+): LevelChip {
+	const picked = pickedLevels(filter, defaults);
+	if (picked.length === 0) return defaults[level] ? 'rest' : 'off';
+	return picked.includes(level) ? 'picked' : 'off';
+}
+
+export function hasPickedLevels(
+	filter: Record<ActivityLevel, boolean>,
+	defaults: Readonly<Record<ActivityLevel, boolean>>
+): boolean {
+	return pickedLevels(filter, defaults).length > 0;
+}
+
+// The filter after a click on `level`: it joins or leaves the picked levels,
+// and with none picked the defaults show.
+export function clickedLevels(
+	filter: Record<ActivityLevel, boolean>,
+	defaults: Readonly<Record<ActivityLevel, boolean>>,
+	level: ActivityLevel
+): Record<ActivityLevel, boolean> {
+	const picked = pickedLevels(filter, defaults);
+	const next = picked.includes(level)
+		? picked.filter((key) => key !== level)
+		: [...picked, level];
+	if (next.length === 0) return { ...defaults };
+	return {
+		info: next.includes('info'),
+		warn: next.includes('warn'),
+		error: next.includes('error'),
+		debug: next.includes('debug'),
+		trace: next.includes('trace')
+	};
+}
+
+// Chip CSS classes for a level, shared by `/logs` and the per-flow Activity panel.
+export function levelChipClass(level: ActivityLevel, chip: LevelChip): string {
+	if (chip === 'off') return 'border-base-300 chip-inactive';
 	switch (level) {
 		case 'error':
-			return 'chip-error';
+			return chip === 'picked' ? 'chip-error' : 'border-(--color-chip-error)/40 text-(--color-chip-error)';
 		case 'warn':
-			return 'chip-warn';
+			return chip === 'picked'
+				? 'chip-warn'
+				: 'border-(--color-chip-warning)/40 text-(--color-chip-warning)';
+		case 'info':
+			return chip === 'picked'
+				? 'chip-success'
+				: 'border-(--color-chip-success)/40 text-(--color-chip-success)';
 		default:
-			return 'chip-neutral';
+			return chip === 'picked' ? 'chip-neutral' : 'border-base-300';
 	}
 }
 
-export function levelVariant(level: ActivityLevel): 'neutral' | 'warning' | 'error' {
+export function levelVariant(level: ActivityLevel): 'neutral' | 'success' | 'warning' | 'error' {
 	switch (level) {
+		case 'info':
+			return 'success';
 		case 'warn':
 			return 'warning';
 		case 'error':

@@ -93,7 +93,7 @@ The incoming event carries `{"entries": [{"key": "orders/sync", "value": "..."}]
 - kv_store:
     name: apply_flows
     url: "nats://{{env.NATS_HOST}}:4222"
-    credentials_path: /etc/nats/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/nats.json"
     bucket: flowgen_system
     operation: put
     key_prefix: "flows."

@@ -1519,7 +1519,7 @@
 		left: 12%;
 		width: 30vw;
 		height: 30vw;
-		background: radial-gradient(circle, #00e168 0%, transparent 70%);
+		background: radial-gradient(circle, var(--brand-to) 0%, transparent 70%);
 		animation: blob-drift-1 18s ease-in-out infinite;
 	}
 	.hero-blob-2 {
@@ -1527,7 +1527,7 @@
 		right: 12%;
 		width: 28vw;
 		height: 28vw;
-		background: radial-gradient(circle, #00b4a6 0%, transparent 70%);
+		background: radial-gradient(circle, var(--brand-via) 0%, transparent 70%);
 		animation: blob-drift-2 22s ease-in-out infinite;
 	}
 	.hero-blob-3 {
@@ -1535,7 +1535,7 @@
 		left: 38%;
 		width: 26vw;
 		height: 26vw;
-		background: radial-gradient(circle, #006b55 0%, transparent 75%);
+		background: radial-gradient(circle, var(--brand-from) 0%, transparent 75%);
 		animation: blob-drift-3 26s ease-in-out infinite;
 	}
 	@keyframes blob-drift-1 {
@@ -1576,7 +1576,7 @@
 	}
 	/* Accent-gradient text clip, matching connve.com's shimmering headline word. */
 	.edge-word {
-		background: linear-gradient(120deg, #006b55 0%, #00b4a6 50%, #00e168 100%);
+		background: var(--gradient-brand);
 		background-size: 200% 200%;
 		-webkit-background-clip: text;
 		background-clip: text;
@@ -1603,7 +1603,7 @@
 	/* Live status label: brand-green gradient text, shimmering while a turn is
 	   in progress. Reuses the shared `edge-shimmer` keyframes. */
 	.chat-status-live {
-		background: linear-gradient(120deg, #006b55 0%, #00b4a6 50%, #00e168 100%);
+		background: var(--gradient-brand);
 		background-size: 200% 200%;
 		-webkit-background-clip: text;
 		background-clip: text;
@@ -1616,7 +1616,7 @@
 	   shimmers in lockstep with the text. Also gently pulses. Targeted via
 	   :global because it lands on the iconify element. */
 	:global(.chat-status-pulse) {
-		background: linear-gradient(120deg, #006b55 0%, #00b4a6 50%, #00e168 100%);
+		background: var(--gradient-brand);
 		background-size: 200% 200%;
 		animation:
 			edge-shimmer 2.5s ease-in-out infinite,

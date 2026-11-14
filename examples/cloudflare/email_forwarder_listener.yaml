@@ -13,13 +13,13 @@ flow:
     # POST /api/flowgen/workers/v1/cloudflare/emails
     - http_endpoint:
         name: receive_requests
-        credentials_path: /etc/cloudflare-emails/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/cloudflare-emails.json"
         method: POST
         endpoint: /cloudflare/emails
 
     - nats_jetstream_publish:
         name: publish_events
-        credentials_path: /etc/nats/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/nats.json"
         url: "{{env.NATS_URL}}"
         subject: email.received
         stream:

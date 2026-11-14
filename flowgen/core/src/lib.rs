@@ -46,6 +46,8 @@ pub mod retry;
 pub mod serde;
 /// Service discovery and connection management.
 pub mod service;
+/// Files encrypted with SOPS and age, as the `sops` CLI and Flux read them.
+pub mod sops;
 /// OpenTelemetry integration for metrics and distributed tracing.
 pub mod telemetry;
 /// Flow-scoped runtime bookkeeping: activity metrics fed by a custom

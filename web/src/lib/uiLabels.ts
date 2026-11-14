@@ -25,4 +25,7 @@ export function setUiLabels() {
 	labels.themeOption = (theme) => m.theme_option({ theme });
 	labels.stateNotice = m.state_notice_title();
 	labels.stateOops = m.state_oops_title();
+	labels.search = m.search_open();
+	labels.searchPlaceholder = m.search_bar();
+	labels.searchEmpty = m.search_no_results();
 }

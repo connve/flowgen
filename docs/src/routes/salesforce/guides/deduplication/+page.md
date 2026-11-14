@@ -49,7 +49,7 @@ flow:
 
     - salesforce_soapapi_merge:
         name: merge
-        credentials_path: /etc/sfdc/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
         sobject_type: "{{event.data.sobject_type}}"
         master_record_id: "{{event.data.master_id}}"
         record_ids_to_merge:
@@ -66,7 +66,7 @@ Override specific fields on the master record during merge. Useful when the losi
 ```yaml
 - salesforce_soapapi_merge:
     name: merge_contacts
-    credentials_path: /etc/sfdc/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
     sobject_type: Contact
     master_record_id: "{{event.data.master_id}}"
     record_ids_to_merge:
@@ -102,6 +102,6 @@ Each merge produces a JSON result:
 
 | File | Purpose | Contents |
 |---|---|---|
-| `/etc/sfdc/credentials.json` | Salesforce SOAP API | `client_id`, `client_secret`, `username`, `password`, `login_url` |
+| `{{env.FLOWGEN_CREDENTIALS}}/salesforce.json` | Salesforce SOAP API | `client_id`, `client_secret`, `username`, `password`, `login_url` |
 
 See [Credentials](/docs/flowgen/concepts/credentials) for format details.

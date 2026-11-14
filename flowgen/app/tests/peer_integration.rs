@@ -249,5 +249,6 @@ fn app_config_with_cache(url: String) -> flowgen::config::AppConfig {
         shutdown_timeout: flowgen::config::default_shutdown_timeout(),
         host: flowgen::config::default_host(),
         ai_budget: None,
+        credentials: None,
     }
 }

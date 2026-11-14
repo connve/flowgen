@@ -80,6 +80,8 @@ spec:
           value: {{ printf "/etc/flowgen/system-flows/registry/%s" $system.registryCredentials.key | quote }}
         {{- end }}
         {{- end }}
+        - name: FLOWGEN_CREDENTIALS
+          value: {{ $worker.credentialsPath | quote }}
         {{- with $worker.env }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -130,6 +132,11 @@ spec:
         {{- if and $system.enabled $system.registryCredentials.secretName }}
         - name: system-flows-registry
           mountPath: /etc/flowgen/system-flows/registry
+          readOnly: true
+        {{- end }}
+        {{- if $worker.credentials }}
+        - name: flowgen-credentials
+          mountPath: {{ $worker.credentialsPath }}
           readOnly: true
         {{- end }}
         {{- range $key, $volume := $worker.volumes }}
@@ -223,6 +230,17 @@ spec:
         secret:
           secretName: {{ $system.registryCredentials.secretName }}
           defaultMode: 0440
+      {{- end }}
+      {{- if $worker.credentials }}
+      - name: flowgen-credentials
+        projected:
+          defaultMode: 0440
+          sources:
+          {{- range $worker.credentials }}
+          - secret:
+              name: {{ . | quote }}
+              optional: true
+          {{- end }}
       {{- end }}
       {{- range $key, $volume := $worker.volumes }}
       {{- if and (hasKey $volume "enabled") $volume.enabled }}

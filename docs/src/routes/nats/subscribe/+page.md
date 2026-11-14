@@ -7,7 +7,7 @@ Consumes messages from a NATS JetStream stream. Source task — typically first 
 ```yaml
 - nats_jetstream_subscribe:
     name: order_events
-    credentials_path: /etc/nats/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/nats.json"
     url: "{{env.NATS_URL}}"
     subject: "orders.>"
     durable_name: order_processor
@@ -83,7 +83,7 @@ flow:
   tasks:
     - nats_jetstream_subscribe:
         name: orders
-        credentials_path: /etc/nats/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/nats.json"
         subject: "orders.created"
         durable_name: order_processor
         max_ack_pending: 100

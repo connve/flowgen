@@ -35,7 +35,7 @@ flow:
         name: commit
         repository: "{{env.GIT_REPOSITORY_URL}}"
         path: "data/"
-        credentials_path: /etc/git/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/git.json"
         author:
           name: "Snapshot bot"
           email: "snapshots@example.com"

@@ -9,7 +9,7 @@
 //! layout `oci_sync` reads back.
 
 use flowgen_core::task::context::TaskContext;
-use flowgen_core::task::meta::{Connection, Connector, Icon};
+use flowgen_core::task::meta::{Connection, Connector, CredentialsField, CredentialsForm, Icon};
 use flowgen_core::task::runner::Runner;
 use flowgen_core::task::{Task, TaskError, TaskIo, TaskMeta};
 use std::sync::Arc;
@@ -27,6 +27,19 @@ pub const CONNECTOR: Connector = Connector {
     label: "OCI",
     icon: Icon::Svg(include_str!("../icons/oci.svg")),
     describe_credentials: None,
+    credentials: &[
+        CredentialsForm {
+            label: "Username and password",
+            fields: &[
+                CredentialsField::text("username", "Username"),
+                CredentialsField::secret("password", "Password or token"),
+            ],
+        },
+        CredentialsForm {
+            label: "Docker config.json",
+            fields: &[],
+        },
+    ],
 };
 
 impl TaskMeta for push::OciPush {

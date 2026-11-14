@@ -9,7 +9,7 @@ Makes outbound HTTP requests. URL, headers, and payload support templating.
     name: call_api
     endpoint: "https://api.example.com/orders/{{event.data.id}}"
     method: GET
-    credentials_path: /etc/http/api-credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/http-api.json"
 ```
 
 ### Fields
@@ -78,7 +78,7 @@ For nested data, either:
     name: create_order
     endpoint: "https://api.example.com/orders"
     method: POST
-    credentials_path: /etc/http/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/http.json"
     payload:
       object:
         customer_id: "{{event.data.customer_id}}"
@@ -92,7 +92,7 @@ For nested data, either:
     name: forward
     endpoint: "https://api.example.com/ingest"
     method: POST
-    credentials_path: /etc/http/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/http.json"
     payload:
       from_event: true
 ```
@@ -104,7 +104,7 @@ For nested data, either:
     name: search_orders
     endpoint: "https://api.example.com/orders"
     method: GET
-    credentials_path: /etc/http/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/http.json"
     payload:
       send_as: queryparams
       object:

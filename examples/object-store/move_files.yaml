@@ -20,7 +20,7 @@ flow:
         name: list_unprocessed_files
         operation: list
         path: gs://my-bucket/incoming/*.parquet
-        credentials_path: /etc/gcp/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/gcp.json"
 
     # Reconstruct absolute GCS URIs from the list results and stash them
     # so both BigQuery and the archive step act on the identical set.
@@ -48,7 +48,7 @@ flow:
         name: load_to_bigquery
         operation: create
         project_id: my-project
-        credentials_path: /etc/gcp/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/gcp.json"
         job_type: load
         source_uris: "{{event.meta.source_uris}}"
         destination_table:
@@ -66,7 +66,7 @@ flow:
         operation: move
         source_files: "{{event.meta.source_uris}}"
         destination: gs://my-bucket/processed/
-        credentials_path: /etc/gcp/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/gcp.json"
 
     - log:
         name: print_move_result

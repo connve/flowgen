@@ -7,7 +7,7 @@ Watches a MongoDB database through a change stream and emits each change documen
 ```yaml
 - mongodb_cdc:
     name: watch_orders
-    credentials_path: /etc/mongodb/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/mongodb.json"
     db_name: my_database
 ```
 

@@ -98,14 +98,14 @@ Publishes curated read-only content. The content is served by `resources/read` o
 
 ```yaml
 - mcp_resource:
-    name: sf_account_schema
-    description: "Salesforce Account SObject field schema."
+    name: account_schema
+    description: "Field schema of an account record."
     mime_type: application/json
     content:
-      resource: "schemas/sf-account.json"
+      resource: "schemas/account.json"
 ```
 
-Auto-generated URI: `flowgen://<flow_name>/sf_account_schema` (scheme controlled by `resource_uri_scheme`).
+Auto-generated URI: `flowgen://<flow_name>/account_schema` (scheme controlled by `resource_uri_scheme`).
 
 ### Explicit URI override
 
@@ -127,7 +127,7 @@ Use when the resource has a real URL the client can also reach directly.
 - mcp_resource:
     name: account_summary
     uri_template: "flowgen://account/{id}"
-    description: "Per-account summary; bind {id} to a Salesforce ID."
+    description: "Per-account summary; bind {id} to an account ID."
     mime_type: text/markdown
     content: |
       # Account {{id}}
@@ -163,13 +163,13 @@ Publishes a slash-command template. MCP clients surface each registered prompt i
 ```yaml
 - mcp_prompt:
     name: explain_query
-    description: "Explain what a BigQuery SQL query does."
+    description: "Explain what a SQL query does."
     arguments:
       - name: query
         description: "The SQL query text."
         required: true
     template: |
-      Explain what this BigQuery query does, what tables it reads,
+      Explain what this query does, what tables it reads,
       and what the result shape will look like.
 
       ```sql

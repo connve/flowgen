@@ -78,6 +78,10 @@ pub const RELEASES_ENV: &str = "FLOWGEN_RELEASES";
 /// Layout next to the local cache.
 pub const DEFAULT_RELEASES: &str = "oci-layout://.flowgen/releases";
 
+/// The variable a run sets, unless set already, to the folder flows read
+/// credentials from: `credentials.path`, else `credentials`.
+pub const CREDENTIALS_ENV: &str = flowgen_core::credentials::FOLDER_ENV;
+
 /// The key prefix of resources in the system bucket.
 pub const RESOURCES_CACHE_PREFIX: &str = "resources";
 
@@ -305,6 +309,13 @@ macro_rules! task_types {
                 }
             }
 
+            /// Whether this task starts events and takes none, declared by its crate.
+            pub const fn is_source(&self) -> bool {
+                match self {
+                    $(TaskType::$tag(_) => <$config as TaskMeta>::SOURCE,)+
+                }
+            }
+
             /// Whether this task registers its flow with a shared server, so the
             /// flow must run on every pod and is never leader elected.
             pub const fn is_blocking(&self) -> bool {
@@ -431,6 +442,8 @@ task_types! {
     /// Key-value store operations (get, put, list, delete) on a redb file or NATS.
     #[serde(alias = "nats_kv_store")]
     kv_store(flowgen_kv_store::store::KvStore),
+    /// Starts the flow with a key's value whenever it changes, on a redb file or NATS.
+    kv_watch(flowgen_kv_store::watch::KvWatch),
     /// AI completion task for generating responses using LLMs.
     ai_completion(flowgen_ai_agent::completion::Completion),
     /// MCP tool task for exposing flows as MCP tools callable by LLMs.
@@ -524,6 +537,30 @@ pub struct AppConfig {
     pub host: String,
     /// Token and amount limits of every `ai_completion`; unlimited when omitted.
     pub ai_budget: Option<flowgen_ai_agent::budget::BudgetConfig>,
+    /// Credentials added in the web UI, committed encrypted under `credentials/`.
+    /// Omit to manage credentials outside flowgen.
+    pub credentials: Option<CredentialsOptions>,
+}
+
+/// Where credentials added in the web UI go: each file encrypted with SOPS
+/// for the `recipients` and committed under `credentials/`. This instance
+/// decrypts them in memory when it has `identity_path`; in a cluster Flux
+/// decrypts them into a mounted Secret instead.
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialsOptions {
+    /// age public keys each credential is encrypted for, such as the key
+    /// Flux decrypts with and the keys of the people who may read them.
+    #[serde(default)]
+    pub recipients: Vec<String>,
+    /// age key file this instance decrypts credentials with, set as
+    /// `SOPS_AGE_KEY_FILE` for the run; its public key is a recipient too.
+    /// Omit where Flux decrypts them.
+    #[serde(default)]
+    pub identity_path: Option<PathBuf>,
+    /// The folder flows read credentials from, which `FLOWGEN_CREDENTIALS`
+    /// names: where they are decrypted to, or where the cluster mounts them.
+    pub path: PathBuf,
 }
 
 /// Rejected configuration, reported before anything starts.
@@ -561,8 +598,9 @@ pub enum ValidationError {
 impl AppConfig {
     /// What flows read about this run, by variable: the addresses of its web
     /// server, MCP server and AI gateway on this machine, its cache and system
-    /// bucket, and where workspace releases go.
-    pub fn run_variables(&self) -> [(&'static str, String); 7] {
+    /// bucket, where workspace releases go, and the folder flows read
+    /// credentials from.
+    pub fn run_variables(&self) -> [(&'static str, String); 8] {
         let host = match self.host.as_str() {
             DEFAULT_HOST => crate::local::LOCAL_HOST,
             host => host,
@@ -590,6 +628,10 @@ impl AppConfig {
             Some(path) => path.display().to_string(),
             None => String::new(),
         };
+        let credentials = match &self.credentials {
+            Some(credentials) => credentials.path.display().to_string(),
+            None => flowgen_core::workspace::CREDENTIALS_DIR.to_string(),
+        };
         [
             (WEB_URL_ENV, url(web.port, &web.path)),
             (MCP_URL_ENV, url(mcp.port, &mcp.path)),
@@ -598,6 +640,7 @@ impl AppConfig {
             (CACHE_CREDENTIALS_ENV, cache_credentials),
             (SYSTEM_BUCKET_ENV, cache.system.db_name),
             (RELEASES_ENV, DEFAULT_RELEASES.to_string()),
+            (CREDENTIALS_ENV, credentials),
         ]
     }
 
@@ -1215,7 +1258,11 @@ impl Default for AuthoringOptions {
 fn default_targets() -> Vec<AuthoringTarget> {
     vec![AuthoringTarget {
         name: "workspace".to_string(),
-        paths: vec!["flows/".to_string(), "resources/".to_string()],
+        paths: vec![
+            "flows/".to_string(),
+            "resources/".to_string(),
+            "credentials/".to_string(),
+        ],
         commit_flow: default_commit_flow(),
         approver_groups: Vec::new(),
         track_deployment: default_track_deployment(),
@@ -1552,7 +1599,13 @@ mod tests {
                 if !source.starts_with("flow:") || source.contains("# ...") {
                     continue;
                 }
-                if let Err(e) = FlowConfigRaw::parse("block.yaml", source) {
+                let loaded = match FlowConfigRaw::parse("block.yaml", source) {
+                    Ok(raw) => {
+                        crate::flow::resolve_parents(&raw.flow.tasks).map_err(|e| e.to_string())
+                    }
+                    Err(e) => Err(e.to_string()),
+                };
+                if let Err(e) = loaded {
                     failures.push(format!("{} block {}: {e}", path.display(), index + 1));
                 }
                 checked += 1;
@@ -1869,6 +1922,7 @@ mod tests {
             shutdown_timeout: default_shutdown_timeout(),
             host: default_host(),
             ai_budget: None,
+            credentials: None,
         };
 
         assert!(app_config.cache.is_some());
@@ -1900,6 +1954,7 @@ mod tests {
             shutdown_timeout: default_shutdown_timeout(),
             host: default_host(),
             ai_budget: None,
+            credentials: None,
         };
 
         assert!(app_config.cache.is_none());
@@ -1941,6 +1996,7 @@ mod tests {
             shutdown_timeout: default_shutdown_timeout(),
             host: default_host(),
             ai_budget: None,
+            credentials: None,
         };
 
         let serialized = serde_json::to_string(&app_config).unwrap();
@@ -1978,6 +2034,7 @@ mod tests {
             shutdown_timeout: default_shutdown_timeout(),
             host: default_host(),
             ai_budget: None,
+            credentials: None,
         };
 
         let cloned = app_config.clone();
@@ -2301,6 +2358,7 @@ flows:
             shutdown_timeout: default_shutdown_timeout(),
             host: default_host(),
             ai_budget: None,
+            credentials: None,
         };
 
         assert!(app_config.http_server.is_some());
@@ -2427,6 +2485,7 @@ flows:
             shutdown_timeout: default_shutdown_timeout(),
             host: default_host(),
             ai_budget: None,
+            credentials: None,
         };
 
         assert!(app_config.telemetry.is_some());

@@ -7,7 +7,7 @@ Runs a SQL statement against PostgreSQL. Returns the rows as Arrow RecordBatch.
 ```yaml
 - postgres_query:
     name: get_orders
-    credentials_path: /etc/postgres/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/postgres.json"
     query: "SELECT * FROM orders WHERE status = $1 AND placed_at > $2"
     parameters:
       - "{{event.data.status}}"

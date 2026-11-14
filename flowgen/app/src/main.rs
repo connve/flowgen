@@ -199,6 +199,14 @@ fn resolve_workspace(folder: Option<&std::path::Path>) -> Workspace {
     }
 }
 
+/// The age key flowgen decrypts credentials with, ahead of any `SOPS_AGE_KEY_FILE`.
+fn identity_path(app_config: &AppConfig) -> Option<&std::path::PathBuf> {
+    app_config
+        .credentials
+        .as_ref()
+        .and_then(|credentials| credentials.identity_path.as_ref())
+}
+
 /// Prepares a run without a config file: creates the workspace when its folder
 /// is new, enters it and starts its lifecycle flows.
 async fn local_workspace(workspace: &Workspace) {
@@ -379,6 +387,9 @@ fn main() {
                 env::set_var(name, value);
             }
         }
+        if let Some(key) = identity_path(app_config) {
+            env::set_var(flowgen_core::sops::AGE_KEY_FILE_ENV, key);
+        }
     }
     if let Mode::Bootstrap(workspace) | Mode::Local(workspace, _) = &mode {
         for (name, value) in workspace.variables() {
@@ -413,6 +424,13 @@ async fn run(mode: Mode) {
             (*app_config, true)
         }
     };
+
+    if let Some(key) = identity_path(&app_config) {
+        if let Err(e) = flowgen::credentials::identity(key) {
+            eprintln!("{e}");
+            process::exit(1);
+        }
+    }
 
     if let Err(e) = app_config.validate() {
         eprintln!("{e}");

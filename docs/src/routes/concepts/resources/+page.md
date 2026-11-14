@@ -104,7 +104,7 @@ LIMIT 100
 
 The same templating rules from [Templating](/docs/flowgen/concepts/templating) apply: simple `{{ path }}` substitution, environment variables under `{{env.X}}`, and runtime errors for missing variables.
 
-For SQL specifically, prefer the task's `parameters` field over template substitution when the value is user-controlled — it produces a parameterised query and avoids injection. See the BigQuery and MSSQL pages for details.
+For SQL specifically, prefer the task's `parameters` field over template substitution when the value is user-controlled — it produces a parameterised query and avoids injection. Each database task's page shows its `parameters`.
 
 ## Errors
 

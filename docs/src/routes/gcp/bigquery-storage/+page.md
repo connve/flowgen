@@ -9,7 +9,7 @@ Reads table data directly via the BigQuery Storage Read API. Returns Arrow Recor
 ```yaml
 - gcp_bigquery_storage_read:
     name: read_accounts
-    credentials_path: /etc/gcp/service-account.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/gcp.json"
     project_id: my-project
     dataset_id: salesforce
     table_id: accounts
@@ -48,7 +48,7 @@ Streams data into BigQuery tables via the Storage Write API. Accepts Arrow Recor
 ```yaml
 - gcp_bigquery_storage_write:
     name: write_accounts
-    credentials_path: /etc/gcp/service-account.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/gcp.json"
     project_id: my-project
     dataset_id: salesforce
     table_id: accounts

@@ -215,6 +215,15 @@ flowgen:
       secretName: ""
       key: registry.json
 
+  # Credentials added in the web UI: one Secret per name, which Flux decrypts
+  # from the workspace's credentials/ folder, mounted together read-only at
+  # credentialsPath, which FLOWGEN_CREDENTIALS names; a Secret not there yet is
+  # skipped. flowgen keeps the list in the ConfigMap flowgen-credentials; a
+  # HelmRelease reads it with
+  # valuesFrom: [{kind: ConfigMap, name: flowgen-credentials, valuesKey: values.yaml, optional: true}].
+  credentials: []
+  credentialsPath: /etc/flowgen/credentials
+
   # Flow and resource configuration management.
   # Supports three deployment methods for managing flow and resource files.
   # Method 1: External ConfigMaps created via kustomize, kubectl, or GitOps tools (recommended for production).

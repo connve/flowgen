@@ -1,14 +1,15 @@
-import { listConnectors } from '$lib/api';
+import { listConnectors, type CredentialsForm } from '$lib/api';
 import { connectorIconUrl } from '$lib/urls';
 
 export interface Connector {
 	name: string;
 	label: string;
 	iconUrl: string;
+	credentials: CredentialsForm[];
 }
 
-function connector(name: string, label: string): Connector {
-	return { name, label, iconUrl: connectorIconUrl(name) };
+function connector(name: string, label: string, credentials: CredentialsForm[] = []): Connector {
+	return { name, label, iconUrl: connectorIconUrl(name), credentials };
 }
 
 const CORE = connector('core', 'Core');
@@ -20,7 +21,9 @@ let loading: Promise<void> | null = null;
 export function loadConnectors(fetcher: typeof fetch): Promise<void> {
 	loading ??= listConnectors({ fetch: fetcher })
 		.then(({ data: found }) => {
-			connectors = Object.fromEntries(found.map((c) => [c.name, connector(c.name, c.label)]));
+			connectors = Object.fromEntries(
+				found.map((c) => [c.name, connector(c.name, c.label, c.credentials)])
+			);
 			taskConnectors = Object.fromEntries(
 				found.flatMap((c) => c.taskTypes.map((taskType) => [taskType, c.name]))
 			);

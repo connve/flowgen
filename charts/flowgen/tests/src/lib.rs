@@ -172,6 +172,48 @@ fn pod_spec(deployment: &Manifest) -> &serde_yaml::Value {
 }
 
 #[test]
+fn listed_credentials_are_mounted_together_read_only() {
+    let manifests = render("flowgen:\n  credentials: [a, \"no\"]\n");
+    let deployment = find_deployment(&manifests);
+    let pod = pod_spec(&deployment);
+    let container = &pod["containers"][0];
+    let volume = pod["volumes"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|volume| volume["name"] == "flowgen-credentials")
+        .expect("a credentials volume");
+    let mount = container["volumeMounts"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|mount| mount["name"] == "flowgen-credentials")
+        .expect("a credentials mount");
+    let sources = volume["projected"]["sources"].as_sequence().unwrap();
+    let secrets: Vec<&str> = sources
+        .iter()
+        .map(|source| source["secret"]["name"].as_str().unwrap())
+        .collect();
+
+    assert_eq!(secrets, ["a", "no"]);
+    assert!(sources
+        .iter()
+        .all(|source| source["secret"]["optional"] == true));
+    assert_eq!(mount["readOnly"], true);
+    assert_eq!(
+        env_value(container, "FLOWGEN_CREDENTIALS").as_deref(),
+        mount["mountPath"].as_str()
+    );
+    let none = render("");
+    let pod = pod_spec(&find_deployment(&none)).clone();
+    assert!(!pod["volumes"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .any(|volume| volume["name"] == "flowgen-credentials"));
+}
+
+#[test]
 fn default_deployment_renders_without_host_network() {
     let manifests = render("");
     let deployment = find_deployment(&manifests);

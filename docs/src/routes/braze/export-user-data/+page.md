@@ -8,7 +8,7 @@ Exports Braze user profiles.
 - braze_export_user_data:
     name: export_users
     operation: users_by_ids
-    credentials_path: /etc/braze/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/braze.json"
     base_url: "{{env.BRAZE_REST_ENDPOINT}}"
     payload:
       from_event: true

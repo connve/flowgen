@@ -5,7 +5,7 @@
 	import ResourceViewer from '$lib/ResourceViewer.svelte';
 	import CodeEditor from '$lib/CodeEditor.svelte';
 	import FlowDag from '$lib/dag/FlowDag.svelte';
-	import { CopyButton, Segmented } from '@connve/ui';
+	import { CopyButton, IconButton, Segmented } from '@connve/ui';
 	import type { Activity } from '$lib/flow/ActivityDetails.svelte';
 	import ActivityPanel from '$lib/flow/ActivityPanel.svelte';
 	import ConfigFields from '$lib/flow/ConfigFields.svelte';
@@ -66,16 +66,28 @@
 	let configHidden = $state(false);
 
 	const ROOMY_WIDTH = 1280;
+	const COMPACT_WIDTH = 768;
 	let windowWidth = $state(ROOMY_WIDTH);
 	let narrow = $derived(windowWidth < ROOMY_WIDTH);
+	let compact = $derived(windowWidth < COMPACT_WIDTH);
 	let view = $state<'graph' | 'config'>(untrack(() => (editable ? 'config' : 'graph')));
 	let showGraph = $derived(!narrow || view === 'graph');
 	let showConfig = $derived(narrow ? view === 'config' : editable || !configHidden);
 
+	let maximized = $state(false);
+	// On a phone the graph and config fold to their header while the activity is open.
+	let folded = $derived(compact && activities !== undefined && activityExpanded);
+
 	onMount(() => {
 		configHidden = localStorage.getItem('flowgen-config-hidden') === '1';
+		if (window.innerWidth < COMPACT_WIDTH && !editable) activityExpanded = true;
 		if (focusTask) tick().then(() => onNodeClick(focusTask));
 	});
+
+	function toggleActivity() {
+		activityExpanded = !activityExpanded;
+		if (!activityExpanded) maximized = false;
+	}
 
 	function toggleConfig() {
 		configHidden = !configHidden;
@@ -133,11 +145,25 @@
 			{ id: 'config', label: m.flow_config_heading() }
 		]}
 		bind:value={view}
+		onchange={() => {
+			if (folded) toggleActivity();
+		}}
 	/>
 {/snippet}
 
+{#snippet foldToggle()}
+	{#if compact && activities}
+		<IconButton
+			icon={folded ? 'tabler:chevron-down' : 'tabler:chevron-up'}
+			label={folded ? m.flow_view_expand() : m.flow_view_collapse()}
+			tooltip="left"
+			onclick={toggleActivity}
+		/>
+	{/if}
+{/snippet}
+
 <div class="flex min-h-0 flex-1 flex-col">
-	<div class="flex min-h-0 flex-1">
+	<div class="flex {maximized ? 'hidden' : folded ? 'shrink-0' : 'min-h-0 flex-1'}">
 	<div
 		class="grid min-h-0 min-w-0 flex-1 gap-0 divide-x divide-base-200 {showGraph && showConfig
 			? 'grid-cols-2'
@@ -171,8 +197,9 @@
 						</button>
 					</div>
 				{/if}
+				{@render foldToggle()}
 			</div>
-			<div class="min-h-0 flex-1">
+			<div class="min-h-0 flex-1 {folded ? 'hidden' : ''}">
 				<FlowDag yaml={graphYaml} {activities} onNodeClick={onNodeClick} />
 			</div>
 		</div>
@@ -188,11 +215,12 @@
 						<ConfigViewSwitch />
 					{/if}
 					<CopyButton text={yaml} label={m.flow_copy_yaml()} />
+					{@render foldToggle()}
 				</div>
 			</div>
 			<div
 				bind:this={yamlPane}
-				class="flex min-h-0 flex-1 flex-col overflow-auto {!editable && configView.value === 'fields'
+				class="min-h-0 flex-1 flex-col overflow-auto {folded ? 'hidden' : 'flex'} {!editable && configView.value === 'fields'
 					? 'bg-base-100'
 					: 'bg-base-200'}"
 			>
@@ -218,7 +246,9 @@
 			bind:selected={activity}
 			{activities}
 			expanded={activityExpanded}
-			onToggle={() => (activityExpanded = !activityExpanded)}
+			bind:maximized
+			fill={maximized || folded}
+			onToggle={toggleActivity}
 			onRowClick={onActivityRowClick}
 		/>
 	{/if}
@@ -226,14 +256,14 @@
 
 <style>
 	:global(.task-flash) {
-		background: rgba(0, 118, 0, 0.22);
+		background: color-mix(in oklab, var(--color-secondary) 22%, transparent);
 		border-radius: 3px;
 		padding: 0 2px;
 		animation: task-fade 1.6s ease-out forwards;
 	}
 	@keyframes task-fade {
 		0% {
-			background: rgba(0, 118, 0, 0.3);
+			background: color-mix(in oklab, var(--color-secondary) 30%, transparent);
 		}
 		100% {
 			background: transparent;

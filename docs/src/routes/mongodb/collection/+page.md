@@ -8,7 +8,7 @@ Reads, writes, or upserts documents in a MongoDB collection, depending on `opera
 - mongodb_collection:
     name: read_customers
     operation: read
-    credentials_path: /etc/mongodb/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/mongodb.json"
     db_name: sales
     collection_name: customers
     filter:
@@ -36,7 +36,7 @@ Reads, writes, or upserts documents in a MongoDB collection, depending on `opera
 - mongodb_collection:
     name: read_customers
     operation: read
-    credentials_path: /etc/mongodb/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/mongodb.json"
     db_name: sales
     collection_name: customers
     filter:
@@ -49,7 +49,7 @@ Reads, writes, or upserts documents in a MongoDB collection, depending on `opera
 - mongodb_collection:
     name: write_customer
     operation: write
-    credentials_path: /etc/mongodb/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/mongodb.json"
     db_name: sales
     collection_name: customers
 ```
@@ -60,7 +60,7 @@ Reads, writes, or upserts documents in a MongoDB collection, depending on `opera
 - mongodb_collection:
     name: upsert_customers
     operation: upsert
-    credentials_path: /etc/mongodb/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/mongodb.json"
     db_name: sales
     collection_name: customers
     filter:

@@ -14,7 +14,7 @@ The event holds `{commit, files}`, each file `{path, content}` with `path` relat
     repository: "{{env.GIT_REPOSITORY_URL}}"
     branch: main
     path: "configs/"
-    credentials_path: /etc/git/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/git.json"
 ```
 
 To load flowgen's own flows and resources from a repository, see [Loading flows from Git](/docs/flowgen/git/guides/loading-flows).

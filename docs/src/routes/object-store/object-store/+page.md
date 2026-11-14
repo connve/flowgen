@@ -18,7 +18,7 @@ Read, write, list, and move files on S3, GCS, Azure Blob Storage, or local files
     name: read_orders
     operation: read
     path: gs://my-bucket/data/orders.csv
-    credentials_path: /path/to/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/gcp.json"
 ```
 
 ### Common fields
@@ -78,7 +78,7 @@ Pass a GCP service account JSON file via `credentials_path`:
     name: read_gcs
     operation: read
     path: gs://my-bucket/data/orders.csv
-    credentials_path: /etc/gcp/service-account.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/gcp.json"
 ```
 
 ### Amazon S3
@@ -105,7 +105,7 @@ Three authentication methods are supported, in order of precedence:
     name: read_s3
     operation: read
     path: s3://my-bucket/data/
-    credentials_path: /etc/aws/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/aws.json"
 ```
 
 The file must contain a JSON object with one or more of these keys:
@@ -156,7 +156,7 @@ No credentials needed. Use `file://` paths:
     name: read_orders
     operation: read
     path: gs://my-bucket/data/orders.csv
-    credentials_path: /path/to/gcs-creds.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/gcp.json"
     batch_size: 1000
     has_header: true
 ```
@@ -168,7 +168,7 @@ No credentials needed. Use `file://` paths:
     name: write_results
     operation: write
     path: s3://output-bucket/results/
-    credentials_path: /etc/aws/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/aws.json"
     format: parquet
     client_options:
       aws_region: eu-west-1
@@ -185,7 +185,7 @@ No credentials needed. Use `file://` paths:
     name: find_files
     operation: list
     path: gs://my-bucket/incoming/*.parquet
-    credentials_path: /path/to/gcs-creds.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/gcp.json"
 ```
 
 Returns `{path, files}` where each file has `location`, `last_modified`, `size`, and `e_tag`.
@@ -200,7 +200,7 @@ When files are spread across nested subdirectories (e.g. `bucket/a/file.csv`, `b
     operation: list
     path: gs://my-bucket/data/
     recursive: true
-    credentials_path: /path/to/gcs-creds.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/gcp.json"
 ```
 
 ### Read multiple files (list + iterate + read)
@@ -213,7 +213,7 @@ Read requires a concrete file path — it cannot list or traverse directories. T
     operation: list
     path: gs://my-bucket/data/
     recursive: true
-    credentials_path: /path/to/gcs-creds.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/gcp.json"
 
 - iterate:
     name: each_file
@@ -223,7 +223,7 @@ Read requires a concrete file path — it cannot list or traverse directories. T
     name: read_file
     operation: read
     path: "gs://my-bucket{{event.data.location}}"
-    credentials_path: /path/to/gcs-creds.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/gcp.json"
 ```
 
 ### Move files
@@ -234,7 +234,7 @@ Read requires a concrete file path — it cannot list or traverse directories. T
     operation: move
     source: gs://my-bucket/incoming/*.csv
     destination: gs://my-bucket/processed/
-    credentials_path: /path/to/gcs-creds.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/gcp.json"
 ```
 
 ### Move specific files from event data
@@ -245,7 +245,7 @@ Read requires a concrete file path — it cannot list or traverse directories. T
     operation: move
     source_files: "{{event.meta.source_uris}}"
     destination: gs://my-bucket/archive/
-    credentials_path: /path/to/gcs-creds.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/gcp.json"
 ```
 
 ## Output

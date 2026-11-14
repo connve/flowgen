@@ -14,7 +14,7 @@ The input event carries `files`, each `{path, content}`; the output of [Git Push
     annotations:
       org.opencontainers.image.source: "{{env.GIT_REPOSITORY_URL}}"
       org.opencontainers.image.revision: "{{event.data.commit}}"
-    credentials_path: /etc/registry/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/registry.json"
 ```
 
 ### Fields

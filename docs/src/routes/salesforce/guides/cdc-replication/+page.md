@@ -42,7 +42,7 @@ flow:
 
     - salesforce_pubsubapi_subscribe:
         name: start_subscription
-        credentials_path: /etc/sfdc/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
         topic:
           name: /data/AccountChangeEvent
           durable_consumer_options:
@@ -52,7 +52,7 @@ flow:
 
     - nats_jetstream_publish:
         name: publish_events
-        credentials_path: /etc/nats/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/nats.json"
         url: "{{env.NATS_URL}}"
         subject: pubsub.data.{{event.subject}}
         stream:
@@ -86,7 +86,7 @@ flow:
 
     - nats_jetstream_subscribe:
         name: start_subscription
-        credentials_path: /etc/nats/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/nats.json"
         url: "{{env.NATS_URL}}"
         subject: pubsub.>
         stream:
@@ -111,7 +111,7 @@ flow:
     - object_store:
         name: write_to_object_store
         operation: write
-        credentials_path: /etc/gcp/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/gcp.json"
         path: "{{env.GCS_BUCKET_PATH}}/salesforce/{{event.subject}}"
         hive_partition_options:
           enabled: true
@@ -121,7 +121,7 @@ flow:
 
     - gcp_bigquery_storage_write:
         name: write_to_data_warehouse
-        credentials_path: /etc/gcp/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/gcp.json"
         project_id: "{{env.GCP_PROJECT_ID}}"
         dataset_id: salesforce
         table_id: account
@@ -146,7 +146,7 @@ Both branches are independent — remove or replace either one without affecting
     - object_store:
         name: write_to_object_store
         operation: write
-        credentials_path: /etc/aws/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/aws.json"
         path: s3://my-bucket/salesforce/{{event.subject}}
         client_options:
           aws_region: us-east-1
@@ -163,9 +163,9 @@ Both branches are independent — remove or replace either one without affecting
 
 | File | Purpose | Contents |
 |---|---|---|
-| `/etc/sfdc/credentials.json` | Salesforce Pub/Sub API | `client_id`, `client_secret`, `username`, `password`, `login_url` |
-| `/etc/nats/credentials.json` | NATS JetStream | `url`, `nkey_seed` or `credentials_path` |
-| `/etc/gcp/credentials.json` | GCS + BigQuery | GCP service account JSON key |
+| `{{env.FLOWGEN_CREDENTIALS}}/salesforce.json` | Salesforce Pub/Sub API | `client_id`, `client_secret`, `username`, `password`, `login_url` |
+| `{{env.FLOWGEN_CREDENTIALS}}/nats.json` | NATS JetStream | `url`, `nkey_seed` or `credentials_path` |
+| `{{env.FLOWGEN_CREDENTIALS}}/gcp.json` | GCS + BigQuery | GCP service account JSON key |
 
 See [Credentials](/docs/flowgen/concepts/credentials) for format details.
 
@@ -176,7 +176,7 @@ To replay from the start of the Salesforce retention window, set `replay_preset:
 ```yaml
     - salesforce_pubsubapi_subscribe:
         name: start_subscription
-        credentials_path: /etc/sfdc/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
         topic:
           name: /data/AccountChangeEvent
           durable_consumer_options:

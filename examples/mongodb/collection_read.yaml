@@ -16,7 +16,7 @@ flow:
     - mongodb_collection:
         name: read_customers
         operation: read
-        credentials_path: /etc/mongodb/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/mongodb.json"
         db_name: sales
         collection_name: customers
         filter:
@@ -24,7 +24,7 @@ flow:
 
     - nats_jetstream_publish:
         name: publish_events
-        credentials_path: /etc/nats/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/nats.json"
         subject: pubsub.data.mongo
         stream:
           create_or_update: true

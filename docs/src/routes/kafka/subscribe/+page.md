@@ -7,7 +7,7 @@ Consumes every partition of a Kafka topic and emits each record as an event.
 ```yaml
 - kafka_subscribe:
     name: consume_orders
-    credentials_path: /etc/kafka/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/kafka.json"
     brokers: "{{env.KAFKA_BROKERS}}"
     topic: orders
     start_offset: earliest

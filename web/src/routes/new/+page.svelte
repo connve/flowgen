@@ -4,7 +4,17 @@
 	import Icon from '@iconify/svelte';
 	import { Badge, Inspector, InspectorSection, Loading, StateMessage } from '@connve/ui';
 	import { encodePath, proposeChange, type HubTemplate } from '$lib/api';
-	import { addToDraft, authoringTargets, draftChange, pendingChanges, targetOf } from '$lib/changes';
+	import {
+		addToDraft,
+		authoringTargets,
+		baseContent,
+		draftChange,
+		pendingChanges,
+		targetOf
+	} from '$lib/changes';
+	import { connectorFor, type Connector } from '$lib/connectors';
+	import { load } from 'js-yaml';
+	import { SvelteSet } from 'svelte/reactivity';
 	import { catalogsOf, type Catalog } from '$lib/hubs';
 	import { renderMarkdown } from '$lib/markdown';
 	import { m } from '$lib/paraglide/messages.js';
@@ -28,11 +38,46 @@
 		`${base}/edit?new=${data.kind}${data.folder ? `&folder=${encodePath(data.folder)}` : ''}`
 	);
 
+	// Templates whose files the workspace or a pending change already holds.
+	let added = new SvelteSet<string>();
+
 	onMount(async () => {
 		catalogs = await catalogsOf(data.hubs);
 		source = catalogs[0]?.hub.id ?? null;
 		loading = false;
+		const pending = await pendingChanges();
+		const proposed = new Set(pending.flatMap((change) => change.paths));
+		for (const { templates } of catalogs) {
+			for (const template of templates) {
+				const first = template.files[0];
+				if (!first) continue;
+				const held = proposed.has(first.path) || (await baseContent(first.path)) !== null;
+				if (held) added.add(template.slug);
+			}
+		}
 	});
+
+	// The connectors of the tasks in a template's flows, as the flows list shows them.
+	function connectorsOf(template: HubTemplate): Connector[] {
+		const found = new Map<string, Connector>();
+		for (const file of template.files) {
+			if (!file.path.startsWith('flows/') || !file.content) continue;
+			let tasks: unknown;
+			try {
+				tasks = (load(file.content) as { flow?: { tasks?: unknown } })?.flow?.tasks;
+			} catch {
+				continue;
+			}
+			if (!Array.isArray(tasks)) continue;
+			for (const task of tasks) {
+				const taskType = task && typeof task === 'object' ? Object.keys(task)[0] : undefined;
+				if (!taskType) continue;
+				const connector = connectorFor(taskType);
+				if (connector.name !== 'core') found.set(connector.name, connector);
+			}
+		}
+		return [...found.values()];
+	}
 
 	function select(hub: string) {
 		source = hub;
@@ -121,9 +166,15 @@
 								onclick={() => (previewedSlug = template.slug)}
 							>
 								<span class="flex items-center gap-2">
+									{#each connectorsOf(template) as connector (connector.name)}
+										<img src={connector.iconUrl} alt="" class="h-4 w-4 shrink-0" />
+									{/each}
 									<span class="truncate text-sm font-medium">{template.name}</span>
 									{#if template.category}
 										<Badge>{template.category}</Badge>
+									{/if}
+									{#if added.has(template.slug)}
+										<Badge variant="success">{m.hub_template_added()}</Badge>
 									{/if}
 								</span>
 								{#if template.description}
@@ -142,17 +193,23 @@
 {#if previewed}
 	<Inspector title={previewed.name} label={m.hub_template_details()} onclose={() => (previewedSlug = null)}>
 		{#snippet actions()}
-			<button
-				type="button"
-				class="btn btn-primary btn-sm"
-				disabled={using || previewed.files.length === 0}
-				onclick={() => previewed && useTemplate(previewed)}
-			>
-				{#if using}
-					<span class="loading loading-spinner loading-xs"></span>
-				{/if}
-				{m.hub_template_use()}
-			</button>
+			{#if added.has(previewed.slug)}
+				<span class="tooltip tooltip-left" data-tip={m.hub_template_added_hint()}>
+					<button type="button" class="btn btn-sm" disabled>{m.hub_template_added()}</button>
+				</span>
+			{:else}
+				<button
+					type="button"
+					class="btn btn-primary btn-sm"
+					disabled={using || previewed.files.length === 0}
+					onclick={() => previewed && useTemplate(previewed)}
+				>
+					{#if using}
+						<span class="loading loading-spinner loading-xs"></span>
+					{/if}
+					{m.hub_template_use()}
+				</button>
+			{/if}
 		{/snippet}
 		{#if useError}
 			<div class="rounded-lg border border-error/40 bg-error/5 p-3 text-sm">{useError}</div>

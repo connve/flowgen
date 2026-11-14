@@ -20,6 +20,8 @@
 	import Icon from '@iconify/svelte';
 	import { m } from '$lib/paraglide/messages.js';
 	import { pageTitle } from '$lib/pageTitle';
+	import { deploymentsStream } from '$lib/urls';
+	import { visibleEventSource } from '$lib/visibleEventSource';
 	import {
 		encodePath,
 		errorMessage,
@@ -85,6 +87,16 @@
 			loading = false;
 		}
 	});
+
+	// Loads the list again each time a resource changes, such as a deployed change.
+	onMount(() =>
+		visibleEventSource(deploymentsStream(), (source) =>
+			source.addEventListener('deployment', () => {
+				listResources().then(({ data }) => (resources = data), () => undefined);
+				pendingChanges().then((changes) => (pending = changes));
+			})
+		)
+	);
 
 	function toggleFolder(path: string) {
 		if (expandedFolders.has(path)) expandedFolders.delete(path);

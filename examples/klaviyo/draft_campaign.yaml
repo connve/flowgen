@@ -31,7 +31,7 @@ flow:
     - klaviyo_lists:
         name: find_list
         operation: list
-        credentials_path: /etc/klaviyo/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/klaviyo.json"
         filter: "equals(name,'{{event.data.list_name}}')"
 
     # The draft campaign for that list, with one email that uses the template.
@@ -64,6 +64,6 @@ flow:
     - klaviyo_campaigns:
         name: create_campaign
         operation: create
-        credentials_path: /etc/klaviyo/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/klaviyo.json"
         payload:
           from_event: true

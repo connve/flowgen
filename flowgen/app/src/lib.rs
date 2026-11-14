@@ -15,6 +15,8 @@ pub mod authoring;
 pub mod config;
 /// External systems the loaded flows connect to, with their status.
 pub mod connections;
+/// Credentials added in the web UI, encrypted with SOPS and committed.
+pub mod credentials;
 /// Flow execution and task management.
 pub mod flow;
 /// Hubs: templates to start new flows and resources from, read through hub flows.

@@ -20,7 +20,7 @@ flow:
     # Parameterised query, SQL loaded from a resource file.
     - mssql_query:
         name: fetch_orders
-        credentials_path: /etc/mssql/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/mssql.json"
         query:
           resource: "mssql/queries/fetch_orders.sql"
         parameters:

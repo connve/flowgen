@@ -10,12 +10,12 @@ flow:
   tasks:
     - mongodb_cdc:
         name: watch_sales
-        credentials_path: /etc/mongodb/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/mongodb.json"
         db_name: sales
 
     - nats_jetstream_publish:
         name: publish_events
-        credentials_path: /etc/nats/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/nats.json"
         subject: pubsub.data.mongocdc
         stream:
           create_or_update: true

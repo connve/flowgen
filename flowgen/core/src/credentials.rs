@@ -39,6 +39,105 @@ pub enum Error {
         #[source]
         source: keyring_core::Error,
     },
+    #[error(
+        "The credentials at {path} are encrypted with SOPS, but {} names no age key",
+        crate::sops::AGE_KEY_FILE_ENV
+    )]
+    NoAgeKey { path: String },
+    #[error("Failed to read the age key {key}: {message}")]
+    AgeKey { key: String, message: String },
+    #[error("Failed to decrypt the credentials at {path}: {source}")]
+    Decrypt {
+        path: String,
+        #[source]
+        source: crate::sops::Error,
+    },
+    #[error("The Secret beside {path} does not hold its file")]
+    NotInSecret { path: String },
+}
+
+/// `content` read from `path`, decrypted in memory when SOPS encrypted it,
+/// with the age key [`crate::sops::AGE_KEY_FILE_ENV`] names.
+fn decrypted(path: &Path, content: String) -> Result<String, Error> {
+    match crate::sops::is_encrypted(&content) {
+        true => decrypt(path, &content),
+        false => Ok(content),
+    }
+}
+
+/// The file `path` names inside the encrypted Secret beside it, as a
+/// workspace holds credentials: `a.json` in `a.yaml`. `None` when there is
+/// no such Secret.
+fn from_secret(path: &Path) -> Option<Result<String, Error>> {
+    let file = path.file_name()?.to_str()?;
+    let content = std::fs::read_to_string(path.with_extension("yaml")).ok()?;
+    if !crate::sops::is_encrypted(&content) {
+        return None;
+    }
+    let missing = || Error::NotInSecret {
+        path: path.display().to_string(),
+    };
+    let found = decrypt(path, &content).and_then(|document| {
+        let document: serde_json::Value =
+            serde_json::from_str(&document).map_err(|source| Error::ParseFile {
+                path: path.display().to_string(),
+                source,
+            })?;
+        match (
+            document.pointer(&format!("/stringData/{file}")),
+            document.pointer(&format!("/data/{file}")),
+        ) {
+            (Some(serde_json::Value::String(text)), _) => Ok(text.clone()),
+            (_, Some(serde_json::Value::String(encoded))) => {
+                use base64::Engine as _;
+                base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .ok()
+                    .and_then(|bytes| String::from_utf8(bytes).ok())
+                    .ok_or_else(missing)
+            }
+            _ => Err(missing()),
+        }
+    });
+    Some(found)
+}
+
+/// Whether [`read`] finds credentials for `path`, without reading them.
+pub fn exists(path: &Path) -> bool {
+    if path.exists() || path.with_extension("yaml").exists() {
+        return true;
+    }
+    match keychain_entry(path) {
+        Some(entry) => entry.get_password().is_ok(),
+        None => false,
+    }
+}
+
+/// The variable naming the folder of the credentials added in the web UI,
+/// which flows read as `{{env.FLOWGEN_CREDENTIALS}}/<name>.json`.
+pub const FOLDER_ENV: &str = "FLOWGEN_CREDENTIALS";
+
+/// `content`, encrypted with SOPS, decrypted with the age key
+/// [`crate::sops::AGE_KEY_FILE_ENV`] names.
+fn decrypt(path: &Path, content: &str) -> Result<String, Error> {
+    let shown = || path.display().to_string();
+    let key = match std::env::var_os(crate::sops::AGE_KEY_FILE_ENV) {
+        Some(key) if !key.is_empty() => std::path::PathBuf::from(key),
+        _ => return Err(Error::NoAgeKey { path: shown() }),
+    };
+    let key_error = |message: String| Error::AgeKey {
+        key: key.display().to_string(),
+        message,
+    };
+    let file = std::fs::File::open(&key).map_err(|e| key_error(e.to_string()))?;
+    let identities = age::IdentityFile::from_buffer(std::io::BufReader::new(file))
+        .map_err(|e| key_error(e.to_string()))?
+        .into_identities()
+        .map_err(|e| key_error(e.to_string()))?;
+    crate::sops::decrypt(content, &identities).map_err(|source| Error::Decrypt {
+        path: shown(),
+        source,
+    })
 }
 
 /// The service flowgen keeps credentials under in the system keychain.
@@ -63,16 +162,20 @@ fn keychain_entry(path: &Path) -> Option<keyring_core::Entry> {
     keyring_core::Entry::new(KEYCHAIN_SERVICE, &account.to_string_lossy()).ok()
 }
 
-/// Reads the credentials at `path`: the file, or, when there is none, its
-/// entry in the system keychain.
+/// Reads the credentials at `path`: the file, the file inside the encrypted
+/// Secret beside it, or, when there is neither, its entry in the system
+/// keychain. Anything SOPS encrypted is decrypted in memory.
 pub fn read(path: &Path) -> Result<String, Error> {
     let file_error = |source| Error::ReadFile {
         path: path.display().to_string(),
         source,
     };
-    match std::fs::read_to_string(path) {
+    let content = match std::fs::read_to_string(path) {
         Ok(content) => Ok(content),
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(found) = from_secret(path) {
+                return found;
+            }
             match keychain_entry(path).map(|entry| entry.get_password()) {
                 Some(Ok(content)) => Ok(content),
                 Some(Err(keyring_core::Error::NoEntry)) | None => Err(file_error(source)),
@@ -83,7 +186,8 @@ pub fn read(path: &Path) -> Result<String, Error> {
             }
         }
         Err(source) => Err(file_error(source)),
-    }
+    }?;
+    decrypted(path, content)
 }
 
 /// Keeps `content` as the credentials at `path` in the system keychain, where
@@ -496,6 +600,40 @@ pub async fn load_credentials<T: serde::de::DeserializeOwned>(path: &Path) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encrypted_credentials_are_read_decrypted_with_the_age_key() {
+        let folder = tempfile::tempdir().unwrap();
+        let identity = age::x25519::Identity::generate();
+        let key = folder.path().join("age.key");
+        std::fs::write(
+            &key,
+            age::secrecy::ExposeSecret::expose_secret(&identity.to_string()),
+        )
+        .unwrap();
+        let file = folder.path().join("a.json");
+        let encrypted =
+            crate::sops::encrypt(r#"{"api_key": "secret"}"#, &[identity.to_public()]).unwrap();
+        std::fs::write(&file, &encrypted).unwrap();
+        let in_secret = folder.path().join("b.json");
+        let secret = crate::sops::encrypt_secret(
+            "b",
+            "b.json",
+            r#"{"api_key": "other"}"#,
+            &[identity.to_public()],
+        )
+        .unwrap();
+        std::fs::write(folder.path().join("b.yaml"), &secret).unwrap();
+        std::env::set_var(crate::sops::AGE_KEY_FILE_ENV, &key);
+
+        let read_file: serde_json::Value = serde_json::from_str(&read(&file).unwrap()).unwrap();
+        let read_secret: serde_json::Value =
+            serde_json::from_str(&read(&in_secret).unwrap()).unwrap();
+
+        assert_eq!(read_file, serde_json::json!({"api_key": "secret"}));
+        assert_eq!(read_secret, serde_json::json!({"api_key": "other"}));
+        assert!(!secret.contains("other"));
+    }
 
     /// A missing file at a new path, with the mock keychain in place.
     fn missing() -> std::path::PathBuf {

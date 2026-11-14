@@ -7,7 +7,7 @@ Writes the rows of each event into a PostgreSQL table with `COPY`: appended, or 
 ```yaml
 - postgres_write:
     name: save_orders
-    credentials_path: /etc/postgres/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/postgres.json"
     table: public.orders
     change_type: upsert
 ```
@@ -62,7 +62,7 @@ Values are sent as text and the server parses them into the column types: string
 ```yaml
 - postgres_query:
     name: save_order
-    credentials_path: /etc/postgres/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/postgres.json"
     query: |
       INSERT INTO orders (id, status, total) VALUES ($1, $2, $3)
       ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, total = EXCLUDED.total

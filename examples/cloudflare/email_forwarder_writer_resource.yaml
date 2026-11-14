@@ -12,7 +12,7 @@ flow:
   tasks:
     - nats_jetstream_subscribe:
         name: start_subscription
-        credentials_path: /etc/nats/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/nats.json"
         url: "{{env.NATS_URL}}"
         subject: email.received
         stream:

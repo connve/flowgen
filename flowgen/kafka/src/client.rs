@@ -188,8 +188,8 @@ fn certificates(path: &Path) -> Result<Vec<CertificateDer<'static>>, Error> {
         path: path.to_path_buf(),
         source,
     };
-    CertificateDer::pem_file_iter(path)
-        .map_err(read_error)?
+    let pem = flowgen_core::credentials::read(path).map_err(Error::ReadCredentials)?;
+    CertificateDer::pem_slice_iter(pem.as_bytes())
         .collect::<Result<Vec<_>, _>>()
         .map_err(read_error)
 }
@@ -200,10 +200,7 @@ const ENCRYPTED_PRIVATE_KEY_LABEL: &str = "ENCRYPTED PRIVATE KEY";
 /// Loads a PEM private key, decrypting it with `password` when it is an
 /// encrypted PKCS#8 key. The password is ignored for an unencrypted key.
 fn private_key(path: &Path, password: Option<&str>) -> Result<PrivateKeyDer<'static>, Error> {
-    let pem = std::fs::read_to_string(path).map_err(|source| Error::ReadPrivateKey {
-        path: path.to_path_buf(),
-        source: rustls::pki_types::pem::Error::Io(source),
-    })?;
+    let pem = flowgen_core::credentials::read(path).map_err(Error::ReadCredentials)?;
     let decrypt_error = |source| Error::DecryptPrivateKey {
         path: path.to_path_buf(),
         source,

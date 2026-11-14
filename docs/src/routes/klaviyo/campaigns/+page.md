@@ -8,7 +8,7 @@ Reads and writes Klaviyo campaigns, their messages and their variations.
 - klaviyo_campaigns:
     name: find_campaign
     operation: list
-    credentials_path: /etc/klaviyo/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/klaviyo.json"
     filter: "contains(name,'{{event.data.name}}')"
 ```
 

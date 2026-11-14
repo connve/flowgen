@@ -5,7 +5,9 @@
 //! and the produce and subscribe tasks.
 
 use flowgen_core::task::context::TaskContext;
-use flowgen_core::task::meta::{Connection, Connector, Icon};
+use flowgen_core::task::meta::{
+    Connection, Connector, CredentialsField, CredentialsForm, FieldKind, Icon,
+};
 use flowgen_core::task::runner::Runner;
 use flowgen_core::task::{Task, TaskError, TaskIo, TaskMeta};
 use std::sync::Arc;
@@ -25,6 +27,22 @@ pub const CONNECTOR: Connector = Connector {
     label: "Kafka",
     icon: Icon::Svg(include_str!("../icons/kafka.svg")),
     describe_credentials: None,
+    credentials: &[CredentialsForm {
+        label: "SASL",
+        fields: &[
+            CredentialsField::text("sasl.username", "Username"),
+            CredentialsField::secret("sasl.password", "Password"),
+            CredentialsField::text("sasl.mechanism", "Mechanism")
+                .of(FieldKind::Choice(&[
+                    "SCRAM-SHA-256",
+                    "SCRAM-SHA-512",
+                    "PLAIN",
+                ]))
+                .optional(),
+            CredentialsField::text("security_protocol", "Security protocol")
+                .of(FieldKind::Choice(&["SASL_SSL", "SASL_PLAINTEXT"])),
+        ],
+    }],
 };
 
 impl TaskMeta for produce::Produce {

@@ -34,6 +34,9 @@
   field: every client of the AI gateway or MCP server sees every proxy and
   tool. An MCP toolset URL gives an agent the tools of one folder, and `auth`
   controls who may call.
+- A source (schedule, subscriber, endpoint) has no parent task: one listed
+  after another task starts its own branch, and a source with `depends_on`
+  fails to load.
 
 ### Added
 
@@ -65,6 +68,40 @@
   from `FLOWGEN_REPOSITORY`, `FLOWGEN_WORKSPACE_PATH`, `FLOWGEN_RELEASES`,
   `FLOWGEN_CACHE_URL`, `FLOWGEN_SYSTEM_BUCKET` and the `*_CREDENTIALS`
   variables. A run sets the ones it knows unless they are set already.
+- `kv_watch` starts a flow with the value of a key, or of each key under a
+  prefix, when it changes in a redb file or a NATS bucket, and once at start
+  for each value the flow has not finished.
+- An approved change's commit is put at `commits.latest` in the system
+  bucket, and the release flow records `releases.latest`; the release and
+  deploy flows watch them, so an approved change deploys in seconds. They
+  also look every minute for commits and releases made outside flowgen.
+- **Add credentials** in the Connections tab, for a connection reading
+  `{{env.FLOWGEN_CREDENTIALS}}/<name>.json`, encrypts a credentials file with
+  SOPS and age and proposes it as `credentials/<name>.yaml`, a Secret holding
+  `<name>.json`; `credentials` in the config sets the age recipients and key.
+  Changes under `credentials/` must hold one fully encrypted Secret per file,
+  and adding or removing credentials rewrites the ConfigMap
+  `credentials/flowgen-credentials.yaml` listing them. The examples read
+  their credentials from `{{env.FLOWGEN_CREDENTIALS}}`.
+- Every task decrypts a SOPS-encrypted credentials file in memory with the
+  key `credentials.identity_path` names, or `SOPS_AGE_KEY_FILE` without one,
+  also from the encrypted Secret beside a missing `<name>.json`. A run sets
+  `FLOWGEN_CREDENTIALS` to the credentials folder; a local workspace creates
+  its age key in `.flowgen/` and a `.sops.yaml`.
+- Chart: `flowgen.credentials` mounts the listed Secrets read-only at
+  `credentialsPath`, which `FLOWGEN_CREDENTIALS` names.
+- The web UI's header shows a search bar with its ⌘K shortcut, the same as
+  the docs; both use the search, footer, icons and code colors of
+  `@connve/ui`.
+- `llm_proxy.requires` names the proxies one calls; it is listed and
+  reachable only while they are registered, so Flowgen Agent shows once a
+  model flow serves `default`.
+- Approving a change validates its files again, so a change proposed before
+  an upgrade cannot commit a file the running version rejects.
+- Templates are offered for a new flow only. The status chips on Flows and
+  the level chips on Logs and Activity pick: with none picked every status,
+  or the default levels, show; picked ones fill, and Clear drops the pick.
+  Info shows green.
 - `flows.system: true` runs this version's system flows under `system/`
   without a workspace holding them, as in a cluster; a mounted flow with the
   same identity takes their place.
@@ -176,8 +213,6 @@
   as `<name>_copy`, or `<name>_copy_2` and on when that is taken.
 - The Agents page without models links to Templates to add one, and its New
   button is off until a model is available.
-- The Templates button of a new file is off, with the reason, when no hub
-  answers with templates.
 
 ### Fixed
 
@@ -186,6 +221,15 @@
 - With the System theme, a page of the web UI opens in the system's light or
   dark theme from its first paint.
 - A local run opens the browser once the web UI accepts connections.
+- On shutdown the servers stop after the flows, so a flow finishes the
+  requests it is handling first. `ai_completion` closes its MCP sessions
+  and waits for them to close when it stops.
+- `parse_json` and `parse_yaml` in scripts return numbers as `i64` or `f64`,
+  so scripts can compute with them and check their type.
+- In the Connections tab, tasks without credentials that reach different
+  places are separate connections, one per target.
+- The app fails to start when `mcp_server.credentials_path` cannot be read
+  or parsed, so the MCP server never runs without its API keys.
 
 ## 0.154.0
 

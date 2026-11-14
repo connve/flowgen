@@ -14,7 +14,7 @@ flow:
     # Row changes; the slot is created on first start.
     - postgres_cdc:
         name: watch_orders
-        credentials_path: /etc/postgres/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/postgres.json"
         publication: orders_pub
         slot: flowgen_orders
         max_deliver: 5
@@ -22,7 +22,7 @@ flow:
     # One NATS message per change.
     - nats_jetstream_publish:
         name: publish_changes
-        credentials_path: /etc/nats/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/nats.json"
         subject: "postgres.changes"
         stream:
           create_or_update: true

@@ -3,12 +3,12 @@
 
 use crate::config::{
     default_shutdown_timeout, AgentsOptions, AiGatewayOptions, AppConfig, AuthoringOptions,
-    CacheOptions, FlowCacheOptions, FlowOptions, HttpServerOptions, McpServerOptions,
-    ResourceCacheOptions, ResourceOptions, TelemetryOptions, WebOptions,
+    CacheOptions, CredentialsOptions, FlowCacheOptions, FlowOptions, HttpServerOptions,
+    McpServerOptions, ResourceCacheOptions, ResourceOptions, TelemetryOptions, WebOptions,
 };
 use crate::hubs::SYSTEM_FOLDER;
 use flowgen_core::cache::{Cache, RedbCache};
-use flowgen_core::workspace::{CACHE_FILE, FLOWS_DIR, STATE_DIR};
+use flowgen_core::workspace::{CACHE_FILE, CREDENTIALS_DIR, FLOWS_DIR, STATE_DIR};
 use rust_embed::RustEmbed;
 use std::path::{Path, PathBuf};
 
@@ -80,6 +80,9 @@ const UPDATE_SYSTEM_FLOWS_MESSAGE: &str = "Update the system flows";
 /// update wrote, so the next one deletes those this version no longer has.
 const SYSTEM_FLOWS_FILE: &str = ".system-flows";
 
+/// The `sops` CLI's config at the root of a workspace.
+const SOPS_CONFIG_FILE: &str = ".sops.yaml";
+
 /// The system flows with the list of them, by their path in the workspace.
 fn system_files() -> Vec<(String, String)> {
     let mut files = starter_files();
@@ -111,6 +114,8 @@ pub enum LifecycleError {
     },
     #[error("Failed to start the lifecycle flows in the cache: {0}")]
     Cache(#[from] flowgen_core::cache::Error),
+    #[error(transparent)]
+    Key(#[from] crate::credentials::Error),
     #[error("The workspace has no {}; run `flowgen bootstrap` to add the system flows of this version", .paths.join(", "))]
     Missing { paths: Vec<String> },
 }
@@ -184,11 +189,26 @@ impl Workspace {
             .collect()
     }
 
+    /// The `.sops.yaml` of the workspace, so the `sops` CLI encrypts
+    /// credentials for the age key this machine decrypts them with.
+    fn sops_config(&self) -> Result<(String, String), LifecycleError> {
+        let key = crate::credentials::identity(&self.folder.join(STATE_DIR).join(KEY_FILE))?;
+        let content = format!(
+            "# Written by flowgen: encrypt credentials for this workspace's age key.\n\
+             creation_rules:\n  - path_regex: {CREDENTIALS_DIR}/.*\\.yaml$\n    \
+             encrypted_regex: \"{}\"\n    age: {}\n",
+            flowgen_core::sops::SECRET_REGEX,
+            key.to_public()
+        );
+        Ok((SOPS_CONFIG_FILE.to_string(), content))
+    }
+
     /// Creates the workspace with the starter files in one commit when its
     /// folder holds nothing yet; returns whether it did.
     pub async fn create(&self) -> Result<bool, LifecycleError> {
-        let starter = system_files();
+        let mut starter = system_files();
         if self.path.is_empty() {
+            starter.push(self.sops_config()?);
             return Ok(flowgen_git::workspace::init(
                 &self.folder,
                 &self.in_repository(&starter),
@@ -206,6 +226,7 @@ impl Workspace {
         if !empty {
             return Ok(false);
         }
+        starter.push(self.sops_config()?);
         let gitignore = flowgen_git::workspace::gitignore();
         let mut files = self.in_repository(&starter);
         files.push((
@@ -244,7 +265,8 @@ impl SystemFlowsUpdate {
 pub async fn update_system_flows(
     workspace: &Workspace,
 ) -> Result<SystemFlowsUpdate, LifecycleError> {
-    let files = system_files();
+    let mut files = system_files();
+    files.push(workspace.sops_config()?);
     let shipped: std::collections::HashSet<&str> =
         files.iter().map(|(path, _)| path.as_str()).collect();
     let system = format!("{FLOWS_DIR}/{SYSTEM_FOLDER}/");
@@ -383,8 +405,16 @@ pub fn defaults(root: &Path) -> AppConfig {
         shutdown_timeout: default_shutdown_timeout(),
         host: LOCAL_HOST.to_string(),
         ai_budget: None,
+        credentials: Some(CredentialsOptions {
+            recipients: Vec::new(),
+            identity_path: Some(root.join(STATE_DIR).join(KEY_FILE)),
+            path: root.join(CREDENTIALS_DIR),
+        }),
     }
 }
+
+/// The age key a local run decrypts its credentials with, in [`STATE_DIR`].
+pub const KEY_FILE: &str = "age.key";
 
 /// [`defaults`] with `env`, the `APP_` environment variables, over it.
 pub fn load(root: &Path, env: config::Environment) -> Result<AppConfig, config::ConfigError> {
@@ -396,7 +426,6 @@ pub fn load(root: &Path, env: config::Environment) -> Result<AppConfig, config::
 mod tests {
     use super::*;
     use crate::config::{default_host, env_source, CacheType};
-    use flowgen_core::workspace::CREDENTIALS_DIR;
 
     fn variables(set: &[(&str, &str)]) -> config::Environment {
         let set = set
@@ -547,6 +576,7 @@ mod tests {
         let mut updated = update_system_flows(&workspace).await.unwrap();
         updated.written.sort();
         let mut expected: Vec<String> = system_files().into_iter().map(|(path, _)| path).collect();
+        expected.push(SOPS_CONFIG_FILE.to_string());
         expected.sort();
         assert_eq!(
             updated,
@@ -687,10 +717,11 @@ mod tests {
                 .filter(|line| line.contains("credentials_path:"))
             {
                 let line = line.trim();
-                let in_dir = line.starts_with(&format!("credentials_path: {CREDENTIALS_DIR}/"));
+                let in_folder =
+                    line.starts_with("credentials_path: \"{{env.FLOWGEN_CREDENTIALS}}/");
                 let from_run = line.starts_with("credentials_path: \"{{env.FLOWGEN_")
                     && line.ends_with("_CREDENTIALS}}\"");
-                assert!(in_dir || from_run, "{path}: {line}");
+                assert!(in_folder || from_run, "{path}: {line}");
             }
         }
         assert!(starter.iter().any(|path| {

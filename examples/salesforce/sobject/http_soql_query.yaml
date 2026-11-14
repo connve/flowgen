@@ -19,7 +19,7 @@ flow:
     # :industry is bound as a quoted, escaped SOQL literal.
     - salesforce_restapi_query:
         name: soql_query
-        credentials_path: /etc/sfdc/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
         query: "SELECT Id, Name, Industry FROM Account WHERE Industry = :industry"
         parameters:
           industry: "{{event.data.industry}}"

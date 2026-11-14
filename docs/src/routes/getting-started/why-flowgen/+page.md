@@ -39,7 +39,7 @@ flow:
         name: ingest
         endpoint: /events
         method: POST
-        credentials_path: /etc/http/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/http.json"
 
     - script:
         name: transform
@@ -53,7 +53,7 @@ flow:
 
     - nats_jetstream_publish:
         name: publish
-        credentials_path: /etc/nats/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/nats.json"
         url: "{{env.NATS_URL}}"
         subject: events.normalized
         stream:
@@ -65,14 +65,4 @@ flow:
 
 ## Integrations
 
-| Integration | Tasks |
-|---|---|
-| **NATS JetStream** | Subscriber, Publisher, KV Store |
-| **Salesforce** | PubSub API, REST API, Bulk API, Tooling API |
-| **Google Cloud** | BigQuery Query, Storage Read, Storage Write, Jobs |
-| **HTTP** | Webhook, Request |
-| **Object Store** | Read, Write, List, Move (S3, GCS, Azure, local) |
-| **MSSQL** | Query |
-| **AI** | Completion (multi-provider), AI Gateway (OpenAI-compatible), MCP Tools |
-| **Git** | Git Sync |
-| **Core** | Script (Rhai), Convert, Iterate, Buffer, Generate, Log |
+Connectors cover messaging, databases and change data capture, object storage, HTTP, Git and OCI registries, AI models and MCP, and SaaS APIs. Each connector has its own section in the navigation, with its tasks and the format of its credentials. The core tasks — script, convert, iterate, buffer, generate and log — work with any of them.

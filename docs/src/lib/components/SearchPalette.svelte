@@ -2,10 +2,9 @@
 	import { goto } from '$app/navigation';
 	import { base } from '$app/paths';
 	import Icon from '@iconify/svelte';
-	import { tick, untrack } from 'svelte';
+	import { SearchPalette, icons } from '@connve/ui';
 	import { navigation } from '$lib/nav';
 	import type { SearchEntry } from '$lib/search';
-	import { fileText, hash, search } from '$lib/icons';
 
 	let { open = $bindable(false) }: { open: boolean } = $props();
 
@@ -14,8 +13,6 @@
 	const SNIPPET = 160;
 
 	let query = $state('');
-	let active = $state(0);
-	let input = $state<HTMLInputElement | null>(null);
 	let entries = $state<SearchEntry[]>([]);
 	let loading = $state(false);
 	let failed = $state(false);
@@ -37,13 +34,8 @@
 
 	$effect(() => {
 		if (!open) return;
-		untrack(() => {
-			query = '';
-			active = 0;
-			failed = false;
-			load();
-		});
-		void tick().then(() => input?.focus());
+		failed = false;
+		load();
 	});
 
 	interface Hit {
@@ -110,18 +102,13 @@
 		return kept;
 	});
 
-	let groups = $derived.by(() => {
+	let groups = $derived.by<[string, Hit[]][]>(() => {
 		const bySection = new Map<string, Hit[]>();
 		for (const hit of hits) {
-			bySection.set(hit.entry.section, [...(bySection.get(hit.entry.section) ?? []), hit]);
+			const section = words.length === 0 ? 'Start here' : hit.entry.section;
+			bySection.set(section, [...(bySection.get(section) ?? []), hit]);
 		}
 		return [...bySection.entries()];
-	});
-
-	let flat = $derived(groups.flatMap(([, group]) => group));
-
-	$effect(() => {
-		if (active >= flat.length) active = Math.max(0, flat.length - 1);
 	});
 
 	function escape(word: string): string {
@@ -136,35 +123,6 @@
 			.filter(Boolean)
 			.map((part) => ({ text: part, match: words.includes(part.toLowerCase()) }));
 	}
-
-	function close() {
-		open = false;
-	}
-
-	function choose(hit: Hit | undefined) {
-		if (!hit) return;
-		close();
-		goto(`${base}${hit.entry.href}`);
-	}
-
-	function onkeydown(event: KeyboardEvent) {
-		if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-			event.preventDefault();
-			if (flat.length === 0) return;
-			const step = event.key === 'ArrowDown' ? 1 : -1;
-			active = (active + step + flat.length) % flat.length;
-			void tick().then(() =>
-				document.getElementById(`search-result-${active}`)?.scrollIntoView({ block: 'nearest' })
-			);
-		} else if (event.key === 'Enter') {
-			event.preventDefault();
-			choose(flat[active]);
-		} else if (event.key === 'Escape') {
-			event.preventDefault();
-			event.stopPropagation();
-			close();
-		}
-	}
 </script>
 
 {#snippet highlighted(text: string)}
@@ -174,82 +132,32 @@
 	{/each}
 {/snippet}
 
-{#if open}
-	<div class="fixed inset-0 z-50 bg-black/30" aria-hidden="true" onclick={close}></div>
-	<div
-		class="fixed top-4 left-1/2 z-50 w-[calc(100%-2rem)] max-w-xl -translate-x-1/2 overflow-hidden rounded-lg border border-base-200 bg-base-100 shadow-xl md:top-24"
-		role="dialog"
-		aria-modal="true"
-		aria-label="Search the docs"
-	>
-		<div class="flex items-center gap-2 border-b border-base-200 px-4">
-			<Icon icon={search} class="h-4 w-4 shrink-0 opacity-50" />
-			<input
-				bind:this={input}
-				bind:value={query}
-				{onkeydown}
-				oninput={() => (active = 0)}
-				type="text"
-				class="h-12 w-full bg-transparent text-sm outline-none"
-				placeholder="Search the docs…"
-				role="combobox"
-				aria-expanded="true"
-				aria-controls="search-results"
-				aria-activedescendant={flat.length > 0 ? `search-result-${active}` : undefined}
-				autocomplete="off"
-				spellcheck="false"
-			/>
-			{#if loading}
-				<span class="loading loading-xs loading-spinner text-primary"></span>
+{#snippet row(hit: Hit)}
+	<Icon icon={hit.entry.heading ? icons.hash : icons.fileText} class="h-4 w-4 shrink-0 self-start mt-0.5 opacity-70" />
+	<span class="min-w-0 flex-1">
+		<span class="block truncate">
+			{@render highlighted(hit.entry.page)}
+			{#if hit.entry.heading}
+				<span class="mr-1 text-base-content/50">›</span>{@render highlighted(hit.entry.heading)}
 			{/if}
-		</div>
-		<ul id="search-results" class="max-h-[min(28rem,70dvh)] overflow-y-auto p-1" role="listbox">
-			{#each groups as [section, group] (section)}
-				<li role="presentation" class="px-3 pt-2 pb-1 text-xs font-medium text-base-content/50">
-					{words.length === 0 ? 'Start here' : section}
-				</li>
-				{#each group as hit (hit.entry.href)}
-					{@const index = flat.indexOf(hit)}
-					<li role="presentation">
-						<a
-							id="search-result-{index}"
-							href="{base}{hit.entry.href}"
-							role="option"
-							aria-selected={index === active}
-							tabindex="-1"
-							class="flex items-start gap-2.5 rounded-md px-3 py-2 text-sm {index === active
-								? 'bg-base-200'
-								: ''}"
-							onmousemove={() => (active = index)}
-							onclick={close}
-						>
-							<Icon
-								icon={hit.entry.heading ? hash : fileText}
-								class="mt-0.5 h-4 w-4 shrink-0 opacity-70"
-							/>
-							<span class="min-w-0 flex-1">
-								<span class="block truncate">
-									{@render highlighted(hit.entry.page)}
-									{#if hit.entry.heading}
-										<span class="mr-1 text-base-content/50">›</span>{@render highlighted(
-											hit.entry.heading
-										)}
-									{/if}
-								</span>
-								{#if hit.snippet}
-									<span class="mt-0.5 line-clamp-2 text-xs leading-relaxed text-base-content/60">
-										{@render highlighted(hit.snippet)}
-									</span>
-								{/if}
-							</span>
-						</a>
-					</li>
-				{/each}
-			{:else}
-				<li class="px-3 py-6 text-center text-sm text-base-content/50">
-					{failed ? 'Search is unavailable right now' : loading ? 'Loading…' : 'Nothing found'}
-				</li>
-			{/each}
-		</ul>
-	</div>
-{/if}
+		</span>
+		{#if hit.snippet}
+			<span class="mt-0.5 line-clamp-2 text-xs leading-relaxed text-base-content/60">
+				{@render highlighted(hit.snippet)}
+			</span>
+		{/if}
+	</span>
+{/snippet}
+
+<SearchPalette
+	bind:open
+	bind:query
+	{groups}
+	{row}
+	{loading}
+	placeholder="Search the docs…"
+	empty={failed ? 'Search is unavailable right now' : undefined}
+	href={(hit) => `${base}${hit.entry.href}`}
+	key={(hit) => hit.entry.href}
+	onchoose={(hit) => goto(`${base}${hit.entry.href}`)}
+/>

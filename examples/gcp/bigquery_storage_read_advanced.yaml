@@ -20,7 +20,7 @@ flow:
     # `sample_percentage` returns roughly N% of rows for testing/analysis.
     - gcp_bigquery_storage_read:
         name: read_historical_snapshot
-        credentials_path: /etc/gcp/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/gcp.json"
         project_id: data-warehouse-project
         job_project_id: billing-project
         dataset_id: analytics

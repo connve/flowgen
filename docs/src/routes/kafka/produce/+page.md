@@ -7,7 +7,7 @@ Publishes the incoming event to a Kafka topic and emits the delivery result (top
 ```yaml
 - kafka_produce:
     name: publish_customer
-    credentials_path: /etc/kafka/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/kafka.json"
     brokers: "{{env.KAFKA_BROKERS}}"
     topic: customers
     message_key: "customer-{{event.data.name}}"
@@ -46,7 +46,7 @@ Format: [JSON](https://docs.rs/serde_json/latest/serde_json/enum.Value.html)
 ```yaml
 - kafka_produce:
     name: publish_customer
-    credentials_path: /etc/kafka/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/kafka.json"
     topic: customers
     create_or_update: true
 ```
@@ -58,7 +58,7 @@ Incoming events do not always carry an `id` (e.g. NATS messages without a `Nats-
 ```yaml
 - kafka_produce:
     name: publish_orders
-    credentials_path: /etc/kafka/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/kafka.json"
     topic: orders
     message_key: "{{event.id}}"
 ```

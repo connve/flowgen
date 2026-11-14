@@ -32,7 +32,7 @@ flow:
 
     - nats_jetstream_publish:
         name: publish_to_queue
-        credentials_path: /etc/nats/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/nats.json"
         url: "{{env.NATS_URL}}"
         subject: rows.received
         stream:

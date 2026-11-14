@@ -63,7 +63,7 @@ flow:
     - salesforce_bulkapi_query_job:
         name: query_account
         operation: create
-        credentials_path: /etc/sfdc/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
         query_operation: query
         query:
           resource: salesforce/query_account.soql
@@ -104,7 +104,7 @@ flow:
 
     - salesforce_pubsubapi_subscribe:
         name: listen_job_events
-        credentials_path: /etc/sfdc/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
         topic:
           name: /event/BulkApi2JobEvent
           durable_consumer_options:
@@ -130,7 +130,7 @@ flow:
     - salesforce_bulkapi_query_job:
         name: get_job_info
         operation: get
-        credentials_path: /etc/sfdc/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
         job_id: "{{event.data.id}}"
 
     - script:
@@ -153,14 +153,14 @@ flow:
     - salesforce_bulkapi_query_job:
         name: get_job_results
         operation: get_results
-        credentials_path: /etc/sfdc/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
         job_id: "{{event.meta.job_id}}"
         batch_size: 10000
         has_header: true
 
     - nats_jetstream_publish:
         name: publish_to_nats
-        credentials_path: /etc/nats/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/nats.json"
         url: "{{env.NATS_URL}}"
         subject: salesforce_bulkapi.query_jobs.{{event.meta.object_name}}
         ack_timeout: 120s
@@ -194,7 +194,7 @@ flow:
 
     - nats_jetstream_subscribe:
         name: start_subscription
-        credentials_path: /etc/nats/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/nats.json"
         url: "{{env.NATS_URL}}"
         subject: salesforce_bulkapi.query_jobs.account
         stream:
@@ -219,7 +219,7 @@ flow:
     - object_store:
         name: write_to_object_store
         operation: write
-        credentials_path: /etc/gcp/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/gcp.json"
         path: "{{env.GCS_BUCKET_PATH}}/salesforce/account"
         hive_partition_options:
           enabled: true
@@ -229,7 +229,7 @@ flow:
 
     - gcp_bigquery_storage_write:
         name: write_to_data_warehouse
-        credentials_path: /etc/gcp/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/gcp.json"
         project_id: "{{env.GCP_PROJECT_ID}}"
         dataset_id: salesforce
         table_id: account
@@ -271,8 +271,8 @@ Both patterns can coexist — use CDC for real-time sync and Bulk API for period
 
 | File | Purpose | Contents |
 |---|---|---|
-| `/etc/sfdc/credentials.json` | Salesforce Pub/Sub + Bulk API | `client_id`, `client_secret`, `username`, `password`, `login_url` |
-| `/etc/nats/credentials.json` | NATS JetStream | `url`, `nkey_seed` or `credentials_path` |
-| `/etc/gcp/credentials.json` | GCS + BigQuery | GCP service account JSON key |
+| `{{env.FLOWGEN_CREDENTIALS}}/salesforce.json` | Salesforce Pub/Sub + Bulk API | `client_id`, `client_secret`, `username`, `password`, `login_url` |
+| `{{env.FLOWGEN_CREDENTIALS}}/nats.json` | NATS JetStream | `url`, `nkey_seed` or `credentials_path` |
+| `{{env.FLOWGEN_CREDENTIALS}}/gcp.json` | GCS + BigQuery | GCP service account JSON key |
 
 See [Credentials](/docs/flowgen/concepts/credentials) for format details.

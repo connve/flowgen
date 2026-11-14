@@ -25,7 +25,7 @@ propose ──► validate + diff ──► approve (signed-in user) ──► p
 }
 ```
 
-Paths start at the workspace root and must be under `flows/` or `resources/`, all within one [target](#targets). Each file is recorded with the version it is based on: the deployed content — for a flow, the source synced to the flows cache, so a flow that failed to start can be fixed too — with every published change that is not deployed yet applied on top, so editing a file right after an approval builds on that commit. `GET {path}/api/workspace/file?path=` returns that version. The change carries a unified diff per file plus every validation issue. A change with issues can be reviewed but not approved.
+Paths start at the workspace root and must be under `flows/`, `resources/` or `credentials/`, all within one [target](#targets). Credentials must be [encrypted](/docs/flowgen/concepts/credentials#encrypted-credentials-in-the-workspace); a change with a credentials file that is not is refused. Each file is recorded with the version it is based on: the deployed content — for a flow, the source synced to the flows cache, so a flow that failed to start can be fixed too — with every published change that is not deployed yet applied on top, so editing a file right after an approval builds on that commit. `GET {path}/api/workspace/file?path=` returns that version. The change carries a unified diff per file plus every validation issue. A change with issues can be reviewed but not approved.
 
 While a change is pending, its proposer can extend it: `POST {path}/api/changes/{id}/files` adds files or replaces ones it has, with the same body as `files` above, and `PATCH {path}/api/changes/{id}` sets its `title` and `description`. A replaced file keeps the version recorded when it was first added. Saving in the web UI editor adds the file to the user's most recently edited pending change in the same target, or proposes a new one.
 
@@ -60,7 +60,7 @@ web:
         approver_groups: ["business-leads"]
 ```
 
-Without `targets`, one `workspace` target covers `flows/` and `resources/` and anyone signed in may approve. The web UI offers **Edit** only on files inside a target and shows the target of each change.
+Without `targets`, one `workspace` target covers `flows/`, `resources/` and `credentials/` and anyone signed in may approve. The web UI offers **Edit** only on files inside a target and shows the target of each change.
 
 Flows in different folders are kept apart at runtime too: an [`inproc_endpoint`](/docs/flowgen/core/inproc) accepts calls from its own top-level folder by default, so `user/` flows cannot call `system/commit_workspace`.
 
@@ -83,7 +83,7 @@ The approving user's identity is in `event.meta.auth`. [`config/commit_workspace
 
 ## Lifecycle flows
 
-The commit flow, with the release and deploy flows below, is in [`config/`](https://github.com/connve/flowgen/tree/main/config). The same three flows run on one machine and in a cluster; they read where to commit, release and deploy from environment variables. A workspace started by `flowgen` without `--config` holds them in `flows/system/` and sets the variables itself. In a cluster, `flows.system: true` runs them from flowgen itself, matching its version, and the deployment sets the variables, with the credentials files mounted; the chart's `lifecycle` values do both.
+The commit flow, with the release and deploy flows below, is in [`config/`](https://github.com/connve/flowgen/tree/main/config). The same three flows run on one machine and in a cluster; they read where to commit, release and deploy from environment variables. A workspace started by `flowgen` without `--config` holds them in `flows/system/` and sets the variables itself. In a cluster, `flows.system: true` runs them from flowgen itself, matching its version, and the deployment sets the variables, with the credentials files mounted; the chart's `flowgen.systemFlows` values do both.
 
 | Variable | Set by flowgen to | In a cluster |
 |---|---|---|
@@ -97,6 +97,8 @@ The commit flow, with the release and deploy flows below, is in [`config/`](http
 | `FLOWGEN_SYSTEM_BUCKET` | The system bucket. | |
 
 flowgen sets a variable only when the environment does not. An empty credentials variable means none. Without sign-in, the commit is by the git user of the machine; a commit to a URL needs the approving user, so a cluster needs `web.auth`. The release and deploy flows have `require_leader_election`, so one pod runs each.
+
+Once a change is committed, flowgen puts its commit at `commits.latest` in the system bucket. The release flow watches that key with [`kv_watch`](/docs/flowgen/kv-store/kv-watch) and records each release under `releases.latest` as well as `releases.<commit>`, which the deploy flow watches, so an approved change is released and deployed as soon as it is committed. Both flows also look every minute for commits and releases made outside flowgen.
 
 ## Releasing
 

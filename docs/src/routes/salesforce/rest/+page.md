@@ -30,7 +30,7 @@ Single-record operations: create, get, get_by_external_id, update, upsert, delet
 - salesforce_restapi_sobject:
     name: create_account
     operation: create
-    credentials_path: /etc/salesforce/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
     sobject_type: Account
     payload:
       Name: "{{event.data.company_name}}"
@@ -64,7 +64,7 @@ Single-record operations: create, get, get_by_external_id, update, upsert, delet
 - salesforce_restapi_sobject:
     name: upsert_contact
     operation: upsert
-    credentials_path: /etc/salesforce/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
     sobject_type: Contact
     external_id_field: External_Id__c
     external_id_value: "{{event.data.external_id}}"
@@ -79,7 +79,7 @@ Single-record operations: create, get, get_by_external_id, update, upsert, delet
 - salesforce_restapi_sobject:
     name: get_account
     operation: get
-    credentials_path: /etc/salesforce/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
     sobject_type: Account
     record_id: "{{event.data.account_id}}"
     fields: "Id,Name,Industry"
@@ -91,7 +91,7 @@ Single-record operations: create, get, get_by_external_id, update, upsert, delet
 - salesforce_restapi_sobject:
     name: get_deleted_accounts
     operation: get_deleted
-    credentials_path: /etc/salesforce/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
     sobject_type: Account
     start: "{{event.data.start_iso}}"
     end: "{{event.data.end_iso}}"
@@ -111,7 +111,7 @@ Batch operations on multiple records: create, get, update, upsert, delete, tree.
 - salesforce_restapi_composite:
     name: bulk_create
     operation: create
-    credentials_path: /etc/salesforce/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
     sobject_type: Account
     payload:
       from_event: true
@@ -142,7 +142,7 @@ The Salesforce Composite API requires every record to include an `attributes: { 
 - salesforce_restapi_composite:
     name: bulk_create
     operation: create
-    credentials_path: /etc/salesforce/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
     sobject_type: Account
     payload:
       from_event: true
@@ -162,7 +162,7 @@ Set `allow_duplicate_save: true` on the task to attach the [`Sforce-Duplicate-Ru
 - salesforce_restapi_composite:
     name: upsert_contacts
     operation: upsert
-    credentials_path: /etc/salesforce/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
     sobject_type: Contact
     external_id_field: ExternalId__c
     all_or_none: true
@@ -185,7 +185,7 @@ Execute [SOSL](https://developer.salesforce.com/docs/atlas.en-us.soql_sosl.meta/
 ```yaml
 - salesforce_restapi_search:
     name: find_accounts
-    credentials_path: /etc/salesforce/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
     query: "FIND {Acme} IN ALL FIELDS RETURNING Account(Id, Name, Industry)"
 ```
 
@@ -206,7 +206,7 @@ SOSL wraps the search term in curly braces (`FIND {term} ...`). Since Handlebars
 ```yaml
 - salesforce_restapi_search:
     name: dynamic_search
-    credentials_path: /etc/salesforce/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
     query: 'FIND {"{{event.data.search_term}}"} IN ALL FIELDS RETURNING Account(Id, Name), Contact(Id, FirstName, LastName, Email)'
 ```
 
@@ -227,7 +227,7 @@ query: 'FIND {"{{event.data.search_term}}*"} IN ALL FIELDS RETURNING Account(Id,
 ```yaml
 - salesforce_restapi_search:
     name: search_name_fields
-    credentials_path: /etc/salesforce/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
     query: "FIND {Acme} IN NAME FIELDS RETURNING Account(Id, Name, Industry LIMIT 10), Contact(Id, FirstName, LastName LIMIT 5)"
 ```
 
@@ -243,7 +243,7 @@ flow:
 
     - salesforce_restapi_search:
         name: sosl_search
-        credentials_path: $SALESFORCE_CREDENTIALS_PATH
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
         query: 'FIND {"{{event.data.term}}"} IN ALL FIELDS RETURNING Account(Id, Name), Contact(Id, Email)'
 
     - log:
@@ -258,7 +258,7 @@ Execute a [SOQL](https://developer.salesforce.com/docs/atlas.en-us.soql_sosl.met
 ```yaml
 - salesforce_restapi_query:
     name: recent_accounts
-    credentials_path: /etc/salesforce/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
     query: "SELECT Id, Name FROM Account WHERE LastModifiedDate = TODAY"
 ```
 
@@ -287,7 +287,7 @@ Put values from events into a query with `parameters`, not by templating them in
 ```yaml
 - salesforce_restapi_query:
     name: contact_by_email
-    credentials_path: /etc/salesforce/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
     query: "SELECT Id, Name FROM Contact WHERE Email = :email AND LastModifiedDate > :since AND AccountId IN :accounts"
     parameters:
       email: "{{event.data.email}}"

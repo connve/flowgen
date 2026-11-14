@@ -206,11 +206,10 @@ pub enum Error {
     Config(#[from] ConfigError),
     #[error(transparent)]
     Credentials(#[from] flowgen_core::credentials::Error),
-    #[error("Failed to read the signing key {path}: {source}")]
+    #[error("Failed to read the signing key: {source}")]
     ReadSigningKey {
-        path: PathBuf,
         #[source]
-        source: std::io::Error,
+        source: flowgen_core::credentials::Error,
     },
     #[error("The signing key {path} is not an OpenSSH Ed25519 private key: {source}")]
     InvalidSigningKey {
@@ -308,12 +307,9 @@ impl Error {
 
 /// Reads an unencrypted OpenSSH Ed25519 private key.
 async fn load_signing_key(path: &Path) -> Result<ssh_key::PrivateKey, Error> {
-    let pem = tokio::fs::read_to_string(path)
+    let pem = flowgen_core::credentials::read_async(path)
         .await
-        .map_err(|source| Error::ReadSigningKey {
-            path: path.to_path_buf(),
-            source,
-        })?;
+        .map_err(|source| Error::ReadSigningKey { source })?;
     let pem = SecretString::from(pem);
     let key = ssh_key::PrivateKey::from_openssh(pem.expose_secret()).map_err(|source| {
         Error::InvalidSigningKey {

@@ -1,7 +1,6 @@
 use mongodb::{options::ClientOptions, Client};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Default MongoDB host.
@@ -15,7 +14,7 @@ pub enum Error {
     #[error("Reading credentials from file failed with error: {source}")]
     CredentialsFileRead {
         #[source]
-        source: std::io::Error,
+        source: flowgen_core::credentials::Error,
     },
     #[error("Parsing credentials from file failed with error: {source}")]
     CredentialsFileParse {
@@ -136,8 +135,8 @@ pub struct MongoCredentials {
 
 impl MongoCredentials {
     pub fn from_file(path: &Path) -> Result<Self, Error> {
-        let content =
-            fs::read_to_string(path).map_err(|source| Error::CredentialsFileRead { source })?;
+        let content = flowgen_core::credentials::read(path)
+            .map_err(|source| Error::CredentialsFileRead { source })?;
 
         serde_json::from_str(&content).map_err(|source| Error::CredentialsFileParse { source })
     }

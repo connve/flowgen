@@ -35,6 +35,6 @@ flow:
     - klaviyo_profiles:
         name: save_profile
         operation: upsert
-        credentials_path: /etc/klaviyo/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/klaviyo.json"
         payload:
           from_event: true

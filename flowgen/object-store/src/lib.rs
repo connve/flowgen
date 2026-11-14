@@ -1,5 +1,7 @@
 use flowgen_core::task::context::TaskContext;
-use flowgen_core::task::meta::{is_per_event, Connection, Connector, Icon};
+use flowgen_core::task::meta::{
+    is_per_event, Connection, Connector, CredentialsField, CredentialsForm, Icon,
+};
 use flowgen_core::task::runner::Runner;
 use flowgen_core::task::{Task, TaskError, TaskIo, TaskMeta};
 use std::collections::BTreeSet;
@@ -19,6 +21,21 @@ pub const CONNECTOR: Connector = Connector {
     label: "Object Store",
     icon: Icon::Svg(include_str!("../icons/object-store.svg")),
     describe_credentials: None,
+    credentials: &[
+        CredentialsForm {
+            label: "Amazon S3 access key",
+            fields: &[
+                CredentialsField::text("aws_access_key_id", "Access key ID"),
+                CredentialsField::secret("aws_secret_access_key", "Secret access key"),
+                CredentialsField::secret("aws_session_token", "Session token").optional(),
+                CredentialsField::text("aws_region", "Region").optional(),
+            ],
+        },
+        CredentialsForm {
+            label: "Google Cloud service account file",
+            fields: &[],
+        },
+    ],
 };
 
 /// The bucket a path is in, such as `s3://data`; `None` for a local path.

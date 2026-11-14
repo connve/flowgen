@@ -657,6 +657,36 @@ paths:
         "503":
           description: The session store is unavailable.
 
+  /api/credentials/encrypt:
+    post:
+      operationId: encryptCredential
+      summary: Encrypt a credential as a workspace file, ready to propose.
+      description: |
+        Encrypts `content` with SOPS for the configured age recipients into
+        `credentials/<name>.yaml`, a Kubernetes Secret holding the file
+        `<name>.json`. Nothing is stored; propose the returned file as a
+        change. The plaintext is not logged.
+      tags: [workspace]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CredentialInput"
+      responses:
+        "200":
+          description: The encrypted file.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkspaceFile"
+        "400":
+          description: The name is not a valid file name.
+        "404":
+          description: "`credentials` is not configured."
+        "500":
+          description: Encrypting failed.
+
   /api/workspace/validate:
     post:
       operationId: validateWorkspaceFiles
@@ -1207,20 +1237,30 @@ components:
   schemas:
     Connection:
       type: object
-      required: [id, connector, targets, perEvent, onBehalfOfUser, flows, status]
+      required: [id, connector, targets, perEvent, onBehalfOfUser, flows, status, credentialsFound]
       properties:
         id:
           type: string
-          description: Stable id derived from the connector and credentials file.
+          description: Stable id derived from the connector and credentials file, or the target without one.
+        credentialsName:
+          type: string
+          description: |
+            The credentials it reads, by the file name of its credentials
+            path: `orders-api` for any `…/orders-api.json`. They can be added
+            or replaced in the web UI as `credentials/<name>.yaml`; absent for
+            a path set per event.
+        credentialsFound:
+          type: boolean
+          description: Whether its credentials file, or the encrypted Secret holding it, is there; true without a credentials file.
         connector:
           type: string
-          description: The connector of the task types using it, such as `salesforce`, or `mcp` for an `ai_completion` MCP server.
+          description: The connector of the task types using it, such as `http`, or `mcp` for an `ai_completion` MCP server.
         credentialsPath:
           type: string
           description: The credentials file; absent when the config sets none.
         account:
           type: string
-          description: The account or instance the credentials file points to, such as a Salesforce org host or a service account email.
+          description: The account or instance the credentials file points to, such as an instance host or a service account email.
         targets:
           type: array
           description: Where its tasks connect, from their configs, such as hosts or an AI provider and model.
@@ -1242,19 +1282,62 @@ components:
 
     Connector:
       type: object
-      required: [name, label, taskTypes]
+      required: [name, label, taskTypes, credentials]
       properties:
         name:
           type: string
-          description: Such as `salesforce`.
+          description: Such as `http`.
         label:
           type: string
-          description: Display name, such as `Salesforce`.
+          description: Display name, such as `HTTP`.
         taskTypes:
           type: array
-          description: YAML tags of its task types, such as `salesforce_restapi_search`.
+          description: YAML tags of its task types, such as `http_request`.
           items:
             type: string
+        credentials:
+          type: array
+          description: The ways to fill its credentials file; empty without one.
+          items:
+            $ref: "#/components/schemas/CredentialsForm"
+
+    CredentialsForm:
+      type: object
+      required: [label, fields]
+      properties:
+        label:
+          type: string
+          description: Such as `API key` or `Service account file`.
+        fields:
+          type: array
+          description: The values making up the file; empty when the whole file is uploaded.
+          items:
+            $ref: "#/components/schemas/CredentialsField"
+
+    CredentialsField:
+      type: object
+      required: [key, label, kind, required]
+      properties:
+        key:
+          type: string
+          description: Where it goes in the file, with `.` between nested keys.
+        label:
+          type: string
+        kind:
+          type: string
+          enum: [text, secret, number, boolean, choice, list]
+          description: "`secret` is masked; `list` takes one value per line."
+        choices:
+          type: array
+          description: The values a `choice` takes.
+          items:
+            type: string
+        checked:
+          type: boolean
+          default: false
+          description: Whether a `boolean` starts checked.
+        required:
+          type: boolean
 
     FlowSummary:
       type: object
@@ -1484,8 +1567,11 @@ components:
 
     ConfigInfo:
       type: object
-      required: [yaml, agents, authoring, authoringTargets]
+      required: [yaml, agents, authoring, authoringTargets, credentials]
       properties:
+        credentials:
+          type: boolean
+          description: Whether `credentials` is set, so credentials can be added.
         yaml:
           type: string
           description: |
@@ -1605,6 +1691,17 @@ components:
         content:
           type: string
           nullable: true
+
+    CredentialInput:
+      type: object
+      required: [name, content]
+      properties:
+        name:
+          type: string
+          description: Letters, digits, `.`, `_` and `-`; flows read the file as `<name>.json`.
+        content:
+          type: string
+          description: The credentials file, usually JSON.
 
     WorkspaceFiles:
       type: object

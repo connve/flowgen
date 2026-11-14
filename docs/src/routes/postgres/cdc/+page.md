@@ -7,7 +7,7 @@ Emits each row change of the tables in a publication, read through logical repli
 ```yaml
 - postgres_cdc:
     name: watch_orders
-    credentials_path: /etc/postgres/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/postgres.json"
     publication: orders_pub
     slot: flowgen_orders
 ```

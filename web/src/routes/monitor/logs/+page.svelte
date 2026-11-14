@@ -15,9 +15,14 @@
 	import { formatRelative } from '$lib/time';
 	import { formatDuration } from '$lib/toolRuns.svelte';
 	import { rafBatch } from '$lib/rafBatch';
+	import { LOG_LINE, LOG_MESSAGE, quietLine, withCause } from '$lib/logLine';
+	import { VirtualRows } from '$lib/virtualRows.svelte';
 	import {
+		clickedLevels,
 		extractFieldSummary,
 		extractSpanSummary,
+		hasPickedLevels,
+		levelChip,
 		levelChipClass,
 		levelLabel,
 		levelVariant,
@@ -80,17 +85,6 @@
 	// `logsPageState` (module-level), not local `$state`, so it survives
 	// switching to another tab and back — only a full reload resets it.
 
-	// Virtualized list: render only the rows in view plus a small overscan
-	// buffer, with top/bottom spacers standing in for the rest. Without this,
-	// live streaming re-renders all 1000 rows on every append and locks up.
-	const ROW_HEIGHT = 28;
-	/** Timestamp and target fold away when the list is narrow, e.g. beside the inspector. */
-	const COLUMNS =
-		'grid-cols-[5rem_5rem_minmax(0,1fr)] @3xl:grid-cols-[5rem_5rem_7rem_18rem_minmax(0,1fr)]';
-	const OVERSCAN = 8;
-	let scrollTop = $state(0);
-	let viewportHeight = $state(600);
-
 	let levelCounts = $derived.by(() => {
 		const c: Record<Level, number> = { info: 0, warn: 0, error: 0, debug: 0, trace: 0 };
 		for (const row of rows) c[row.record.level] += 1;
@@ -125,25 +119,15 @@
 	let filtering = $derived(search.trim().length > 0);
 	let loadError = $state<string | null>(null);
 
-	let startIdx = $derived(Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN));
-	let endIdx = $derived(
-		Math.min(filtered.length, Math.ceil((scrollTop + viewportHeight) / ROW_HEIGHT) + OVERSCAN),
-	);
-	let visible = $derived(filtered.slice(startIdx, endIdx));
-	let topPad = $derived(startIdx * ROW_HEIGHT);
-	let bottomPad = $derived(Math.max(0, (filtered.length - endIdx) * ROW_HEIGHT));
+	// Virtualized: live streaming would otherwise re-render every row on each append.
+	const list = new VirtualRows(() => filtered, 28, 8);
 
-	// Like a Grafana legend: a click shows only that level, a click on the
-	// only level shown restores the defaults, and ⌘/Ctrl/Shift-click adds or
-	// removes one level.
-	function clickLevel(level: Level, event: MouseEvent) {
-		const toggle = event.metaKey || event.ctrlKey || event.shiftKey;
-		const solo = selectedLevels().length === 1 && levelFilter[level];
-		const next: Record<Level, boolean> = toggle
-			? { ...levelFilter, [level]: !levelFilter[level] }
-			: solo
-				? { ...LOGS_LEVELS_DEFAULT }
-				: { info: false, warn: false, error: false, debug: false, trace: false, [level]: true };
+	// A click picks a level or drops it again; with none picked the defaults show.
+	function clickLevel(level: Level) {
+		showLevels(clickedLevels(levelFilter, LOGS_LEVELS_DEFAULT, level));
+	}
+
+	function showLevels(next: Record<Level, boolean>) {
 		const added = LEVELS.filter((key) => next[key] && !levelFilter[key]);
 		const removed = LEVELS.filter((key) => !next[key] && levelFilter[key]);
 		for (const key of LEVELS) levelFilter[key] = next[key];
@@ -234,12 +218,12 @@
 	function scrollToTop() {
 		if (!scrollPane) return;
 		scrollPane.scrollTop = 0;
-		scrollTop = 0;
+		list.scrollTop = 0;
 	}
 
 	function onScroll() {
 		if (!scrollPane) return;
-		scrollTop = scrollPane.scrollTop;
+		list.scrollTop = scrollPane.scrollTop;
 		atTop = scrollPane.scrollTop < 40;
 	}
 
@@ -252,16 +236,6 @@
 	function clearView() {
 		rows = [];
 		selected = null;
-	}
-
-	function formatTs(ts: string | null | undefined): string {
-		if (!ts) return '';
-		try {
-			const d = new Date(ts);
-			return d.toISOString().split('T')[1].slice(0, 12);
-		} catch {
-			return ts;
-		}
 	}
 
 	function formatAbsolute(ts: string | null | undefined): string {
@@ -315,7 +289,7 @@
 
 <div class="flex min-h-0 min-w-0 flex-1">
 <section class="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-	<div class="shrink-0 space-y-3 bg-base-100 px-6 pb-4 pt-6">
+	<div class="shrink-0 space-y-3 bg-base-100 px-4 pb-4 pt-6 md:px-6">
 		<div class="flex min-h-8 items-center justify-between gap-3">
 			<div class="flex items-baseline gap-1.5 text-[0.9375rem] font-semibold">
 				<span>{m.logs_all()}</span>
@@ -415,13 +389,14 @@
 			</div>
 		</div>
 		<div class="flex flex-wrap items-center gap-2">
-			<div class="flex items-center gap-1">
+			<div class="flex flex-wrap items-center gap-1">
 				{#each LEVELS as key (key)}
+					{@const chip = levelChip(levelFilter, LOGS_LEVELS_DEFAULT, key)}
 					<button
 						type="button"
-						class="chip {levelChipClass(key, levelFilter[key])}"
-						aria-pressed={levelFilter[key]}
-						onclick={(event) => clickLevel(key, event)}
+						class="chip {levelChipClass(key, chip)}"
+						aria-pressed={chip === 'picked'}
+						onclick={() => clickLevel(key)}
 					>
 						<span>{levelLabel(key)}</span>
 						{#if levelFilter[key]}
@@ -432,12 +407,20 @@
 						{/if}
 					</button>
 				{/each}
+				{#if hasPickedLevels(levelFilter, LOGS_LEVELS_DEFAULT)}
+					<button
+						type="button"
+						class="btn btn-ghost btn-xs font-normal text-base-content/60"
+						onclick={() => showLevels({ ...LOGS_LEVELS_DEFAULT })}
+					>
+						{m.flows_tag_filters_clear()}
+					</button>
+				{/if}
 			</div>
-
 		</div>
 	</div>
 
-	<div class="flex min-h-0 flex-1 flex-col px-6 pb-6">
+	<div class="flex min-h-0 flex-1 flex-col px-4 pb-6 md:px-6">
 		{#if filtered.length === 0 && loadError}
 			<StateMessage tone="oops" title={m.logs_load_failed_title()} message={loadError} />
 		{:else if filtered.length === 0 && filtering}
@@ -448,50 +431,48 @@
 			<div
 				class="@container flex min-h-0 flex-1 flex-col overflow-hidden bg-base-100"
 			>
-				<!-- Column headers rendered outside the virtualized scroll area so they
-				     stay visible without a sticky header fighting the spacer math. -->
-				<div
-					class="grid shrink-0 items-center gap-3 border-b border-base-200 px-3 py-2 text-xs font-medium text-base-content/50 {COLUMNS}"
-				>
-					<span>{m.logs_column_level()}</span>
-					<span>{m.logs_column_when()}</span>
-					<span class="@max-3xl:hidden">{m.logs_column_timestamp()}</span>
-					<span class="@max-3xl:hidden">{m.logs_column_target()}</span>
-					<span>{m.logs_column_message()}</span>
-				</div>
 				<div
 					bind:this={scrollPane}
-					bind:clientHeight={viewportHeight}
+					bind:clientHeight={list.viewportHeight}
 					onscroll={onScroll}
-					class="min-h-0 flex-1 overflow-y-auto overflow-x-hidden text-xs"
+					class="min-h-0 flex-1 overflow-y-auto overflow-x-hidden"
 				>
-					<div style="height: {topPad}px"></div>
-					{#each visible as row (row.id)}
+					<div style:height="{list.topPad}px"></div>
+					{#each list.visible as row (row.id)}
 						{@const record = row.record}
-						{@const isSelected = selected === record}
 						{@const tsMs = timestampMs(record)}
+						{@const summary = extractSpanSummary(record)}
 						<button
 							type="button"
-							class="grid w-full items-center gap-3 border-b border-base-200 px-3 text-left transition-colors hover:bg-base-200 focus:outline-none focus-visible:bg-base-200 {COLUMNS} {isSelected
+							{@attach list.measure(row)}
+							class="{LOG_LINE} w-full px-3 text-left focus:outline-none focus-visible:bg-base-200 {selected ===
+							record
 								? 'bg-base-200'
-								: ''}"
-							style:height="{ROW_HEIGHT}px"
+								: 'hover:bg-base-200/60'}"
 							onclick={() => (selected = record)}
 						>
-							<span><StatusDot variant={levelVariant(record.level)} label={levelLabel(record.level)} /></span>
-							<span class="whitespace-nowrap opacity-70">
+							<span class="flex h-4 items-center">
+								<StatusDot variant={levelVariant(record.level)} label="" />
+								<span class="sr-only">{levelLabel(record.level)}</span>
+							</span>
+							<span class="whitespace-nowrap text-base-content/50">
 								{tsMs !== null ? formatRelative(tsMs) : '—'}
 							</span>
-							<span class="whitespace-nowrap font-mono opacity-70 @max-3xl:hidden">
-								{formatTs(record.timestamp) || '—'}
+							<span class="truncate font-mono text-base-content/70">
+								{summary.task ?? record.target}
 							</span>
-							<span class="truncate font-mono opacity-70 @max-3xl:hidden">
-								{record.target}
-							</span>
-							<span class="truncate font-mono">{record.body}</span>
+							{#if record.body}
+								<span class={LOG_MESSAGE}>
+									{withCause(record.body, extractFieldSummary(record).extra)}
+								</span>
+							{:else}
+								<span class="{LOG_MESSAGE} text-base-content/50">
+									{quietLine(summary.task_type, summary.duration_ms)}
+								</span>
+							{/if}
 						</button>
 					{/each}
-					<div style="height: {bottomPad}px"></div>
+					<div style:height="{list.bottomPad}px"></div>
 				</div>
 			</div>
 		{/if}
@@ -510,12 +491,6 @@
 		{/snippet}
 		{#snippet subtitle()}
 			<StatusDot variant={levelVariant(record.level)} label={levelLabel(record.level)} />
-			{#if selectedSummary?.task_type}
-				<span class="truncate">· {selectedSummary.task_type}</span>
-			{/if}
-			{#if selectedDurationMs !== null}
-				<span class="tabular-nums">· {formatDuration(selectedDurationMs)}</span>
-			{/if}
 		{/snippet}
 		<div class="space-y-3">
 			<dl class="grid grid-cols-[max-content_minmax(0,1fr)] gap-x-4 gap-y-1">
@@ -524,6 +499,14 @@
 				{#if selectedTsMs !== null}
 					<dt class="text-base-content/50">{m.logs_column_when()}</dt>
 					<dd>{formatRelative(selectedTsMs)}</dd>
+				{/if}
+				{#if selectedSummary?.task_type}
+					<dt class="text-base-content/50">{m.activity_field_processor()}</dt>
+					<dd class="[overflow-wrap:anywhere]">{selectedSummary.task_type}</dd>
+				{/if}
+				{#if selectedDurationMs !== null}
+					<dt class="text-base-content/50">{m.activity_field_duration()}</dt>
+					<dd class="tabular-nums">{formatDuration(selectedDurationMs)}</dd>
 				{/if}
 				{#if selectedEventId}
 					<dt class="text-base-content/50">{m.logs_detail_event()}</dt>

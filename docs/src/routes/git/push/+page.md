@@ -16,7 +16,7 @@ The output lists the text files under `path`; files that are not UTF-8 are left 
     repository: "{{env.GIT_REPOSITORY_URL}}"
     branch: main
     path: "configs/"
-    credentials_path: /etc/git/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/git.json"
     author:
       name: "{{event.data.author.name}}"
       email: "{{event.data.author.email}}"
@@ -62,7 +62,7 @@ With `signing_key_path`, each commit is signed the way `git commit -S` signs wit
 - git_push:
     name: commit
     repository: "{{env.GIT_REPOSITORY_URL}}"
-    credentials_path: /etc/git/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/git.json"
     signing_key_path: /etc/git/signing_key
     committer:
       name: "flowgen"

@@ -171,24 +171,24 @@
 	}
 	:global(.resource-link:hover) {
 		text-decoration-style: solid;
-		color: #007cf3;
+		color: var(--color-info);
 	}
 	/* Persistent, visible scrollbars so users notice horizontal overflow —
 	   YAML with long templates like `{{event.data.customer.email}}` is common. */
 	pre {
 		scrollbar-width: thin;
-		scrollbar-color: rgba(100, 116, 130, 0.4) transparent;
+		scrollbar-color: color-mix(in oklab, var(--color-base-content) 30%, transparent) transparent;
 	}
 	pre::-webkit-scrollbar {
 		height: 10px;
 		width: 10px;
 	}
 	pre::-webkit-scrollbar-thumb {
-		background: rgba(100, 116, 130, 0.4);
+		background: color-mix(in oklab, var(--color-base-content) 30%, transparent);
 		border-radius: 6px;
 	}
 	pre::-webkit-scrollbar-thumb:hover {
-		background: rgba(100, 116, 130, 0.65);
+		background: color-mix(in oklab, var(--color-base-content) 50%, transparent);
 	}
 	pre::-webkit-scrollbar-track {
 		background: transparent;

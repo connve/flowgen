@@ -11,11 +11,10 @@ use std::path::{Path, PathBuf};
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Failed to read credentials file '{path:?}': {source}")]
+    #[error("Failed to read credentials: {source}")]
     ReadCredentials {
-        path: PathBuf,
         #[source]
-        source: std::io::Error,
+        source: flowgen_core::credentials::Error,
     },
     #[error("Failed to parse credentials file '{path:?}': {source}")]
     ParseCredentials {
@@ -56,13 +55,9 @@ pub async fn load_auth(
         None => return Ok(RegistryAuth::Anonymous),
     };
 
-    let content =
-        tokio::fs::read_to_string(path)
-            .await
-            .map_err(|source| Error::ReadCredentials {
-                path: path.to_path_buf(),
-                source,
-            })?;
+    let content = flowgen_core::credentials::read_async(path)
+        .await
+        .map_err(|source| Error::ReadCredentials { source })?;
 
     if let Ok(cfg) = serde_json::from_str::<DockerConfig>(&content) {
         if !cfg.auths.is_empty() {
@@ -180,8 +175,10 @@ mod tests {
     #[test]
     fn error_display_read_credentials() {
         let err = Error::ReadCredentials {
-            path: PathBuf::from("/etc/missing.json"),
-            source: std::io::Error::new(std::io::ErrorKind::NotFound, "not found"),
+            source: flowgen_core::credentials::Error::ReadFile {
+                path: "/etc/missing.json".to_string(),
+                source: std::io::Error::new(std::io::ErrorKind::NotFound, "not found"),
+            },
         };
         assert!(err.to_string().contains("/etc/missing.json"));
         assert!(err.to_string().contains("Failed to read credentials"));

@@ -3,7 +3,17 @@
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
 	import { env } from '$env/dynamic/public';
-	import { AppShell, Badge, Loading, Logo, ThemeToggle, theme, type NavItem } from '@connve/ui';
+	import {
+		AppShell,
+		Badge,
+		Loading,
+		Logo,
+		SearchTrigger,
+		ThemeToggle,
+		isSearchShortcut,
+		theme,
+		type NavItem
+	} from '@connve/ui';
 	import { getVersion, type UserContext } from '$lib/api';
 	import { logoutUrl } from '$lib/urls';
 	import { allMetrics } from '$lib/activityStore.svelte';
@@ -49,11 +59,9 @@
 	const chromeless = env.PUBLIC_FLOWGEN_CHROME === 'embedded';
 
 	let searching = $state(false);
-	const shortcut =
-		typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘K' : 'Ctrl K';
 
 	function onWindowKeydown(event: KeyboardEvent) {
-		if (data.login || event.key.toLowerCase() !== 'k' || !(event.metaKey || event.ctrlKey)) return;
+		if (data.login || !isSearchShortcut(event)) return;
 		event.preventDefault();
 		searching = !searching;
 	}
@@ -150,17 +158,7 @@
 
 <!-- Embedded, the host shows the theme and user; search stays here. -->
 {#snippet actions()}
-	<div class="tooltip tooltip-bottom" data-tip="{m.search_open()} {shortcut}">
-		<button
-			type="button"
-			class="flex h-8 w-8 items-center justify-center rounded-md text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content"
-			aria-label={m.search_open()}
-			aria-keyshortcuts="Meta+K Control+K"
-			onclick={() => (searching = true)}
-		>
-			<Icon icon="tabler:search" class="h-5 w-5" />
-		</button>
-	</div>
+	<SearchTrigger onclick={() => (searching = true)} />
 	{#if !chromeless}
 		<div class="max-sm:hidden">
 			<ThemeToggle />

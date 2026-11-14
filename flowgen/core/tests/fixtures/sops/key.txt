@@ -1,0 +1,4 @@
+# Test-only key for the SOPS fixture; it protects nothing.
+# created: 2026-11-12T22:19:49+01:00
+# public key: age13fzdqvwq27stvlpp8ncqhap5guv82dr8jtnqgfkl0zssccn33qnsw9n889
+AGE-SECRET-KEY-1WZGDVQKK2U6F7P465P0FWHS9MAYW7D79D30WLNFVF2A9G0S3W67STQ3K65

@@ -9,9 +9,10 @@ flow:
     description: "Answers questions and drafts, validates and proposes changes to this workspace."
     tags: ["agent", "flowgen"]
   tasks:
-    # The model `flowgen` on the AI gateway, picked in the Agents chat or by any gateway client.
+    # The model `flowgen` on the AI gateway, shown once a model flow serves `default`.
     - llm_proxy:
         name: flowgen
+        requires: [default]
 
     # The agent loop, with the workspace tools from flowgen's MCP server.
     - ai_completion:

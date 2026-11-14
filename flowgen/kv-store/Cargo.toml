@@ -22,10 +22,12 @@ async-trait = { workspace = true }
 tokio-retry = { workspace = true }
 humantime-serde = { workspace = true }
 bytes = { workspace = true }
+futures-util = { workspace = true }
+sha2 = { workspace = true }
 
 [dev-dependencies]
+flowgen_core = { path = "../core", features = ["test-util"] }
 tempfile = { workspace = true }
-futures-util = { workspace = true }
 testcontainers = { workspace = true }
 async-nats = { workspace = true }
 

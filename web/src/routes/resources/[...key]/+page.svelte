@@ -2,6 +2,7 @@
 	import { base } from '$app/paths';
 	import ResourceViewer from '$lib/ResourceViewer.svelte';
 	import { CopyButton, EditButton } from '@connve/ui';
+	import FileActions from '$lib/FileActions.svelte';
 	import PendingChanges from '$lib/PendingChanges.svelte';
 	import { editUrl, targetOf } from '$lib/changes';
 	import { m } from '$lib/paraglide/messages.js';
@@ -38,6 +39,7 @@
 			<div class="flex items-center gap-1">
 				{#if data.targets.length > 0}
 					<EditButton href={editHref} />
+					<FileActions file="resources/{data.key}" targets={data.targets} />
 				{/if}
 			</div>
 		</div>

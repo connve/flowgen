@@ -18,7 +18,7 @@ flow:
 
     - nats_jetstream_publish:
         name: publish_to_nats
-        credentials_path: /etc/nats/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/nats.json"
         url: "{{env.NATS_URL}}"
         subject: "kafka.sample_events"
         stream:

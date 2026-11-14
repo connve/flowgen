@@ -8,30 +8,28 @@
 	import FlowDetails from '$lib/flow/FlowDetails.svelte';
 	import type { Activity } from '$lib/flow/ActivityDetails.svelte';
 	import CodeEditor from '$lib/CodeEditor.svelte';
+	import FileActions from '$lib/FileActions.svelte';
 	import PathField from '$lib/PathField.svelte';
 	import { StatusDot } from '@connve/ui';
 	import { activitiesFor, releaseFlowSubscription } from '$lib/activityStore.svelte';
 	import {
 		encodePath,
 		errorMessage,
-		proposeChange,
 		validateWorkspaceFiles,
 		type AuthoringTarget,
 		type Change,
 		type ValidationIssue as Issue
 	} from '$lib/api';
 	import {
-		addToDraft,
-		draftChange,
 		generatedTitle,
 		loadChange,
+		proposeFile,
 		stripFlowExtension,
 		targetOf
 	} from '$lib/changes';
 	import { m } from '$lib/paraglide/messages.js';
 	import { pageTitle } from '$lib/pageTitle';
 	import { formatSource } from '$lib/format';
-	import { catalogsOf } from '$lib/hubs';
 	import type { PageProps } from './$types';
 
 	let { data }: PageProps = $props();
@@ -102,7 +100,6 @@
 	);
 	let label = $derived(isFlow ? displayName(content) : null);
 	let placeholder = $derived(isFlow ? m.editor_new_flow() : m.editor_new_resource());
-	let canDelete = $derived(data.file !== null && targetOf(data.targets, data.file) !== undefined);
 
 	// The safe answer has focus, so Enter keeps the edits.
 	$effect(() => {
@@ -176,19 +173,6 @@
 		leaving = false;
 	});
 
-	// Whether any hub answers with templates; unknown while it is asked.
-	let templatesReady = $state<boolean | null>(null);
-	$effect(() => {
-		const hubs = data.hubs;
-		templatesReady = null;
-		let current = true;
-		catalogsOf(hubs).then((answered) => {
-			if (current) templatesReady = answered.length > 0;
-		});
-		return () => {
-			current = false;
-		};
-	});
 
 	onDestroy(() => {
 		releaseFlowSubscription();
@@ -264,11 +248,7 @@
 	) {
 		proposing = true;
 		try {
-			const draft = data.draftId ?? draftChange(data.pending, targetOf(data.targets, file.path)?.name)?.id;
-			let change = draft ? await addToDraft(draft, [file]) : null;
-			if (change === null) {
-				change = (await proposeChange({ body: { title, files: [file] } })).data;
-			}
+			const change = await proposeFile(file, data.targets, { title, draftId: data.draftId });
 			leaving = true;
 			goto(`${base}/changes/${encodeURIComponent(change.id)}`);
 		} catch (err) {
@@ -285,7 +265,7 @@
 </svelte:head>
 
 <section class="flex h-[calc(100vh-4rem)] min-w-0">
-<div class="flex min-w-0 flex-1 flex-col p-6">
+<div class="flex min-w-0 flex-1 flex-col p-4 md:p-6">
 	<div class="mb-4 shrink-0">
 		<div class="flex min-h-8 flex-wrap items-center justify-between gap-2">
 			<div class="min-w-0 flex-1 basis-40">
@@ -321,23 +301,14 @@
 						/>
 					</span>
 				{/if}
-				{#if data.file === null && data.hubs.length > 0}
-					{#if templatesReady}
-						<a
-							href="{base}/new?kind={data.kind}{data.folder ? `&folder=${encodePath(data.folder)}` : ''}"
-							class="btn btn-ghost btn-sm gap-1.5"
-						>
-							<Icon icon="tabler:layout-grid-add" class="h-4 w-4" />
-							{m.editor_templates()}
-						</a>
-					{:else}
-						<span class="tooltip tooltip-bottom" data-tip={templatesReady === false ? m.hub_none_title() : null}>
-							<button type="button" class="btn btn-ghost btn-sm gap-1.5" disabled>
-								<Icon icon="tabler:layout-grid-add" class="h-4 w-4" />
-								{m.editor_templates()}
-							</button>
-						</span>
-					{/if}
+				{#if data.file === null && data.kind === 'flow' && data.hubs.length > 0}
+					<a
+						href="{base}/new?kind=flow{data.folder ? `&folder=${encodePath(data.folder)}` : ''}"
+						class="btn btn-ghost btn-sm gap-1.5"
+					>
+						<Icon icon="tabler:layout-grid-add" class="h-4 w-4" />
+						{m.editor_templates()}
+					</a>
 				{/if}
 				<button type="button" class="btn btn-ghost btn-sm" disabled={validating} onclick={validate}>
 					{#if validating}
@@ -361,41 +332,12 @@
 				</div>
 				{#if !isNew && data.file}
 					{@const file = data.file}
-					<div class="dropdown dropdown-end">
-						<button
-							type="button"
-							tabindex="0"
-							class="flex h-8 w-8 items-center justify-center rounded-md text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content"
-							aria-label={m.editor_more_actions()}
-						>
-							<Icon icon="tabler:dots" class="h-5 w-5" />
-						</button>
-						<ul
-							tabindex="-1"
-							class="menu dropdown-content z-10 mt-1 w-56 rounded-md border border-base-200 bg-base-100 p-1 text-sm shadow-lg"
-						>
-							<li>
-								<a href="{base}/edit?new={isFlow ? 'flow' : 'resource'}&from={encodePath(file)}">
-									<Icon icon="tabler:copy" class="h-4 w-4" />
-									{m.editor_duplicate()}
-								</a>
-							</li>
-							<li class={canDelete ? '' : 'menu-disabled'}>
-								<button
-									type="button"
-									class="text-error"
-									disabled={proposing || !canDelete}
-									onclick={() => remove(file)}
-								>
-									<Icon icon="tabler:trash" class="h-4 w-4" />
-									{m.common_delete()}
-								</button>
-								{#if !canDelete}
-									<span class="text-xs text-base-content/50">{m.editor_delete_read_only()}</span>
-								{/if}
-							</li>
-						</ul>
-					</div>
+					<FileActions
+						{file}
+						targets={data.targets}
+						disabled={proposing}
+						ondelete={() => remove(file)}
+					/>
 				{/if}
 			</div>
 		</div>

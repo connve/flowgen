@@ -136,6 +136,8 @@ axum-extra = { version = "0.12", features = [
 ] }
 time = { version = "0.3" }
 base64 = { version = "0.22" }
+age = { version = "0.12", features = ["armor"] }
+aes-gcm = { version = "0.10" }
 http = { version = "1.4" }
 bb8 = { version = "0.9" }
 bb8-postgres = { version = "0.9" }

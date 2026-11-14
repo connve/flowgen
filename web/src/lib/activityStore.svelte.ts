@@ -106,7 +106,7 @@ export function getFlowActivityLimit(): number {
 // inspecting one flow's normal-vs-broken behavior); Debug/Trace default off
 // everywhere, same as /logs — diagnostic noise, not something to review by
 // default.
-const DEFAULT_ACTIVITY_LEVELS: Record<ActivityLevel, boolean> = {
+export const DEFAULT_ACTIVITY_LEVELS: Readonly<Record<ActivityLevel, boolean>> = {
 	info: true,
 	warn: true,
 	error: true,

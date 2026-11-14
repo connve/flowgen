@@ -6,11 +6,23 @@ export type ClientOptions = {
 
 export type Connection = {
     /**
-     * Stable id derived from the connector and credentials file.
+     * Stable id derived from the connector and credentials file, or the target without one.
      */
     id: string;
     /**
-     * The connector of the task types using it, such as `salesforce`, or `mcp` for an `ai_completion` MCP server.
+     * The credentials it reads, by the file name of its credentials
+     * path: `orders-api` for any `…/orders-api.json`. They can be added
+     * or replaced in the web UI as `credentials/<name>.yaml`; absent for
+     * a path set per event.
+     *
+     */
+    credentialsName?: string;
+    /**
+     * Whether its credentials file, or the encrypted Secret holding it, is there; true without a credentials file.
+     */
+    credentialsFound: boolean;
+    /**
+     * The connector of the task types using it, such as `http`, or `mcp` for an `ai_completion` MCP server.
      */
     connector: string;
     /**
@@ -18,7 +30,7 @@ export type Connection = {
      */
     credentialsPath?: string;
     /**
-     * The account or instance the credentials file points to, such as a Salesforce org host or a service account email.
+     * The account or instance the credentials file points to, such as an instance host or a service account email.
      */
     account?: string;
     /**
@@ -42,17 +54,53 @@ export type Connection = {
 
 export type Connector = {
     /**
-     * Such as `salesforce`.
+     * Such as `http`.
      */
     name: string;
     /**
-     * Display name, such as `Salesforce`.
+     * Display name, such as `HTTP`.
      */
     label: string;
     /**
-     * YAML tags of its task types, such as `salesforce_restapi_search`.
+     * YAML tags of its task types, such as `http_request`.
      */
     taskTypes: Array<string>;
+    /**
+     * The ways to fill its credentials file; empty without one.
+     */
+    credentials: Array<CredentialsForm>;
+};
+
+export type CredentialsForm = {
+    /**
+     * Such as `API key` or `Service account file`.
+     */
+    label: string;
+    /**
+     * The values making up the file; empty when the whole file is uploaded.
+     */
+    fields: Array<CredentialsField>;
+};
+
+export type CredentialsField = {
+    /**
+     * Where it goes in the file, with `.` between nested keys.
+     */
+    key: string;
+    label: string;
+    /**
+     * `secret` is masked; `list` takes one value per line.
+     */
+    kind: 'text' | 'secret' | 'number' | 'boolean' | 'choice' | 'list';
+    /**
+     * The values a `choice` takes.
+     */
+    choices?: Array<string>;
+    /**
+     * Whether a `boolean` starts checked.
+     */
+    checked?: boolean;
+    required: boolean;
 };
 
 /**
@@ -233,6 +281,10 @@ export type VersionInfo = {
 
 export type ConfigInfo = {
     /**
+     * Whether `credentials` is set, so credentials can be added.
+     */
+    credentials: boolean;
+    /**
      * The running `AppConfig` serialized to YAML, with secrets
      * redacted to `"***"`.
      *
@@ -351,6 +403,17 @@ export type WorkspaceFile = {
      */
     path: string;
     content?: string | null;
+};
+
+export type CredentialInput = {
+    /**
+     * Letters, digits, `.`, `_` and `-`; flows read the file as `<name>.json`.
+     */
+    name: string;
+    /**
+     * The credentials file, usually JSON.
+     */
+    content: string;
 };
 
 export type WorkspaceFiles = {
@@ -1523,6 +1586,37 @@ export type MarkSessionReadResponses = {
 };
 
 export type MarkSessionReadResponse = MarkSessionReadResponses[keyof MarkSessionReadResponses];
+
+export type EncryptCredentialData = {
+    body: CredentialInput;
+    path?: never;
+    query?: never;
+    url: '/api/credentials/encrypt';
+};
+
+export type EncryptCredentialErrors = {
+    /**
+     * The name is not a valid file name.
+     */
+    400: unknown;
+    /**
+     * `credentials` is not configured.
+     */
+    404: unknown;
+    /**
+     * Encrypting failed.
+     */
+    500: unknown;
+};
+
+export type EncryptCredentialResponses = {
+    /**
+     * The encrypted file.
+     */
+    200: WorkspaceFile;
+};
+
+export type EncryptCredentialResponse = EncryptCredentialResponses[keyof EncryptCredentialResponses];
 
 export type ValidateWorkspaceFilesData = {
     body: WorkspaceFiles;

@@ -42,6 +42,8 @@ pub enum Error {
     },
     #[error("The change lists '{path}' more than once")]
     DuplicatePath { path: String },
+    #[error("Credentials '{path}' are not stored: {message}")]
+    Credentials { path: String, message: String },
     #[error("A change needs a title")]
     MissingTitle,
     #[error("The change is already {status}")]
@@ -134,6 +136,7 @@ impl IntoResponse for Error {
             Error::NotConfigured | Error::NotFound { .. } => (StatusCode::NOT_FOUND, None),
             Error::InvalidPath { .. }
             | Error::DuplicatePath { .. }
+            | Error::Credentials { .. }
             | Error::MissingTitle
             | Error::NoFiles
             | Error::NoTarget { .. }
@@ -195,12 +198,14 @@ enum Location<'a> {
     Flow { file: &'a str },
     /// A resource; `key` is its path within `resources/`.
     Resource { key: &'a str },
+    /// An encrypted credential; `file` is its path within `credentials/`.
+    Credential { file: &'a str },
 }
 
-/// Why a path cannot hold a flow or resource.
+/// Why a path cannot hold a flow, resource or credential.
 #[derive(thiserror::Error, Debug, Clone, Copy, PartialEq)]
 pub enum PathError {
-    #[error("it must start with flows/ or resources/")]
+    #[error("it must start with flows/, resources/ or credentials/")]
     Root,
     #[error("it needs a file name")]
     NoFileName,
@@ -218,6 +223,9 @@ fn locate(path: &str) -> Result<Location<'_>, PathError> {
     let (location, rest) = match path.split_once('/') {
         Some((flowgen_core::workspace::FLOWS_DIR, file)) => (Location::Flow { file }, file),
         Some((flowgen_core::workspace::RESOURCES_DIR, key)) => (Location::Resource { key }, key),
+        Some((flowgen_core::workspace::CREDENTIALS_DIR, file)) => {
+            (Location::Credential { file }, file)
+        }
         _ => return Err(PathError::Root),
     };
     if rest.is_empty() || rest.ends_with('/') {
@@ -248,7 +256,7 @@ fn check_proposal(proposal: &api::ChangeProposal) -> Result<Vec<Location<'_>>, E
     check_paths(&proposal.files)
 }
 
-/// Where each file lives once deployed; each path may appear once.
+/// Where each file lives once deployed; each path may appear once, and credentials must be encrypted.
 fn check_paths(files: &[api::WorkspaceFile]) -> Result<Vec<Location<'_>>, Error> {
     let mut seen = std::collections::HashSet::new();
     let mut locations = Vec::with_capacity(files.len());
@@ -269,7 +277,42 @@ fn check_paths(files: &[api::WorkspaceFile]) -> Result<Vec<Location<'_>>, Error>
         }
         locations.push(location);
     }
+    check_credentials(files, &locations)?;
     Ok(locations)
+}
+
+/// Refuses credentials with any issue, so a change never stores a secret in the clear.
+fn check_credentials(
+    files: &[api::WorkspaceFile],
+    locations: &[Location<'_>],
+) -> Result<(), Error> {
+    for (file, location) in files.iter().zip(locations) {
+        let (Location::Credential { file: name }, Some(content)) = (location, &file.content) else {
+            continue;
+        };
+        if let Some(issue) = crate::credentials::validate(name, content)
+            .into_iter()
+            .next()
+        {
+            return Err(Error::Credentials {
+                path: file.path.clone(),
+                message: issue.message,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The files of `change`, as validation takes them.
+fn workspace_files(change: &api::Change) -> Vec<api::WorkspaceFile> {
+    change
+        .files
+        .iter()
+        .map(|file| api::WorkspaceFile {
+            path: file.path.clone(),
+            content: file.content.clone(),
+        })
+        .collect()
 }
 
 /// Validates on a blocking thread, as parsing and compiling large files takes a while.
@@ -300,6 +343,9 @@ pub(crate) fn validate_files(files: &[api::WorkspaceFile]) -> Vec<api::Validatio
             }
             (Ok(Location::Resource { key }), Some(content)) => {
                 crate::validation::validate_resource(key, content)
+            }
+            (Ok(Location::Credential { file }), Some(content)) => {
+                crate::credentials::validate(file, content)
             }
         };
         issues.extend(found.into_iter().map(|issue| api::ValidationIssue {
@@ -354,6 +400,22 @@ async fn deployed(
             },
             None => Ok(None),
         },
+        Location::Credential { file } => Ok(encrypted_credentials(state, file).await),
+    }
+}
+
+/// The encrypted credentials file this instance reads, where it decrypts
+/// them itself; elsewhere the folder holds them decrypted, which a change
+/// must never carry.
+async fn encrypted_credentials(state: &WebState, file: &str) -> Option<String> {
+    let options = state.app_config.credentials.as_ref()?;
+    options.identity_path.as_ref()?;
+    let content = tokio::fs::read_to_string(options.path.join(file))
+        .await
+        .ok()?;
+    match flowgen_core::sops::is_encrypted(&content) {
+        true => Some(content),
+        false => None,
     }
 }
 
@@ -745,7 +807,7 @@ pub(crate) async fn test_script(
     for file in body.files {
         let key = match locate(&file.path) {
             Ok(Location::Resource { key }) => key.to_string(),
-            Ok(Location::Flow { .. }) => continue,
+            Ok(Location::Flow { .. } | Location::Credential { .. }) => continue,
             Err(reason) => {
                 return Err(Error::InvalidPath {
                     path: file.path,
@@ -830,10 +892,11 @@ pub(crate) async fn workspace_file(
 /// `{}`, as browsers drop an event without data.
 const SSE_EVENT_DEPLOYMENT: &str = "deployment";
 
-/// `GET /api/changes/stream`: `deployment` each time a commit is released or
-/// a flow or resource in the cache changes, so a client rechecks committed
-/// changes as they move on. The stream ends when a watch fails or ends, and
-/// the client reconnects and reads the changes again.
+/// `GET /api/changes/stream`: `deployment` each time a commit is released, a
+/// flow or resource in the cache changes, or a flow starts or stops, so a
+/// client rechecks committed changes as they move on. A deleted flow keeps
+/// running for a moment after its cache key goes. The stream ends when a
+/// watch fails or ends, and the client reconnects and reads the changes again.
 pub(crate) async fn stream_deployments(
     State(state): State<Arc<WebState>>,
 ) -> Sse<impl Stream<Item = Result<SseEvent, axum::Error>>> {
@@ -845,19 +908,21 @@ pub(crate) async fn stream_deployments(
     if let Some(loader) = &state.resource_loader {
         watches.push(loader.watch().await);
     }
-    let mut sources = Vec::with_capacity(watches.len());
+    let mut sources = Vec::with_capacity(watches.len() + 1);
     for watched in watches {
         match watched {
-            Ok(stream) => sources.push(stream),
+            Ok(stream) => sources.push(stream.map(|event| event.map(|_| ())).boxed()),
             Err(source) => {
                 warn!(error = %source, "Deployment watch subscription failed");
                 sources.push(futures_util::stream::empty().boxed());
             }
         }
     }
-    if sources.is_empty() {
-        sources.push(futures_util::stream::pending().boxed());
-    }
+    sources.push(
+        tokio_stream::wrappers::WatchStream::from_changes(state.registry_changed.subscribe())
+            .map(Ok)
+            .boxed(),
+    );
     let live = crate::web::until_any_ends(sources)
         .take_while(|event| {
             std::future::ready(match event {
@@ -1086,26 +1151,21 @@ pub(crate) async fn add_change_files(
             }
         }
     }
-    let files = change
-        .files
-        .iter()
-        .map(|file| api::WorkspaceFile {
-            path: file.path.clone(),
-            content: file.content.clone(),
-        })
-        .collect();
-    change.issues = validate_blocking(files).await?;
+    change.issues = validate_blocking(workspace_files(&change)).await?;
     touch(&mut change);
     transition(&state, &change, revision).await?;
     Ok(Json(with_diffs(change).await?))
 }
 
-/// File sent to the commit flow; `previous` is always present, `null` for a new file.
+/// File sent to the commit flow; `previous` is `null` for a new file, and
+/// left out for credentials and their list, which a commit replaces whatever
+/// they hold: encrypted content shows nothing to merge, and flowgen writes the list.
 #[derive(Serialize)]
 struct CommitFile<'a> {
     path: &'a str,
     content: Option<&'a str>,
-    previous: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    previous: Option<Option<&'a str>>,
 }
 
 #[derive(Serialize)]
@@ -1183,7 +1243,10 @@ pub(crate) async fn approve_change(
         }
         _ => {}
     }
-    if !change.issues.is_empty() {
+    let issues = validate_blocking(workspace_files(&change)).await?;
+    if !issues.is_empty() {
+        change.issues = issues;
+        transition(&state, &change, revision).await?;
         return Err(Error::Invalid);
     }
     change.status = api::ChangeStatus::Committing;
@@ -1244,20 +1307,55 @@ async fn run_commit_flow(
     user: Option<&flowgen_core::auth::UserContext>,
     change: &api::Change,
 ) -> Result<Option<serde_json::Value>, Error> {
+    let touched: Vec<(&str, bool)> = change
+        .files
+        .iter()
+        .map(|file| (file.path.as_str(), file.content.is_some()))
+        .collect();
+    let list = match &state.app_config.credentials {
+        Some(options) => {
+            let committed = committed_versions(state).await?;
+            let known: Vec<(&str, bool)> = committed
+                .iter()
+                .filter_map(|(path, versions)| {
+                    let (_, file) = versions.last()?;
+                    Some((path.as_str(), file.content.is_some()))
+                })
+                .collect();
+            crate::credentials::list_update(options, &known, &touched)
+        }
+        None => None,
+    };
+    let list_path = format!(
+        "{}/{}",
+        flowgen_core::workspace::CREDENTIALS_DIR,
+        crate::credentials::LIST_FILE
+    );
+    let mut files: Vec<CommitFile<'_>> = change
+        .files
+        .iter()
+        .map(|file| CommitFile {
+            path: &file.path,
+            content: file.content.as_deref(),
+            previous: match locate(&file.path) {
+                Ok(Location::Credential { .. }) => None,
+                _ => Some(file.previous.as_deref()),
+            },
+        })
+        .collect();
+    if let Some(after) = &list {
+        files.push(CommitFile {
+            path: &list_path,
+            content: after.as_deref(),
+            previous: None,
+        });
+    }
     let commit = Commit {
         id: &change.id,
         target: &target.name,
         title: &change.title,
         author: author(user),
-        files: change
-            .files
-            .iter()
-            .map(|file| CommitFile {
-                path: &file.path,
-                content: file.content.as_deref(),
-                previous: file.previous.as_deref(),
-            })
-            .collect(),
+        files,
     };
     let data = serde_json::to_value(&commit).map_err(|source| Error::Serialize { source })?;
     let mut meta = serde_json::Map::new();
@@ -1300,6 +1398,7 @@ async fn commit(
                 Some(serde_json::Value::Object(fields)) => fields,
                 _ => Default::default(),
             };
+            announce(&state, &change).await;
         }
         Err(error) => {
             warn!(change = %change.id, error = %error, "Committing a change failed");
@@ -1334,6 +1433,22 @@ async fn commit(
             Ok(change)
         }
         Err(error) => Err(error),
+    }
+}
+
+/// Puts the commit of `change` at `commits.latest` in the system bucket,
+/// which a release flow can watch to release it at once.
+async fn announce(state: &WebState, change: &api::Change) {
+    let (Some(cache), Some(serde_json::Value::String(commit))) =
+        (&state.flows_cache, change.result.get("commit"))
+    else {
+        return;
+    };
+    if let Err(error) = cache
+        .put("commits.latest", commit.clone().into(), None)
+        .await
+    {
+        warn!(change = %change.id, error = %error, "Failed to announce the commit");
     }
 }
 

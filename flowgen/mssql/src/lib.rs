@@ -4,7 +4,9 @@
 //! and template rendering for parameterized queries.
 
 use flowgen_core::task::context::TaskContext;
-use flowgen_core::task::meta::{read_credentials, Connection, Connector, Icon};
+use flowgen_core::task::meta::{
+    read_credentials, Connection, Connector, CredentialsField, CredentialsForm, FieldKind, Icon,
+};
 use flowgen_core::task::runner::Runner;
 use flowgen_core::task::{Task, TaskError, TaskIo, TaskMeta};
 use std::path::Path;
@@ -24,6 +26,21 @@ pub const CONNECTOR: Connector = Connector {
     label: "MSSQL",
     icon: Icon::Svg(include_str!("../icons/mssql.svg")),
     describe_credentials: Some(describe_credentials),
+    credentials: &[CredentialsForm {
+        label: "Connection",
+        fields: &[
+            CredentialsField::text("host", "Host"),
+            CredentialsField::text("port", "Port")
+                .of(FieldKind::Number)
+                .optional(),
+            CredentialsField::text("database", "Database"),
+            CredentialsField::text("username", "Username"),
+            CredentialsField::secret("password", "Password"),
+            CredentialsField::text("encrypt", "Encrypt").of(FieldKind::Boolean(true)),
+            CredentialsField::text("trust_server_certificate", "Trust the server certificate")
+                .of(FieldKind::Boolean(false)),
+        ],
+    }],
 };
 
 /// The server and database the credentials connect to.

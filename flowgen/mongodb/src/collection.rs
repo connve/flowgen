@@ -1177,7 +1177,10 @@ mod tests {
 
         let err = Error::Auth {
             source: crate::client::Error::CredentialsFileRead {
-                source: std::io::Error::new(std::io::ErrorKind::NotFound, "not found"),
+                source: flowgen_core::credentials::Error::ReadFile {
+                    path: "a.json".to_string(),
+                    source: std::io::Error::new(std::io::ErrorKind::NotFound, "not found"),
+                },
             },
         };
         assert!(matches!(err, Error::Auth { .. }));

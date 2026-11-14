@@ -69,6 +69,8 @@ struct WebAssets;
 pub struct WebState {
     /// Registry of currently running flows.
     pub flow_registry: Arc<RwLock<std::collections::HashMap<String, crate::app::FlowHandle>>>,
+    /// Signalled after a flow is added to or removed from `flow_registry`.
+    pub registry_changed: Arc<tokio::sync::watch::Sender<()>>,
     /// Path prefix the UI is mounted at (e.g. "" or "/flowgen"), used to
     /// strip the prefix from asset lookups. Always without a trailing slash.
     pub prefix: String,
@@ -356,6 +358,10 @@ fn router(path: &str, mut state: WebState) -> Router {
         .route(&format!("{api_prefix}/version"), get(get_version))
         .route(&format!("{api_prefix}/config"), get(get_config))
         .merge(agents)
+        .route(
+            &format!("{api_prefix}/credentials/encrypt"),
+            post(crate::credentials::encrypt),
+        )
         .route(
             &format!("{api_prefix}/workspace/validate"),
             post(crate::authoring::validate_workspace),
@@ -1415,6 +1421,7 @@ async fn get_config(State(state): State<Arc<WebState>>) -> Json<api::ConfigInfo>
         agents: state.agents.is_some(),
         authoring: state.authoring.is_some(),
         authoring_targets,
+        credentials: state.app_config.credentials.is_some(),
     })
 }
 
@@ -2306,10 +2313,12 @@ pub(crate) mod tests {
             shutdown_timeout: crate::config::default_shutdown_timeout(),
             host: crate::config::default_host(),
             ai_budget: None,
+            credentials: None,
         });
         let flow_registry = Arc::new(RwLock::new(HashMap::new()));
         WebState {
             flow_registry: Arc::clone(&flow_registry),
+            registry_changed: Arc::new(tokio::sync::watch::Sender::new(())),
             prefix: String::new(),
             resource_loader: None,
             metrics_store: flowgen_core::flow::activity::OtlpMetricsStore::builder().build(),
@@ -2574,6 +2583,7 @@ pub(crate) mod tests {
             (Method::PATCH, "/f/api/changes/abc/approve"),
             (Method::PATCH, "/f/api/flows/a"),
             (Method::POST, "/f/api/cluster/token"),
+            (Method::POST, "/f/api/credentials/encrypt"),
             (Method::GET, "/f/api/agents/sessions"),
             (Method::GET, "/f/api/config"),
             (Method::GET, "/f/api/flowsx"),
@@ -2830,6 +2840,52 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(again.status(), 409);
+    }
+
+    #[tokio::test]
+    async fn approving_validates_the_files_again() {
+        let mut state = test_state();
+        state.authoring = Some(authoring_options(vec![authoring_target(
+            "workspace",
+            &["flows/", "resources/"],
+        )]));
+        let store = Arc::clone(&state.session_cache);
+        let base = serve(router("/flowgen", state)).await;
+        let client = reqwest::Client::new();
+        let proposed: api::Change = client
+            .post(format!("{base}/flowgen/api/changes"))
+            .json(&api::ChangeProposal {
+                title: "Add a".to_string(),
+                description: None,
+                files: vec![api::WorkspaceFile {
+                    path: "flows/a.yaml".to_string(),
+                    content: Some("flow:\n  tasks:\n    - log:\n        name: a\n".to_string()),
+                }],
+            })
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(proposed.issues.is_empty());
+
+        let key = format!("authoring.changes.{}", proposed.id);
+        let mut stored: serde_json::Value =
+            serde_json::from_slice(&store.get(&key).await.unwrap().unwrap()).unwrap();
+        stored["files"][0]["content"] =
+            "flow:\n  tasks:\n    - log:\n        name: a\n        unknown: 1\n".into();
+        store
+            .put(&key, serde_json::to_vec(&stored).unwrap().into(), None)
+            .await
+            .unwrap();
+
+        let url = format!("{base}/flowgen/api/changes/{}", proposed.id);
+        let approved = client.post(format!("{url}/approve")).send().await.unwrap();
+        assert_eq!(approved.status(), 409);
+        let change: api::Change = client.get(&url).send().await.unwrap().json().await.unwrap();
+        assert_eq!(change.status, api::ChangeStatus::Pending);
+        assert!(!change.issues.is_empty(), "{change:?}");
     }
 
     #[tokio::test]
@@ -3646,6 +3702,29 @@ pub(crate) mod tests {
             .put(&format!("{prefix}.a"), "flow".into(), None)
             .await
             .unwrap();
+
+        let mut received = String::new();
+        while !received.contains("event: deployment\ndata: {}") {
+            let chunk = tokio::time::timeout(Duration::from_secs(5), body.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            received.push_str(&String::from_utf8_lossy(&chunk));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_flow_starting_or_stopping_is_sent_as_deployed() {
+        let state = test_state();
+        let registry_changed = Arc::clone(&state.registry_changed);
+        let base = serve(router("/flowgen", state)).await;
+        let response = reqwest::get(format!("{base}/flowgen/api/changes/stream"))
+            .await
+            .unwrap();
+        let mut body = response.bytes_stream();
+
+        registry_changed.send_replace(());
 
         let mut received = String::new();
         while !received.contains("event: deployment\ndata: {}") {

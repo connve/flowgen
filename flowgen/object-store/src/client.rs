@@ -30,6 +30,11 @@ pub enum Error {
     MissingBuilderAttribute(String),
     #[error("No context available")]
     NoContext,
+    #[error("Failed to read credentials: {source}")]
+    Credentials {
+        #[source]
+        source: flowgen_core::credentials::Error,
+    },
 }
 
 impl Error {
@@ -68,7 +73,7 @@ pub struct Client {
 
 impl Client {
     /// Establishes connection to the object store.
-    fn create_context(&self) -> Result<Context, Error> {
+    async fn create_context(&self) -> Result<Context, Error> {
         let path = self.path.to_str().ok_or(Error::EmptyPath)?;
         let url = Url::parse(path).map_err(|source| Error::ParseUrl { source })?;
         let mut parse_opts = self.options.clone().unwrap_or_default();
@@ -76,13 +81,13 @@ impl Client {
         if let Some(credentials_path) = &self.credentials_path {
             match url.scheme() {
                 "gs" => {
-                    parse_opts.insert(
-                        "google_service_account".to_string(),
-                        credentials_path.to_string_lossy().to_string(),
-                    );
+                    let content = flowgen_core::credentials::read_async(credentials_path)
+                        .await
+                        .map_err(|source| Error::Credentials { source })?;
+                    parse_opts.insert("google_service_account_key".to_string(), content);
                 }
                 "s3" | "s3a" => {
-                    Self::load_aws_credentials(credentials_path, &mut parse_opts)?;
+                    Self::load_aws_credentials(credentials_path, &mut parse_opts).await?;
                 }
                 _ => {}
             }
@@ -130,11 +135,13 @@ impl Client {
 
     /// Reads an AWS credentials JSON file and inserts known keys into the options map.
     /// Keys already present in the map (e.g. from client_options) are not overwritten.
-    fn load_aws_credentials(
+    async fn load_aws_credentials(
         path: &std::path::Path,
         opts: &mut HashMap<String, String>,
     ) -> Result<(), Error> {
-        let content = std::fs::read_to_string(path).map_err(Error::s3)?;
+        let content = flowgen_core::credentials::read_async(path)
+            .await
+            .map_err(|source| Error::Credentials { source })?;
         let creds: serde_json::Value = serde_json::from_str(&content).map_err(Error::s3)?;
 
         for &key in AWS_CREDENTIAL_KEYS {
@@ -154,7 +161,7 @@ impl Client {
     /// session tokens ~12 hours). Without reconnecting, operations will fail
     /// with authentication errors.
     pub async fn reconnect(&mut self) -> Result<(), Error> {
-        self.context = Some(self.create_context()?);
+        self.context = Some(self.create_context().await?);
         Ok(())
     }
 
@@ -168,7 +175,7 @@ impl flowgen_core::client::Client for Client {
     type Error = Error;
 
     async fn connect(mut self) -> Result<Client, Error> {
-        self.context = Some(self.create_context()?);
+        self.context = Some(self.create_context().await?);
         Ok(self)
     }
 }

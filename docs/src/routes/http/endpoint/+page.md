@@ -15,7 +15,7 @@ http_server:
     name: receive_order
     endpoint: /webhooks/orders
     method: POST
-    credentials_path: /etc/webhook/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/webhook.json"
 ```
 
 ### Fields

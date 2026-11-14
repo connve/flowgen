@@ -136,6 +136,8 @@ pub struct ReconcilerContext {
     pub servers: FlowServers,
     pub filesystem_flow_paths: Arc<HashSet<String>>,
     pub flow_registry: Arc<RwLock<HashMap<String, FlowHandle>>>,
+    /// Signalled after a flow is added to or removed from `flow_registry`.
+    pub registry_changed: Arc<tokio::sync::watch::Sender<()>>,
     pub client_registry: Arc<flowgen_core::client_registry::ClientRegistry>,
     /// This pod's holder identity, shared across every flow's Executor.
     pub holder_identity: String,
@@ -448,6 +450,9 @@ async fn reconcile_put(key: &str, value: bytes::Bytes, ctx: &ReconcilerContext) 
             }
         }
     };
+    if started {
+        ctx.registry_changed.send_replace(());
+    }
     match (started, old) {
         (true, Some(old)) => old.keep_lease().await,
         (false, Some(old)) => old.release_lease().await,
@@ -506,6 +511,7 @@ async fn stop_and_deregister(flow_name: &str, ctx: &ReconcilerContext) -> Option
         write_lock(&ctx.stopping).insert(flow_name.to_string(), old.shutdown_timeout);
         old
     };
+    ctx.registry_changed.send_replace(());
 
     old.cancellation_token.cancel();
     ctx.servers.deregister_flow(flow_name);
@@ -621,6 +627,7 @@ fn test_context() -> ReconcilerContext {
         shutdown_timeout: crate::config::default_shutdown_timeout(),
         host: crate::config::default_host(),
         ai_budget: None,
+        credentials: None,
     };
 
     let shared: Arc<dyn Cache> = Arc::new(MemoryCache::new());
@@ -634,6 +641,7 @@ fn test_context() -> ReconcilerContext {
         servers: FlowServers::default(),
         filesystem_flow_paths: Arc::new(HashSet::new()),
         flow_registry: Arc::new(RwLock::new(HashMap::new())),
+        registry_changed: Arc::new(tokio::sync::watch::Sender::new(())),
         client_registry: Arc::new(flowgen_core::client_registry::ClientRegistry::new()),
         peer_registry: Arc::new(flowgen_core::peer::PeerRegistry::new(
             shared,
@@ -820,6 +828,7 @@ flow:
             shutdown_timeout: crate::config::default_shutdown_timeout(),
             host: crate::config::default_host(),
             ai_budget: None,
+            credentials: None,
         };
 
         let shared: Arc<dyn Cache> = Arc::new(MemoryCache::new());
@@ -833,6 +842,7 @@ flow:
             servers: FlowServers::default(),
             filesystem_flow_paths: Arc::new(fs_flows),
             flow_registry: Arc::new(RwLock::new(HashMap::new())),
+            registry_changed: Arc::new(tokio::sync::watch::Sender::new(())),
             client_registry: Arc::new(flowgen_core::client_registry::ClientRegistry::new()),
             peer_registry: Arc::new(flowgen_core::peer::PeerRegistry::new(
                 shared,
@@ -1122,6 +1132,42 @@ flow:
 
         assert!(started);
         assert!(!overlapped.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn a_removed_flow_is_announced_once_it_left_the_registry() {
+        let ctx = test_context();
+        write_lock(&ctx.flow_registry).insert(
+            "old".to_string(),
+            FlowHandle {
+                identity: "old".to_string(),
+                flow_display_name: None,
+                flow_description: None,
+                flow_tags: Vec::new(),
+                require_leader_election: false,
+                task_count: 1,
+                connections: Vec::new(),
+                started_at: std::time::SystemTime::now(),
+                flow_yaml: String::new(),
+                cancellation_token: CancellationToken::new(),
+                join_handle: tokio::spawn(async {}),
+                shutdown_timeout: crate::config::default_shutdown_timeout(),
+                from_filesystem: false,
+                task_manager: None,
+            },
+        );
+        let changed = ctx.registry_changed.subscribe();
+
+        reconcile_batch(
+            vec![WatchEvent::Delete {
+                key: "flows.old".to_string(),
+            }],
+            &ctx,
+        )
+        .await;
+
+        assert!(changed.has_changed().unwrap());
+        assert!(!read_lock(&ctx.flow_registry).contains_key("old"));
     }
 
     #[tokio::test(flavor = "multi_thread")]

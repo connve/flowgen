@@ -17,7 +17,7 @@ flow:
 
     - gcp_bigquery_query:
         name: fetch_completed_orders
-        credentials_path: /etc/gcp/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/gcp.json"
         project_id: my-project-id
         query:
           resource: "gcp/queries/fetch_completed_orders.sql"

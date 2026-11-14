@@ -5,7 +5,7 @@
 	import { slide } from 'svelte/transition';
 	import { NavList, type NavGroup, type NavLink } from '@connve/ui';
 	import { navigation, type NavItem, type NavSection } from '$lib/nav';
-	import { chevronRight } from '$lib/icons';
+	import { icons } from '@connve/ui';
 
 	interface Props {
 		/** The current route without the base path. */
@@ -115,7 +115,7 @@
 						{/if}
 						<span class="truncate">{section.title}</span>
 						<Icon
-							icon={chevronRight}
+							icon={icons.chevronRight}
 							class="ml-auto h-4 w-4 shrink-0 opacity-50 transition-transform motion-reduce:transition-none {open
 								? 'rotate-90'
 								: ''}"

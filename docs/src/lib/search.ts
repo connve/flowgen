@@ -6,7 +6,7 @@ import { pages } from '$lib/llms';
 export interface SearchEntry {
 	/** The page title from the navigation. */
 	page: string;
-	/** The navigation section, e.g. `Salesforce`. */
+	/** The navigation section, e.g. `Concepts`. */
 	section: string;
 	/** The section heading; absent for the text before the first heading. */
 	heading?: string;

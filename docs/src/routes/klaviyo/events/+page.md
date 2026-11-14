@@ -8,7 +8,7 @@ Sends events to Klaviyo, such as placed orders, where Klaviyo flows and segments
 - klaviyo_events:
     name: track_order
     operation: create
-    credentials_path: /etc/klaviyo/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/klaviyo.json"
     payload:
       from_event: true
 ```

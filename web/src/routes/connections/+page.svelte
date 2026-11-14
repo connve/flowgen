@@ -3,7 +3,8 @@
 	import { goto, invalidate } from '$app/navigation';
 	import { encodePath, type Connection, type FlowStatus } from '$lib/api';
 	import Icon from '@iconify/svelte';
-	import { IconButton, Inspector, InspectorSection, StateMessage, StatusDot } from '@connve/ui';
+	import { Badge, IconButton, Inspector, InspectorSection, StateMessage, StatusDot } from '@connve/ui';
+	import CredentialsForm from '$lib/CredentialsForm.svelte';
 	import { connectorByName } from '$lib/connectors';
 	import { m } from '$lib/paraglide/messages.js';
 	import { pageTitle } from '$lib/pageTitle';
@@ -28,17 +29,16 @@
 		idle: { label: m.flows_status_idle, variant: 'neutral' }
 	};
 
-	function credentialsName(path: string | undefined): string | null {
-		if (!path || path.includes('{{')) return null;
-		const file = path.split('/').pop() ?? '';
-		return file.replace(/\.[^.]+$/, '') || null;
-	}
-
 	function subtitle(connection: Connection): string {
 		const parts = connection.account ? [connection.account, ...connection.targets] : [...connection.targets];
 		if (connection.perEvent) parts.push(m.connections_per_event());
 		if (connection.onBehalfOfUser) parts.push(m.connections_on_behalf_of_user());
-		return parts.length > 0 ? parts.join(' · ') : (credentialsName(connection.credentialsPath) ?? '');
+		return parts.length > 0 ? parts.join(' · ') : (connection.credentialsName ?? '');
+	}
+
+	/** The connection's name: its credentials, or where it connects without any. */
+	function nameOf(connection: Connection, label: string): string {
+		return connection.credentialsName ?? connection.targets[0] ?? label;
 	}
 
 	let selectedId = $state<string | null>(null);
@@ -108,6 +108,9 @@
 								<div class="flex min-w-0 items-center gap-2">
 									<img src={connector.iconUrl} alt="" class="h-4 w-4 shrink-0" />
 									<span class="shrink-0 text-sm font-medium">{connector.label}</span>
+									{#if !connection.credentialsFound}
+										<Badge variant="warning">{m.credentials_missing()}</Badge>
+									{/if}
 									{#if detail}
 										<span
 											class="tooltip min-w-0 before:max-w-md before:whitespace-normal before:break-words"
@@ -136,36 +139,53 @@
 {#if selected}
 	{@const connector = connectorByName(selected.connector)}
 	{@const status = STATUS[selected.status]}
-	<Inspector title={connector.label} label={m.connections_details()} onclose={() => (selectedId = null)}>
+	{@const name = nameOf(selected, connector.label)}
+	{@const addable = data.credentials ? selected.credentialsName : undefined}
+	<Inspector title={name} label={m.connections_details()} onclose={() => (selectedId = null)}>
 		{#snippet subtitle()}
 			<img src={connector.iconUrl} alt="" class="h-3.5 w-3.5 shrink-0" />
-			<StatusDot variant={status.variant} label={status.label()} />
+			{#if name !== connector.label}
+				<span>{connector.label}</span>
+				<span aria-hidden="true">·</span>
+			{/if}
+			{#if selected.credentialsFound}
+				<StatusDot variant={status.variant} label={status.label()} />
+			{:else}
+				<StatusDot variant="warning" label={m.credentials_missing()} />
+			{/if}
 		{/snippet}
 		{#snippet actions()}
 			<IconButton icon="tabler:arrow-up-right" label={m.connections_show_flows()} href={flowsUrl(selected)} />
 		{/snippet}
-		<div class="space-y-3">
+		{#if addable}
+			{#key selected.id}
+				<CredentialsForm name={addable} {connector} found={selected.credentialsFound} />
+			{/key}
+		{/if}
+		{#if selected.account || selected.targets.length > 0 || selected.perEvent || selected.onBehalfOfUser}
 			<dl class="grid grid-cols-[max-content_minmax(0,1fr)] gap-x-4 gap-y-1">
 				{#if selected.account}
 					<dt class="text-base-content/50">{m.connections_field_account()}</dt>
 					<dd class="[overflow-wrap:anywhere]">{selected.account}</dd>
 				{/if}
-				{#each selected.targets as target (target)}
-					<dt class="text-base-content/50">{m.connections_field_target()}</dt>
-					<dd class="[overflow-wrap:anywhere]">{target}</dd>
-				{/each}
-				{#if selected.perEvent}
-					<dt class="text-base-content/50">{m.connections_field_credentials()}</dt>
-					<dd>{m.connections_per_event()}</dd>
-				{:else if selected.onBehalfOfUser}
-					<dt class="text-base-content/50">{m.connections_field_credentials()}</dt>
-					<dd>{m.connections_on_behalf_of_user()}</dd>
-				{:else if credentialsName(selected.credentialsPath)}
-					<dt class="text-base-content/50">{m.connections_field_credentials()}</dt>
-					<dd>{credentialsName(selected.credentialsPath)}</dd>
+				{#if selected.targets.length > 0}
+					<dt class="text-base-content/50">
+						{selected.targets.length > 1 ? m.connections_field_targets() : m.connections_field_target()}
+					</dt>
+					<dd class="space-y-1 [overflow-wrap:anywhere]">
+						{#each selected.targets as target (target)}
+							<div>{target}</div>
+						{/each}
+					</dd>
+				{/if}
+				{#if selected.perEvent || selected.onBehalfOfUser}
+					<dt class="text-base-content/50">{m.connections_field_signs_in()}</dt>
+					<dd>
+						{selected.perEvent ? m.connections_signs_in_per_event() : m.connections_signs_in_as_user()}
+					</dd>
 				{/if}
 			</dl>
-		</div>
+		{/if}
 		<InspectorSection title={m.connections_column_flows()}>
 			<ul class="space-y-px">
 				{#each selected.flows as flow (flow)}

@@ -22,4 +22,4 @@ flow:
         name: release
         repository: "{{env.OCI_REPOSITORY}}"
         tags: ["{{event.data.version}}", "latest"]
-        credentials_path: /etc/registry/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/registry.json"

@@ -20,7 +20,7 @@ flow:
         name: list_gcs_files
         operation: list
         path: gs://my-bucket/data/*.parquet
-        credentials_path: /etc/gcp/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/gcp.json"
 
     - log:
         name: print_files

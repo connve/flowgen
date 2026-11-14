@@ -51,7 +51,7 @@ flow:
 
     - nats_jetstream_publish:
         name: publish_batches
-        credentials_path: /etc/nats/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/nats.json"
         url: "{{env.NATS_URL}}"
         subject: rows.received_batched
         stream:

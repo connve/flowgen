@@ -5,7 +5,7 @@
 //! HTTPS.
 
 use flowgen_core::task::context::TaskContext;
-use flowgen_core::task::meta::{Connection, Connector, Icon};
+use flowgen_core::task::meta::{Connection, Connector, CredentialsField, CredentialsForm, Icon};
 use flowgen_core::task::runner::Runner;
 use flowgen_core::task::{Task, TaskError, TaskIo, TaskMeta};
 use std::sync::Arc;
@@ -22,6 +22,13 @@ pub const CONNECTOR: Connector = Connector {
     label: "Git",
     icon: Icon::Svg(include_str!("../icons/git.svg")),
     describe_credentials: None,
+    credentials: &[CredentialsForm {
+        label: "Access token",
+        fields: &[
+            CredentialsField::secret("token", "Token"),
+            CredentialsField::text("username", "Username").optional(),
+        ],
+    }],
 };
 
 impl TaskMeta for push::GitPush {

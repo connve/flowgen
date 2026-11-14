@@ -5,28 +5,24 @@
 	import {
 		activityLevels,
 		getFlowActivityLimit,
+		DEFAULT_ACTIVITY_LEVELS,
 		resetActivityLevels,
 		setFlowActivityLimit,
 	} from '$lib/activityStore.svelte';
-	import { levelChipClass, levelLabel, levelVariant } from '$lib/logRecord';
+	import {
+		clickedLevels,
+		levelChip,
+		levelChipClass,
+		levelLabel,
+		levelVariant
+	} from '$lib/logRecord';
 	import type { ActivityLevel } from '$lib/logRecord';
 	import { LOGS_LIMIT_MAX, clampLogsLimit } from '$lib/logsLimit';
-	import { formatAbsolute, formatRelative } from '$lib/time';
-	import { formatDuration } from '$lib/toolRuns.svelte';
+	import { formatRelative } from '$lib/time';
+	import { VirtualRows } from '$lib/virtualRows.svelte';
+	import { LOG_LINE, LOG_MESSAGE, quietLine, withCause } from '$lib/logLine';
 	import { m } from '$lib/paraglide/messages.js';
 	import type { Activity } from '$lib/flow/ActivityDetails.svelte';
-
-	// Some upstream sites emit a generic message (e.g. rig-core's "SSE error")
-	// and stash the useful cause in an `error` / `err` attribute. Surface a
-	// truncated version inline so the row conveys context without a click.
-	function enrichedMessage(a: Activity): string {
-		if (!a.extra) return a.message;
-		const cause = a.extra.find(([k]) => k === 'error' || k === 'err');
-		if (!cause) return a.message;
-		const snippet = cause[1].slice(0, 120);
-		return `${a.message} — ${snippet}`;
-	}
-
 
 	interface Props {
 		activities: Activity[];
@@ -35,21 +31,23 @@
 		onRowClick: (taskName: string) => void;
 		/** The row shown in the flow's inspector. */
 		selected?: Activity | null;
+		/** Takes the whole flow view, with the graph and config hidden. */
+		maximized?: boolean;
+		/** Fills the height it is given instead of its own resizable height. */
+		fill?: boolean;
 	}
 
-	let { activities, expanded, onToggle, onRowClick, selected = $bindable(null) }: Props = $props();
-
-	// Fixed row height keeps virtualization math trivial; content is single-line
-	// truncated so no row varies.
-	const ROW_HEIGHT = 32;
-	/** Timestamp, processor and event fold away when the panel is narrow. */
-	const COLUMNS =
-		'grid gap-3 grid-cols-[5.5rem_5rem_9rem_5rem_minmax(0,1fr)] @6xl:grid-cols-[5.5rem_5rem_11rem_9rem_9rem_5rem_9rem_minmax(0,1fr)]';
-	const OVERSCAN = 6;
+	let {
+		activities,
+		expanded,
+		onToggle,
+		onRowClick,
+		selected = $bindable(null),
+		maximized = $bindable(false),
+		fill = false
+	}: Props = $props();
 
 	let scroller = $state<HTMLElement | null>(null);
-	let scrollTop = $state(0);
-	let viewportHeight = $state(256);
 	let flowActivityLimit = $derived(getFlowActivityLimit());
 	let countWidth = $derived(`${String(flowActivityLimit).length}ch`);
 
@@ -113,34 +111,24 @@
 		return out;
 	});
 
-	let startIdx = $derived(Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN));
-	let endIdx = $derived(
-		Math.min(ordered.length, Math.ceil((scrollTop + viewportHeight) / ROW_HEIGHT) + OVERSCAN),
-	);
-	let visible = $derived(ordered.slice(startIdx, endIdx));
-	let topPad = $derived(startIdx * ROW_HEIGHT);
-	let bottomPad = $derived(Math.max(0, (ordered.length - endIdx) * ROW_HEIGHT));
+	const rows = new VirtualRows(() => ordered, 28);
 
 	function onScroll(e: Event) {
-		const el = e.currentTarget as HTMLElement;
-		scrollTop = el.scrollTop;
+		rows.scrollTop = (e.currentTarget as HTMLElement).scrollTop;
 	}
 
-	// Like a Grafana legend: a click shows only that level, a click on the
-	// only level shown restores the defaults, and ⌘/Ctrl/Shift-click adds or
-	// removes one level.
+	function onKeydown(event: KeyboardEvent) {
+		if (event.key !== 'Escape' || event.defaultPrevented || !maximized || selected) return;
+		const target = event.target instanceof HTMLElement ? event.target : null;
+		if (target?.isContentEditable || target?.closest('input, textarea, select, [role="dialog"]')) return;
+		event.preventDefault();
+		maximized = false;
+	}
+
+	// A click picks a level or drops it again; with none picked the defaults show.
 	function clickLevel(level: ActivityLevel, e: MouseEvent) {
 		e.stopPropagation();
-		if (e.metaKey || e.ctrlKey || e.shiftKey) {
-			levelFilter[level] = !levelFilter[level];
-			return;
-		}
-		const shown = (Object.keys(levelFilter) as ActivityLevel[]).filter((key) => levelFilter[key]);
-		if (shown.length === 1 && shown[0] === level) {
-			resetActivityLevels();
-			return;
-		}
-		for (const key of Object.keys(levelFilter) as ActivityLevel[]) levelFilter[key] = key === level;
+		Object.assign(levelFilter, clickedLevels(levelFilter, DEFAULT_ACTIVITY_LEVELS, level));
 	}
 
 	function clearFilters() {
@@ -164,8 +152,14 @@
 	}
 </script>
 
-<div class="@container relative flex shrink-0 flex-col border-t border-base-200 bg-base-100">
-	{#if expanded}
+<svelte:window onkeydown={onKeydown} />
+
+<div
+	class="@container relative flex flex-col bg-base-100 {fill && expanded
+		? 'min-h-0 flex-1'
+		: 'shrink-0'} {maximized ? '' : 'border-t border-base-200'}"
+>
+	{#if expanded && !fill}
 		<PaneResizer pane={activityHeight} />
 	{/if}
 	<div class="flex h-12 items-center gap-2 pl-2 pr-3">
@@ -204,7 +198,7 @@
 		{#if expanded}
 			{#if searchOpen || search}
 				<label
-					class="input input-sm flex w-64 items-center gap-2 border border-base-300 bg-base-100 outline-none focus-within:border-primary"
+					class="input input-sm flex w-40 items-center @lg:w-64 gap-2 border border-base-300 bg-base-100 outline-none focus-within:border-primary"
 				>
 					<Icon icon="tabler:search" class="h-4 w-4 shrink-0 opacity-50" />
 					<input
@@ -240,7 +234,7 @@
 					onclick={() => (searchOpen = true)}
 				/>
 			{/if}
-			<div class="dropdown dropdown-end dropdown-top">
+			<div class="dropdown dropdown-end {fill ? '' : 'dropdown-top'}">
 				<button
 					type="button"
 					tabindex="0"
@@ -251,7 +245,7 @@
 				</button>
 				<div
 					tabindex="-1"
-					class="dropdown-content z-10 mb-1 w-60 rounded-md border border-base-200 bg-base-100 p-1 text-sm shadow-lg"
+					class="dropdown-content z-10 my-1 w-60 rounded-md border border-base-200 bg-base-100 p-1 text-sm shadow-lg"
 				>
 					<label class="flex h-9 items-center gap-2 rounded-md px-3">
 						<span class="flex-1">{m.logs_limit_label()}</span>
@@ -267,17 +261,24 @@
 					</label>
 				</div>
 			</div>
+			<IconButton
+				icon={maximized ? 'tabler:arrows-minimize' : 'tabler:arrows-maximize'}
+				label={maximized ? m.activity_restore() : m.activity_maximize()}
+				tooltip="left"
+				onclick={() => (maximized = !maximized)}
+			/>
 		{/if}
 	</div>
 
 	{#if expanded}
 		<div class="flex flex-wrap items-center gap-2 px-4 pb-3">
-			<span class="flex items-center gap-1">
+			<span class="flex flex-wrap items-center gap-1">
 				{#each ['info', 'warn', 'error', 'debug', 'trace'] as const as level (level)}
+					{@const chip = levelChip(levelFilter, DEFAULT_ACTIVITY_LEVELS, level)}
 					<button
 						type="button"
-						class="chip {levelChipClass(level, levelFilter[level])}"
-						aria-pressed={levelFilter[level]}
+						class="chip {levelChipClass(level, chip)}"
+						aria-pressed={chip === 'picked'}
 						onclick={(e) => clickLevel(level, e)}
 					>
 						<span>{levelLabel(level)}</span>
@@ -328,55 +329,42 @@
 				{/if}
 			</div>
 		{:else}
-			<!-- Column headers rendered outside the virtualized list so they stay
-			     visible without an intra-list sticky header (which fights virtualization). -->
-			<div
-				class="h-8 items-center border-b border-base-200 bg-base-100 px-3 text-xs font-medium text-base-content/50 {COLUMNS}"
-			>
-				<span>{m.activity_field_status()}</span>
-				<span>{m.activity_field_when()}</span>
-				<span class="@max-6xl:hidden">{m.activity_field_timestamp()}</span>
-				<span class="@max-6xl:hidden">{m.activity_field_processor()}</span>
-				<span>{m.activity_field_task()}</span>
-				<span>{m.activity_field_duration()}</span>
-				<span class="@max-6xl:hidden">{m.activity_field_event()}</span>
-				<span>{m.activity_field_message()}</span>
-			</div>
 			<div
 				bind:this={scroller}
-				class="overflow-auto bg-base-100"
-				style:height="min({activityHeight.size}px, 60vh)"
+				class="overflow-x-hidden overflow-y-auto bg-base-100 pb-2 {fill ? 'min-h-0 flex-1' : ''}"
+				style:height={fill ? undefined : `min(${activityHeight.size}px, 60vh)`}
 				onscroll={onScroll}
-				bind:clientHeight={viewportHeight}
+				bind:clientHeight={rows.viewportHeight}
 			>
-				<!-- Top spacer holds the un-rendered rows above the viewport -->
-				<div style="height: {topPad}px"></div>
-				{#each visible as event, i (event.ts_ms + '-' + (event.task ?? '_') + '-' + (startIdx + i))}
+				<div style:height="{rows.topPad}px"></div>
+				{#each rows.visible as event (event)}
 					<button
 						type="button"
-						class="{COLUMNS} w-full cursor-pointer items-center border-b border-base-200 px-3 text-left text-xs transition-colors {selected ===
-						event
+						{@attach rows.measure(event)}
+						class="{LOG_LINE} w-full cursor-pointer px-4 text-left {selected === event
 							? 'bg-base-200'
 							: 'hover:bg-base-200/60'}"
-						style:height="{ROW_HEIGHT}px"
 						onclick={() => {
 							selected = event;
 							if (event.task) onRowClick(event.task);
 						}}
 					>
-						<span><StatusDot variant={levelVariant(event.level)} label={levelLabel(event.level)} /></span>
-						<span class="whitespace-nowrap opacity-60">{formatRelative(event.ts_ms)}</span>
-						<span class="whitespace-nowrap font-mono opacity-60 @max-6xl:hidden">{formatAbsolute(event.ts_ms)}</span>
-						<span class="truncate font-mono opacity-70 @max-6xl:hidden">{event.task_type ?? '—'}</span>
-						<span class="truncate font-mono opacity-80">{event.task ?? m.activity_flow_task()}</span>
-						<span class="whitespace-nowrap font-mono tabular-nums opacity-60">
-							{event.duration_ms === undefined ? '—' : formatDuration(event.duration_ms)}
+						<span class="flex h-4 items-center">
+							<StatusDot variant={levelVariant(event.level)} label="" />
+							<span class="sr-only">{levelLabel(event.level)}</span>
 						</span>
-						<span class="truncate font-mono opacity-60 @max-6xl:hidden">{event.event_id ?? '—'}</span>
-						<span class="truncate font-mono opacity-70">{enrichedMessage(event)}</span>
+						<span class="whitespace-nowrap text-base-content/50">{formatRelative(event.ts_ms)}</span>
+						<span class="truncate font-mono text-base-content/70">{event.task ?? m.activity_flow_task()}</span>
+						{#if event.message}
+							<span class={LOG_MESSAGE}>{withCause(event.message, event.extra)}</span>
+						{:else}
+							<span class="{LOG_MESSAGE} text-base-content/50">
+								{quietLine(event.task_type, event.duration_ms)}
+							</span>
+						{/if}
 					</button>
 				{/each}
-				<div style="height: {bottomPad}px"></div>
+				<div style:height="{rows.bottomPad}px"></div>
 			</div>
 		{/if}
 	{/if}

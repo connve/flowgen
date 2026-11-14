@@ -18,7 +18,7 @@ flow:
     - oci_sync:
         name: read_hub
         artifact: "registry.example.com/team/hub/flowgen:{{env.FLOWGEN_VERSION}}"
-        credentials_path: credentials/registry.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/registry.json"
         force_pull: true
         retry:
           max_attempts: 1
@@ -31,13 +31,13 @@ flow:
 Each top folder of the catalog is a template when it holds a `template.yaml`:
 
 ```
-salesforce_search/
+order_sync/
 ├── template.yaml
 ├── README.md
 ├── flows/
-│   └── salesforce/search.yaml
+│   └── orders/sync.yaml
 └── resources/
-    └── scripts/search.rhai
+    └── scripts/sync.rhai
 ```
 
 | File | Description |

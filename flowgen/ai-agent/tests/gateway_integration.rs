@@ -95,6 +95,7 @@ fn register_fake_proxy_with_protocol<F>(
     let config = Arc::new(LlmProxy {
         name: name.to_string(),
         models: Vec::new(),
+        requires: Vec::new(),
         protocol,
         credentials_path: None,
         auth: None,
@@ -136,6 +137,19 @@ fn register_fake_proxy_with_models<F>(
     server: &AiGatewayServer,
     name: &str,
     models: Vec<String>,
+    respond: F,
+) where
+    F: FnMut(&Event) -> Value + Send + 'static,
+{
+    register_fake_proxy_requiring(server, name, models, Vec::new(), respond);
+}
+
+/// Variant of `register_fake_proxy_with_models` that requires other proxies.
+fn register_fake_proxy_requiring<F>(
+    server: &AiGatewayServer,
+    name: &str,
+    models: Vec<String>,
+    requires: Vec<String>,
     mut respond: F,
 ) where
     F: FnMut(&Event) -> Value + Send + 'static,
@@ -145,6 +159,7 @@ fn register_fake_proxy_with_models<F>(
     let config = Arc::new(LlmProxy {
         name: name.to_string(),
         models,
+        requires,
         protocol: Protocol::Openai,
         credentials_path: None,
         auth: None,
@@ -719,6 +734,44 @@ async fn list_models_returns_registered_proxies_in_openai_shape() {
 }
 
 #[tokio::test]
+async fn a_proxy_shows_only_while_the_proxies_it_requires_are_registered() {
+    let (server, chat_url, _handle) = boot_server().await;
+    register_fake_proxy_requiring(
+        &server,
+        "agent",
+        Vec::new(),
+        vec!["default".to_string()],
+        |_| json!({"text": "hi"}),
+    );
+    let models_url = chat_url.replace("/chat/completions", "/models");
+    let ids = || async {
+        let body: Value = reqwest::get(&models_url)
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        body["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+    };
+    assert!(!ids().await.contains(&"agent".to_string()));
+    let call = reqwest::Client::new()
+        .post(&chat_url)
+        .json(&json!({"model": "agent", "messages": [{"role": "user", "content": "hi"}]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(call.status(), 404);
+
+    register_fake_proxy(&server, "default", |_| json!({"text": "hi"}));
+    assert!(ids().await.contains(&"agent".to_string()));
+}
+
+#[tokio::test]
 async fn unknown_proxy_returns_404() {
     let (_server, url, _handle) = boot_server().await;
 
@@ -838,6 +891,7 @@ fn register_proxy_with_bearer_token(
     let config = Arc::new(LlmProxy {
         name: name.to_string(),
         models: Vec::new(),
+        requires: Vec::new(),
         protocol,
         credentials_path: None,
         auth: None,
@@ -1092,6 +1146,7 @@ async fn session_of_bearer_request(
             config: Arc::new(LlmProxy {
                 name: "gw".to_string(),
                 models: Vec::new(),
+                requires: Vec::new(),
                 protocol: Protocol::Openai,
                 credentials_path: None,
                 auth,
@@ -1187,6 +1242,7 @@ async fn a_request_not_taken_within_ack_timeout_gets_503() {
             config: Arc::new(LlmProxy {
                 name: "gw".to_string(),
                 models: Vec::new(),
+                requires: Vec::new(),
                 protocol: Protocol::Openai,
                 credentials_path: None,
                 auth: None,

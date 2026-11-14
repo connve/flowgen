@@ -201,6 +201,24 @@ event.data.notification = body;
 event.data
 ```
 
+### Parsing
+
+| Function | Description |
+|---|---|
+| `parse_json(text)` | Parse JSON, with an object or an array at the root. Whole numbers become `i64`, others `f64`, and `null` becomes `()`. |
+| `parse_yaml(text)` | Parse YAML into the same values as `parse_json`. |
+
+### Strings
+
+String methods such as `replace`, `trim`, `make_upper` and `make_lower` change the string in place and return nothing, so assign the string first and call the method on it; `to_upper` and `to_lower` return a new string instead:
+
+```rhai
+let name = event.data.name;
+name.replace("-", " ");
+name.trim();
+#{ name: name }
+```
+
 ## Return values
 
 The script's return value determines what the next task sees:

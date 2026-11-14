@@ -11,6 +11,7 @@
 
 use flowgen_core::event::{EventBuilder, EventData};
 use flowgen_kv_store::store::{KvStore, Operation, ProcessorBuilder};
+use flowgen_kv_store::watch::{KvWatch, WatcherBuilder};
 use std::sync::Arc;
 use std::time::Duration;
 use testcontainers::core::{IntoContainerPort, WaitFor};
@@ -360,3 +361,84 @@ async fn a_ttl_on_a_bucket_without_per_key_ttl_fails_at_start() {
         Err(flowgen_kv_store::store::Error::TtlNotAllowed { bucket }) if bucket == "kv_no_ttl"
     ));
 }
+
+/// A `kv_watch` on the keys under `records.` of a bucket, for the shared source tests.
+struct WatchSource {
+    _server: ContainerAsync<GenericImage>,
+    store: async_nats::jetstream::kv::Store,
+    config: Arc<KvWatch>,
+}
+
+impl WatchSource {
+    const BUCKET: &str = "watched";
+
+    async fn start() -> Self {
+        let (server, url) = start_nats().await;
+        let client = async_nats::connect(&url).await.expect("connect to nats");
+        let store = async_nats::jetstream::new(client)
+            .create_key_value(async_nats::jetstream::kv::Config {
+                bucket: Self::BUCKET.to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect("create bucket");
+        let config = Arc::new(KvWatch {
+            name: "watch".to_string(),
+            url,
+            bucket: Self::BUCKET.to_string(),
+            key_prefix: Some("records.".to_string()),
+            ..Default::default()
+        });
+        Self {
+            _server: server,
+            store,
+            config,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl flowgen_core::conformance::Source for WatchSource {
+    async fn produce(&self, payload: &str) {
+        self.store
+            .put(format!("records.{payload}"), payload.to_string().into())
+            .await
+            .expect("put record");
+    }
+
+    async fn start(
+        &self,
+        context: Arc<flowgen_core::task::context::TaskContext>,
+        tx: mpsc::Sender<flowgen_core::event::Event>,
+    ) -> tokio::task::JoinHandle<()> {
+        let watcher = WatcherBuilder::new()
+            .config(Arc::clone(&self.config))
+            .sender(tx)
+            .task_type("kv_watch")
+            .task_context(context)
+            .build()
+            .await
+            .expect("build watcher");
+        tokio::spawn(async move {
+            use flowgen_core::task::runner::Runner;
+            let _ = watcher.run().await;
+        })
+    }
+
+    fn payload(&self, event: &flowgen_core::event::Event) -> String {
+        match event.data_as_json() {
+            Ok(serde_json::Value::String(payload)) => payload,
+            other => panic!("A text value, got {other:?}"),
+        }
+    }
+
+    fn idle(&self) -> Duration {
+        Duration::from_secs(8)
+    }
+
+    fn ack_deadline(&self) -> Duration {
+        Duration::from_secs(2)
+    }
+}
+
+flowgen_core::source_conformance!(WatchSource::start().await);

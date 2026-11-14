@@ -9,7 +9,7 @@ Run LLM completions from multiple providers within a flow. Supports custom OpenA
     name: analyze
     provider: google
     model: gemini-2.5-flash-lite
-    credentials_path: /path/to/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/google.json"
     prompt: "Analyze this data: {{event.data}}"
 ```
 
@@ -84,7 +84,7 @@ Point at any service speaking the OpenAI chat-completions wire format — an int
     provider: custom
     model: my-internal-model
     endpoint: "https://llm-gateway.internal.example.com/v1"
-    credentials_path: /etc/flowgen/credentials/internal_llm.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/internal-llm.json"
     prompt: "{{event.data.question}}"
 ```
 
@@ -108,7 +108,7 @@ For endpoints without auth, omit `credentials_path`:
     name: support_bot
     provider: openai
     model: gpt-4-turbo
-    credentials_path: /etc/flowgen/credentials/openai.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/openai.json"
     system_prompt: "Answer using the provided context."
     prompt: "{{event.data.question}}"
     static_context:
@@ -127,7 +127,7 @@ The model answers JSON matching `output_schema`.
     name: describe_image
     provider: openai
     model: gpt-4.1
-    credentials_path: /etc/flowgen/credentials/openai.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/openai.json"
     prompt: "Describe the image."
     images: ["{{event.data.image_url}}"]
     output_schema:
@@ -151,7 +151,7 @@ The agent connects to MCP servers, discovers tools, and can call them during com
     name: agent
     provider: anthropic
     model: claude-3-5-sonnet-20241022
-    credentials_path: /etc/flowgen/credentials/anthropic.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/anthropic.json"
     prompt: "{{event.data.task}}"
     max_turns: 5
     mcp_servers:
@@ -164,7 +164,7 @@ Optional per-server auth uses the same credentials JSON format as `http_request`
 ```yaml
     mcp_servers:
       - url: "https://tools.example.com/mcp"
-        credentials_path: /etc/flowgen/credentials/mcp_tools.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/mcp-tools.json"
 ```
 
 For MCP servers that require OAuth 2.0, use the `oauth2_client_credentials` format in the credentials file — flowgen fetches and refreshes the access token automatically:

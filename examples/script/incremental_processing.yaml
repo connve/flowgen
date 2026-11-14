@@ -19,7 +19,7 @@ flow:
         name: list_files
         operation: list
         path: "gs://my-data-bucket/input"
-        credentials_path: "/etc/secrets/gcp-credentials.json"
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/gcp.json"
 
     # Cache key is name+md5 so a re-uploaded file with different content
     # is reprocessed, but an identical re-upload is skipped.
@@ -52,7 +52,7 @@ flow:
         project_id: my-project
         dataset_id: my_dataset
         table_id: my_table
-        credentials_path: "/etc/secrets/gcp-credentials.json"
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/gcp.json"
 
     - script:
         name: log_completion

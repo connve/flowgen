@@ -23,6 +23,8 @@
 	import Icon from '@iconify/svelte';
 	import { m } from '$lib/paraglide/messages.js';
 	import { pageTitle } from '$lib/pageTitle';
+	import { deploymentsStream } from '$lib/urls';
+	import { visibleEventSource } from '$lib/visibleEventSource';
 	import { connectorByName } from '$lib/connectors';
 	import type {
 		AuthoringTarget,
@@ -58,12 +60,42 @@
 	let nowTick = $state(Date.now());
 
 	let selectedTags = $state<Set<string>>(new Set());
-	let statusFilter = $state<Record<FlowStatus, boolean>>({
-		idle: true,
-		ok: true,
-		warn: true,
-		error: true,
-	});
+	// `rest` outlines a chip while nothing is picked; `picked` fills a picked one.
+	const STATUS_CHIPS: { status: FlowStatus; rest: string; picked: string; label: () => string }[] =
+		[
+			{
+				status: 'idle',
+				rest: 'border-base-300',
+				picked: 'chip-neutral',
+				label: m.flows_status_idle
+			},
+			{
+				status: 'ok',
+				rest: 'border-(--color-chip-success)/40 text-(--color-chip-success)',
+				picked: 'chip-success',
+				label: m.flows_status_ok
+			},
+			{
+				status: 'warn',
+				rest: 'border-(--color-chip-warning)/40 text-(--color-chip-warning)',
+				picked: 'chip-warn',
+				label: m.flows_status_warn
+			},
+			{
+				status: 'error',
+				rest: 'border-(--color-chip-error)/40 text-(--color-chip-error)',
+				picked: 'chip-error',
+				label: m.flows_status_error
+			}
+		];
+
+	function chipClass(chip: (typeof STATUS_CHIPS)[number]): string {
+		if (pickedStatuses.size === 0) return chip.rest;
+		return pickedStatuses.has(chip.status) ? chip.picked : 'border-base-300 chip-inactive';
+	}
+
+	// The statuses picked; none picked shows every flow.
+	let pickedStatuses = new SvelteSet<FlowStatus>();
 
 	let statusCounts = $derived.by(() => {
 		const c: Record<FlowStatus, number> = { idle: 0, ok: 0, warn: 0, error: 0 };
@@ -72,7 +104,12 @@
 	});
 
 	function toggleStatus(s: FlowStatus) {
-		statusFilter = { ...statusFilter, [s]: !statusFilter[s] };
+		if (pickedStatuses.has(s)) pickedStatuses.delete(s);
+		else pickedStatuses.add(s);
+	}
+
+	function shown(s: FlowStatus): boolean {
+		return pickedStatuses.size === 0 || pickedStatuses.has(s);
 	}
 
 	// Sorted so the chip row is stable across refreshes.
@@ -135,6 +172,12 @@
 		}),
 	);
 
+	// Loads the list again each time a flow starts or stops, such as a deployed change.
+	function reloadFlows() {
+		listFlows().then(({ data }) => (flows = data), () => undefined);
+		pendingChanges().then((changes) => (pending = changes));
+	}
+
 	onMount(() => {
 		const pane = localStorage.getItem('flowgen-folders-pane');
 		if (pane !== null) foldersPaneOpen = pane === '1';
@@ -164,9 +207,13 @@
 			});
 
 		tickerId = setInterval(() => (nowTick = Date.now()), 1000);
+		const closeDeployments = visibleEventSource(deploymentsStream(), (source) =>
+			source.addEventListener('deployment', reloadFlows)
+		);
 
 		return () => {
 			if (tickerId !== null) clearInterval(tickerId);
+			closeDeployments();
 			releaseFlowSubscription();
 		};
 	});
@@ -308,7 +355,7 @@
 	let filtered = $derived.by(() => {
 		const requiredTags = selectedTags;
 		const matched = flowsView.filter((flow) => {
-			if (!statusFilter[flow.status]) return false;
+			if (!shown(flow.status)) return false;
 			for (const t of requiredTags) if (!flow.tags.includes(t)) return false;
 			return true;
 		});
@@ -413,50 +460,26 @@
 	/>
 	<div class="flex flex-wrap items-center gap-2">
 		<div class="flex items-center gap-1">
-			<button
-				type="button"
-				class="chip {statusFilter.idle ? 'chip-neutral' : 'chip-inactive'}"
-				aria-pressed={statusFilter.idle}
-				onclick={() => toggleStatus('idle')}
-			>
-				<span>{m.flows_status_idle()}</span>
-				{#if statusFilter.idle}
-					<span class="tabular-nums opacity-60">{statusCounts.idle}</span>
-				{/if}
-			</button>
-			<button
-				type="button"
-				class="chip {statusFilter.ok ? 'chip-success' : 'chip-inactive'}"
-				aria-pressed={statusFilter.ok}
-				onclick={() => toggleStatus('ok')}
-			>
-				<span>{m.flows_status_ok()}</span>
-				{#if statusFilter.ok}
-					<span class="tabular-nums opacity-60">{statusCounts.ok}</span>
-				{/if}
-			</button>
-			<button
-				type="button"
-				class="chip {statusFilter.warn ? 'chip-warn' : 'chip-inactive'}"
-				aria-pressed={statusFilter.warn}
-				onclick={() => toggleStatus('warn')}
-			>
-				<span>{m.flows_status_warn()}</span>
-				{#if statusFilter.warn}
-					<span class="tabular-nums opacity-60">{statusCounts.warn}</span>
-				{/if}
-			</button>
-			<button
-				type="button"
-				class="chip {statusFilter.error ? 'chip-error' : 'chip-inactive'}"
-				aria-pressed={statusFilter.error}
-				onclick={() => toggleStatus('error')}
-			>
-				<span>{m.flows_status_error()}</span>
-				{#if statusFilter.error}
-					<span class="tabular-nums opacity-60">{statusCounts.error}</span>
-				{/if}
-			</button>
+			{#each STATUS_CHIPS as chip (chip.status)}
+				<button
+					type="button"
+					class="chip {chipClass(chip)}"
+					aria-pressed={pickedStatuses.has(chip.status)}
+					onclick={() => toggleStatus(chip.status)}
+				>
+					<span>{chip.label()}</span>
+					<span class="tabular-nums opacity-60">{statusCounts[chip.status]}</span>
+				</button>
+			{/each}
+			{#if pickedStatuses.size > 0}
+				<button
+					type="button"
+					class="btn btn-ghost btn-xs font-normal text-base-content/60"
+					onclick={() => pickedStatuses.clear()}
+				>
+					{m.flows_tag_filters_clear()}
+				</button>
+			{/if}
 			{#if connection}
 				{@const connector = connectorByName(connection.connector)}
 				<button

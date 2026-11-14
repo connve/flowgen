@@ -9,6 +9,7 @@ import {
 	getWorkspaceFile,
 	isStatus,
 	listChanges,
+	proposeChange,
 	type AuthoringTarget,
 	type Change,
 	type ChangeSummary,
@@ -39,6 +40,12 @@ export async function authoringTargets(fetcher: typeof fetch = fetch): Promise<A
 
 export async function authoringEnabled(fetcher: typeof fetch = fetch): Promise<boolean> {
 	return (await loadConfigInfo(fetcher))?.authoring ?? false;
+}
+
+// Whether credentials can be added: `credentials` is set and changes can be proposed.
+export async function credentialsEnabled(fetcher: typeof fetch = fetch): Promise<boolean> {
+	const info = await loadConfigInfo(fetcher);
+	return (info?.credentials ?? false) && (info?.authoring ?? false);
 }
 
 // Null when the config did not load.
@@ -91,6 +98,20 @@ export async function addToDraft(
 		await editChange({ path: { id }, body: { title } }).catch(() => undefined);
 	}
 	return after;
+}
+
+// Adds `file` to the change `draftId`, else to the user's pending change in its
+// target, or proposes a new change titled `title` when there is none or it was
+// decided meanwhile.
+export async function proposeFile(
+	file: { path: string; content: string | null },
+	targets: AuthoringTarget[],
+	{ title = generatedTitle([file]), draftId = null }: { title?: string; draftId?: string | null } = {}
+): Promise<Change> {
+	const draft = draftId ?? draftChange(await pendingChanges(), targetOf(targets, file.path)?.name)?.id;
+	const added = draft ? await addToDraft(draft, [file]) : null;
+	if (added !== null) return added;
+	return (await proposeChange({ body: { title, files: [file] } })).data;
 }
 
 // A change with its files, or null when it cannot be loaded.

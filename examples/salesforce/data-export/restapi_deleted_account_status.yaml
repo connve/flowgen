@@ -36,7 +36,7 @@ flow:
     - salesforce_restapi_sobject:
         name: get_deleted_accounts
         operation: get_deleted
-        credentials_path: /etc/sfdc/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
         sobject_type: Account
         start: "{{event.data.start_iso}}"
         end: "{{event.data.end_iso}}"
@@ -60,7 +60,7 @@ flow:
 
     - gcp_bigquery_storage_write:
         name: write_deletion_markers
-        credentials_path: /etc/gcp/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/gcp.json"
         project_id: "{{env.GCP_PROJECT_ID}}"
         dataset_id: salesforce
         table_id: account

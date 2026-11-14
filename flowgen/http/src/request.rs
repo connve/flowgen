@@ -14,10 +14,7 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
-use tokio::{
-    fs,
-    sync::mpsc::{Receiver, Sender},
-};
+use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::error;
 
 /// `http_request` task config; unknown fields are rejected by the transparent inner `Processor`.
@@ -74,11 +71,10 @@ pub enum Error {
         #[source]
         source: flowgen_core::event::Error,
     },
-    #[error("Error reading credentials file at {path}: {source}")]
+    #[error("Error reading credentials: {source}")]
     ReadHttpCredentials {
-        path: std::path::PathBuf,
         #[source]
-        source: std::io::Error,
+        source: flowgen_core::credentials::Error,
     },
     #[error("JSON error: {source}")]
     SerdeJson {
@@ -414,12 +410,9 @@ impl flowgen_core::task::runner::Runner for Processor {
 
         let credentials = match &self.config.credentials_path {
             Some(path) => {
-                let content = fs::read_to_string(path).await.map_err(|source| {
-                    Error::ReadHttpCredentials {
-                        path: path.clone(),
-                        source,
-                    }
-                })?;
+                let content = flowgen_core::credentials::read_async(path)
+                    .await
+                    .map_err(|source| Error::ReadHttpCredentials { source })?;
                 let creds: HttpCredentials =
                     serde_json::from_str(&content).map_err(|source| Error::SerdeJson { source })?;
                 Some(creds)
@@ -640,11 +633,12 @@ mod tests {
 
     #[test]
     fn test_error_read_credentials_structure() {
-        use std::path::PathBuf;
         let io_error = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
         let error = Error::ReadHttpCredentials {
-            path: PathBuf::from("/test/credentials.json"),
-            source: io_error,
+            source: flowgen_core::credentials::Error::ReadFile {
+                path: "/test/credentials.json".to_string(),
+                source: io_error,
+            },
         };
         assert!(matches!(error, Error::ReadHttpCredentials { .. }));
     }

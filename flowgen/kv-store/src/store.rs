@@ -22,7 +22,7 @@ const NATS_SCHEMES: [&str; 4] = ["nats://", "tls://", "ws://", "wss://"];
 /// The most values a NATS bucket keeps per key.
 const MAX_HISTORY: i64 = 64;
 
-fn default_history() -> i64 {
+pub(crate) fn default_history() -> i64 {
     1
 }
 
@@ -31,7 +31,7 @@ const TEMPLATE: &str = "{{";
 
 /// Whether `key` is a key every store accepts: letters, digits and `-/_=.`,
 /// not starting or ending with `.`.
-fn is_valid_key(key: &str) -> bool {
+pub(crate) fn is_valid_key(key: &str) -> bool {
     !key.is_empty()
         && !key.starts_with('.')
         && !key.ends_with('.')
@@ -41,7 +41,7 @@ fn is_valid_key(key: &str) -> bool {
 }
 
 /// `value` unless it holds a template, which can only be checked rendered.
-fn literal(value: &str) -> Option<&str> {
+pub(crate) fn literal(value: &str) -> Option<&str> {
     match value.contains(TEMPLATE) {
         true => None,
         false => Some(value),
@@ -186,24 +186,53 @@ pub enum Backend<'a> {
     Nats(&'a str),
 }
 
+/// The store `url` names; only NATS takes credentials.
+pub fn backend<'a>(
+    url: &'a str,
+    credentials_path: Option<&Path>,
+) -> Result<Backend<'a>, ConfigError> {
+    match url.strip_prefix(REDB_SCHEME) {
+        Some(_) if credentials_path.is_some() => Err(ConfigError::RedbCredentials),
+        Some("") => Err(ConfigError::MissingPath),
+        Some(path) => Ok(Backend::Redb(Path::new(path))),
+        None => match literal(url) {
+            Some(url)
+                if url.contains("://")
+                    && !NATS_SCHEMES.iter().any(|scheme| url.starts_with(scheme)) =>
+            {
+                Err(ConfigError::UnsupportedScheme {
+                    url: url.to_string(),
+                })
+            }
+            _ => Ok(Backend::Nats(url)),
+        },
+    }
+}
+
+/// A bucket a task opens.
+pub(crate) struct Bucket<'a> {
+    pub url: &'a str,
+    pub credentials_path: &'a Option<PathBuf>,
+    pub name: &'a str,
+    /// Values a NATS bucket keeps per key, set when the task creates it.
+    pub history: i64,
+    /// Whether the task writes values with a TTL, which the NATS bucket must allow.
+    pub ttl: bool,
+}
+
 impl KvStore {
     /// The store `url` names; only NATS takes credentials.
     pub fn backend(&self) -> Result<Backend<'_>, ConfigError> {
-        match self.url.strip_prefix(REDB_SCHEME) {
-            Some(_) if self.credentials_path.is_some() => Err(ConfigError::RedbCredentials),
-            Some("") => Err(ConfigError::MissingPath),
-            Some(path) => Ok(Backend::Redb(Path::new(path))),
-            None => match literal(&self.url) {
-                Some(url)
-                    if url.contains("://")
-                        && !NATS_SCHEMES.iter().any(|scheme| url.starts_with(scheme)) =>
-                {
-                    Err(ConfigError::UnsupportedScheme {
-                        url: url.to_string(),
-                    })
-                }
-                _ => Ok(Backend::Nats(&self.url)),
-            },
+        backend(&self.url, self.credentials_path.as_deref())
+    }
+
+    fn bucket(&self) -> Bucket<'_> {
+        Bucket {
+            url: &self.url,
+            credentials_path: &self.credentials_path,
+            name: &self.bucket,
+            history: self.history,
+            ttl: self.ttl.is_some(),
         }
     }
 
@@ -265,6 +294,10 @@ pub enum ConfigError {
     UnsafePrunePrefix { prefix: String },
     #[error("history must be 1 to 64, got {history}")]
     InvalidHistory { history: i64 },
+    #[error("A watch needs either key or key_prefix")]
+    KeyOrPrefix,
+    #[error("'{key}' is not a key or a key_prefix ending in '.' or '/' under a folder, such as 'releases.latest' or 'releases.'")]
+    NotInFolder { key: String },
 }
 
 /// Result of a get.
@@ -669,16 +702,16 @@ impl EventHandler {
     }
 }
 
-/// Opens the bucket of the store `config` names; tasks on the same NATS
-/// server and credentials share one connection through `clients`.
-async fn open(
-    config: &KvStore,
+/// Opens `bucket`; tasks on the same NATS server and credentials share one
+/// connection through `clients`.
+pub(crate) async fn open(
+    config: Bucket<'_>,
     clients: &flowgen_core::client_registry::ClientRegistry,
     task_type: &'static str,
 ) -> Result<Arc<dyn Cache>, Error> {
-    match config.backend()? {
+    match backend(config.url, config.credentials_path.as_deref())? {
         Backend::Redb(path) => {
-            let (path, bucket) = (path.to_path_buf(), config.bucket.clone());
+            let (path, bucket) = (path.to_path_buf(), config.name.to_string());
             let opened = tokio::task::spawn_blocking(move || RedbCache::open(&path, &bucket))
                 .await
                 .map_err(|source| CacheError::OpenFailed(Box::new(source)))??;
@@ -726,12 +759,12 @@ async fn open(
             let cache = builder
                 .build()
                 .map_err(|source| Error::Nats { source })?
-                .init_on((*jetstream).clone(), &config.bucket)
+                .init_on((*jetstream).clone(), config.name)
                 .await
                 .map_err(|source| Error::Nats { source })?;
-            if config.ttl.is_some() && !cache.allows_ttl() {
+            if config.ttl && !cache.allows_ttl() {
                 return Err(Error::TtlNotAllowed {
-                    bucket: config.bucket.clone(),
+                    bucket: config.name.to_string(),
                 });
             }
             Ok(Arc::new(cache))
@@ -762,7 +795,12 @@ impl flowgen_core::task::runner::Runner for Processor {
             .map_err(|source| Error::ConfigRender { source })?;
         Ok(EventHandler {
             config: Arc::clone(&self.config),
-            store: open(&config, &self.task_context.client_registry, self.task_type).await?,
+            store: open(
+                config.bucket(),
+                &self.task_context.client_registry,
+                self.task_type,
+            )
+            .await?,
             tx: self.tx.clone(),
             task_id: self.task_id,
             task_type: self.task_type,
@@ -910,7 +948,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let task_context = context();
         let handler = EventHandler {
-            store: open(&config, &task_context.client_registry, "kv_store").await?,
+            store: open(config.bucket(), &task_context.client_registry, "kv_store").await?,
             config: Arc::new(config),
             tx: Some(tx),
             task_id: 0,

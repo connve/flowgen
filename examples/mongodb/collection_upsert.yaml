@@ -11,7 +11,7 @@ flow:
   tasks:
     - nats_jetstream_subscribe:
         name: consume_events
-        credentials_path: /etc/nats/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/nats.json"
         url: "127.0.0.1:4222"
         subject: pubsub.data.mongo.upsert
         stream:
@@ -29,7 +29,7 @@ flow:
     - mongodb_collection:
         name: upsert_customers
         operation: upsert
-        credentials_path: /etc/mongodb/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/mongodb.json"
         db_name: sales
         collection_name: customers
         filter:
@@ -37,7 +37,7 @@ flow:
 
     - nats_jetstream_publish:
         name: publish_upsert_results
-        credentials_path: /etc/nats/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/nats.json"
         subject: pubsub.data.mongo.upserts
         stream:
           create_or_update: true

@@ -155,7 +155,8 @@ export const navigation: NavSection[] = [
 		icon: '/icons/kv.svg',
 		items: [
 			{ title: 'Overview', href: '/kv-store' },
-			{ title: 'KV Store', href: '/kv-store/kv-store' }
+			{ title: 'KV Store', href: '/kv-store/kv-store' },
+			{ title: 'KV Watch', href: '/kv-store/kv-watch' }
 		]
 	},
 	{

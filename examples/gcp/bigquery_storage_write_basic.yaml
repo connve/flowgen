@@ -20,7 +20,7 @@ flow:
     # Task-level retry covers transient BigQuery API failures.
     - gcp_bigquery_storage_write:
         name: stream_to_bigquery
-        credentials_path: /etc/gcp/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/gcp.json"
         project_id: my-project-id
         dataset_id: analytics
         table_id: events

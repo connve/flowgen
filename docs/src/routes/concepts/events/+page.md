@@ -7,8 +7,8 @@ Events are the data records that flow between tasks. Each task receives events, 
 | Field | Type | Description |
 |---|---|---|
 | `data` | EventData | Payload — JSON, Arrow RecordBatch, Avro, or raw bytes. |
-| `subject` | string | Set by the task that produced the event: the task name for most tasks, the source's own subject for a source (e.g., NATS subject, Kafka topic, MongoDB collection). |
-| `id` | string | Optional identifier set by the source (e.g., Salesforce record ID, NATS message ID). |
+| `subject` | string | Set by the task that produced the event: the task name for most tasks, the source's own subject for a source (e.g., a NATS subject, a Kafka topic or a table). |
+| `id` | string | Optional identifier set by the source (e.g., a record ID or a NATS message ID). |
 | `timestamp` | int | Creation time in microseconds since Unix epoch; a source can set the time of the record it read (e.g., Kafka record time). |
 | `task_id` | int | Task index in the flow. |
 | `task_type` | string | Task type (e.g., `script`, `http_request`). |
@@ -18,8 +18,8 @@ Events are the data records that flow between tasks. Each task receives events, 
 ## Data formats
 
 - **JSON** — default for REST APIs, webhooks, scripts. Accessed as `event.data.field` in templates and scripts.
-- **Arrow RecordBatch** — columnar format for BigQuery, Parquet, CSV. Stays in Arrow through the flow without serialization overhead. Where a task, script or template reads it as JSON, it is an array of objects, one per row, with every column as a key, `null` for a null value, and binary values in base64.
-- **Avro** — binary format for Salesforce Pub/Sub and gRPC streams.
+- **Arrow RecordBatch** — columnar format for query results, Parquet, CSV. Stays in Arrow through the flow without serialization overhead. Where a task, script or template reads it as JSON, it is an array of objects, one per row, with every column as a key, `null` for a null value, and binary values in base64.
+- **Avro** — binary format of gRPC and pub/sub streams.
 - **Bytes** — opaque binary payload for content that cannot be safely coerced to UTF-8 (archive contents, binary OCI layers, `http_request` responses with `response_type: bytes`). Handlebars templates against `event.data` see a base64-encoded string so they do not crash on binary; downstream tasks that need the raw bytes pattern-match `EventData::Bytes` directly. Only tasks that opt in accept this variant — text- or JSON-shaped processors reject it with an `UnsupportedEventData` error.
 
 ## Metadata
@@ -34,7 +34,7 @@ Use meta for:
 Set meta in scripts:
 
 ```rhai
-event.meta.source = "salesforce";
+event.meta.source = "crm";
 event.meta.batch_id = uuid();
 event
 ```

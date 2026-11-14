@@ -18,7 +18,7 @@ flow:
 
     - salesforce_restapi_search:
         name: sosl_search
-        credentials_path: /etc/sfdc/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
         # Trailing `*` enables prefix matching so `acme` finds `acme-corp` etc.
         # Drop the `*` for exact-token phrase matching. See:
         # https://connve.com/docs/flowgen/salesforce/rest#prefix-matching

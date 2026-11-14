@@ -189,6 +189,7 @@ async fn list_models(
     let data = state
         .table
         .iter()
+        .filter(|e| missing_requirement(&state, &e.value().config.requires).is_none())
         .flat_map(|e| {
             let proxy = e.key().clone();
             let reg = e.value();
@@ -375,6 +376,17 @@ struct DispatchRequest<'a> {
     session: Option<Arc<flowgen_core::auth::UserSession>>,
 }
 
+/// The first proxy in `requires` that no flow registers on this gateway.
+fn missing_requirement(
+    state: &DispatchState<LlmProxyRegistration, AiGatewayExtras>,
+    requires: &[String],
+) -> Option<String> {
+    requires
+        .iter()
+        .find(|name| !state.table.contains_key(name.as_str()))
+        .cloned()
+}
+
 /// Look up the registration by name, enforce the URL/protocol guard,
 /// run endpoint- and user-level auth, and hand back a `DispatchContext`
 /// on success. Returns a pre-formatted `Response` on failure so the
@@ -397,6 +409,16 @@ async fn resolve_registration(
     if registration.protocol != expected_protocol {
         return Err(Box::new(
             DispatchError::WrongProtocolForUrl { name: proxy_name }.into_response(),
+        ));
+    }
+
+    if let Some(missing) = missing_requirement(state, &registration.config.requires) {
+        return Err(Box::new(
+            DispatchError::MissingRequirement {
+                name: proxy_name,
+                missing,
+            }
+            .into_response(),
         ));
     }
 
@@ -1045,6 +1067,8 @@ enum DispatchError {
     UnknownProxy { name: String },
     #[error("LLM proxy '{name}' does not speak the protocol expected at this URL")]
     WrongProtocolForUrl { name: String },
+    #[error("LLM proxy '{name}' needs the model '{missing}', which no flow serves")]
+    MissingRequirement { name: String, missing: String },
     #[error("No authorization header provided")]
     NoCredentials,
     #[error("Invalid authorization credentials")]
@@ -1102,9 +1126,9 @@ impl DispatchError {
             DispatchError::MissingModelField
             | DispatchError::MissingProxyPrefix
             | DispatchError::ModelChoiceRequired { .. } => "invalid_request_error",
-            DispatchError::UnknownProxy { .. } | DispatchError::WrongProtocolForUrl { .. } => {
-                "not_found_error"
-            }
+            DispatchError::UnknownProxy { .. }
+            | DispatchError::WrongProtocolForUrl { .. }
+            | DispatchError::MissingRequirement { .. } => "not_found_error",
             DispatchError::NoCredentials
             | DispatchError::InvalidCredentials
             | DispatchError::MalformedCredentials
@@ -1126,9 +1150,9 @@ impl IntoResponse for DispatchError {
             DispatchError::MissingModelField
             | DispatchError::MissingProxyPrefix
             | DispatchError::ModelChoiceRequired { .. } => StatusCode::BAD_REQUEST,
-            DispatchError::UnknownProxy { .. } | DispatchError::WrongProtocolForUrl { .. } => {
-                StatusCode::NOT_FOUND
-            }
+            DispatchError::UnknownProxy { .. }
+            | DispatchError::WrongProtocolForUrl { .. }
+            | DispatchError::MissingRequirement { .. } => StatusCode::NOT_FOUND,
             DispatchError::NoCredentials
             | DispatchError::InvalidCredentials
             | DispatchError::MalformedCredentials

@@ -24,7 +24,7 @@ flow:
 
 ## Flow identity
 
-A flow's identity is its file path relative to `flows.path`, with the extension stripped. For example, a file at `flows/demo/salesforce/bulkapi_account_writer.yaml` loaded from `flows.path: flows/` has identity `demo/salesforce/bulkapi_account_writer`.
+A flow's identity is its file path relative to `flows.path`, with the extension stripped. For example, a file at `flows/demo/orders/sync_orders.yaml` loaded from `flows.path: flows/` has identity `demo/orders/sync_orders`.
 
 Identity is used for:
 
@@ -34,7 +34,7 @@ Identity is used for:
 - The tracing `flow=` field on every log line and activity event.
 - Folder grouping in the web UI (segments before the last `/`).
 
-Because identity is derived from the path, two flows with the same basename can live in different folders without colliding — `demo/salesforce/reader.yaml` and `demo/hubspot/reader.yaml` are distinct identities.
+Because identity is derived from the path, two flows with the same basename can live in different folders without colliding — `demo/orders/reader.yaml` and `demo/invoices/reader.yaml` are distinct identities.
 
 ## Fields
 
@@ -134,6 +134,8 @@ flow:
 ```
 
 `combined` receives events from both `tick_fast` and `tick_slow`, in arrival order. Each event is processed independently — there is no waiting or merging across branches.
+
+Sources (schedules, subscribers, endpoints) start events and take none, so they never depend on another task: `tick_slow` has no parent even though it follows `tick_fast`, and a source with `depends_on` fails to load.
 
 ### Mixed shapes
 

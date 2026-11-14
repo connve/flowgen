@@ -14,7 +14,7 @@ Both `oras push` artifacts and Docker container images are supported. `oras`-sty
 - oci_sync:
     name: pull_configs
     artifact: "{{env.OCI_ARTIFACT}}"
-    credentials_path: /etc/registry/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/registry.json"
 ```
 
 To load flowgen's own flows and resources from a registry, see [Loading flows from an OCI registry](/docs/flowgen/oci/guides/loading-flows).

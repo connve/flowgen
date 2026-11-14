@@ -8,7 +8,7 @@ Reads Klaviyo lists, for example to find a list's ID by its name before creating
 - klaviyo_lists:
     name: find_list
     operation: list
-    credentials_path: /etc/klaviyo/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/klaviyo.json"
     filter: "equals(name,'Newsletter')"
 ```
 

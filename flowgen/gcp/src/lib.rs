@@ -9,7 +9,7 @@ use flowgen_core::service::{
     DEFAULT_POOL_IDLE_TIMEOUT_SECS,
 };
 use flowgen_core::task::context::TaskContext;
-use flowgen_core::task::meta::{read_credentials, Connection, Connector, Icon};
+use flowgen_core::task::meta::{read_credentials, Connection, Connector, CredentialsForm, Icon};
 use flowgen_core::task::runner::Runner;
 use flowgen_core::task::{Task, TaskError, TaskIo, TaskMeta};
 use gcloud_auth::credentials::CredentialsFile;
@@ -17,6 +17,16 @@ use google_cloud_bigquery::client::{ChannelConfig, ClientConfig, StreamingWriteC
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Why Google Cloud credentials could not be resolved.
+#[derive(thiserror::Error, Debug)]
+#[non_exhaustive]
+pub enum CredentialsError {
+    #[error(transparent)]
+    Read(#[from] flowgen_core::credentials::Error),
+    #[error(transparent)]
+    Auth(#[from] gcloud_auth::error::Error),
+}
 
 /// Resolves Google Cloud credentials from an explicit file path or Application Default Credentials.
 ///
@@ -28,10 +38,13 @@ use std::time::Duration;
 /// `gcloud auth application-default login`).
 pub async fn resolve_credentials(
     credentials_path: &Option<PathBuf>,
-) -> Result<CredentialsFile, gcloud_auth::error::Error> {
+) -> Result<CredentialsFile, CredentialsError> {
     match credentials_path {
-        Some(path) => CredentialsFile::new_from_file(path.to_string_lossy().to_string()).await,
-        None => CredentialsFile::new().await,
+        Some(path) => {
+            let content = flowgen_core::credentials::read_async(path).await?;
+            Ok(CredentialsFile::new_from_str(&content).await?)
+        }
+        None => Ok(CredentialsFile::new().await?),
     }
 }
 
@@ -110,6 +123,10 @@ pub const CONNECTOR: Connector = Connector {
     label: "Google Cloud",
     icon: Icon::Svg(include_str!("../icons/gcp.svg")),
     describe_credentials: Some(describe_credentials),
+    credentials: &[CredentialsForm {
+        label: "Service account file",
+        fields: &[],
+    }],
 };
 
 /// The service account the credentials file belongs to.

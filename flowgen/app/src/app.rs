@@ -254,11 +254,10 @@ pub enum Error {
         source: flowgen_core::auth::AuthError,
     },
     /// Failed to read MCP credentials file.
-    #[error("Failed to read MCP credentials from {path}: {source}")]
+    #[error("Failed to read MCP credentials: {source}")]
     McpCredentialsRead {
-        path: std::path::PathBuf,
         #[source]
-        source: std::io::Error,
+        source: flowgen_core::credentials::Error,
     },
     /// Failed to parse MCP credentials file.
     #[error("Failed to parse MCP credentials from {path}: {source}")]
@@ -869,32 +868,23 @@ impl App {
 
         let mcp_server: Option<Arc<flowgen_mcp::server::McpServer>> = if mcp_enabled {
             let mcp_config = app_config.mcp_server.as_ref();
-            // Load MCP credentials if configured.
-            let credentials = mcp_config
-                .and_then(|mcp_config| mcp_config.credentials_path.as_ref())
-                .and_then(|path| match std::fs::read_to_string(path) {
-                    Ok(content) => {
-                        match serde_json::from_str::<flowgen_mcp::config::Credentials>(&content) {
-                            Ok(creds) => Some(creds),
-                            Err(source) => {
-                                let err = Error::McpCredentialsParse {
-                                    path: path.clone(),
-                                    source,
-                                };
-                                error!("{err}");
-                                None
-                            }
-                        }
-                    }
-                    Err(source) => {
-                        let err = Error::McpCredentialsRead {
-                            path: path.clone(),
-                            source,
-                        };
-                        error!("{err}");
-                        None
-                    }
-                });
+            let credentials_path =
+                mcp_config.and_then(|mcp_config| mcp_config.credentials_path.as_ref());
+            let credentials = match credentials_path {
+                Some(path) => {
+                    let content = flowgen_core::credentials::read_async(path)
+                        .await
+                        .map_err(|source| Error::McpCredentialsRead { source })?;
+                    let credentials =
+                        serde_json::from_str::<flowgen_mcp::config::Credentials>(&content)
+                            .map_err(|source| Error::McpCredentialsParse {
+                                path: path.clone(),
+                                source,
+                            })?;
+                    Some(credentials)
+                }
+                None => None,
+            };
             let path = mcp_config
                 .map(|c| c.path.clone())
                 .unwrap_or_else(|| flowgen_mcp::server::DEFAULT_MCP_PATH.to_string());
@@ -1036,6 +1026,7 @@ impl App {
         // this to stop and deregister flows on hot-reload events.
         let flow_registry: Arc<RwLock<HashMap<String, FlowHandle>>> =
             Arc::new(RwLock::new(HashMap::new()));
+        let registry_changed = Arc::new(tokio::sync::watch::Sender::new(()));
         let running_flows: Arc<dyn flowgen_core::telemetry::cluster::RunningFlows> =
             Arc::new(RegistryFlows(Arc::clone(&flow_registry)));
 
@@ -1332,6 +1323,7 @@ impl App {
                 );
             }
         }
+        registry_changed.send_replace(());
         if let Err(e) = peer_registry.mark_ready().await {
             warn!(error = %e, "Failed to mark this pod ready for rebalanced flows");
         }
@@ -1363,6 +1355,7 @@ impl App {
                 };
                 let web_state = crate::web::WebState {
                     flow_registry: Arc::clone(&flow_registry),
+                    registry_changed: Arc::clone(&registry_changed),
                     prefix: String::new(),
                     resource_loader: resource_loader.clone(),
                     metrics_store: Arc::clone(&metrics_store),
@@ -1443,6 +1436,7 @@ impl App {
                 servers: servers.clone(),
                 filesystem_flow_paths: Arc::new(filesystem_flow_paths.clone()),
                 flow_registry: Arc::clone(&flow_registry),
+                registry_changed: Arc::clone(&registry_changed),
                 client_registry: Arc::clone(&client_registry),
                 holder_identity: holder_identity.clone(),
                 peer_registry: Arc::clone(&peer_registry),
@@ -1468,16 +1462,17 @@ impl App {
         // while flows are being shut down.
         watcher_shutdown.cancel();
 
-        for handle in &background_handles {
-            handle.abort();
-        }
-        let _ = futures::future::join_all(background_handles).await;
+        // Servers stop last, so flows finish their requests and close their sessions.
         let shutdown_timeout =
             longest_shutdown_timeout(&flow_registry, &stopping, app_config.shutdown_timeout);
         tokio::join!(
             finish_reconciler(reconciler, shutdown_timeout),
             stop_flows(&flow_registry, &servers)
         );
+        for handle in &background_handles {
+            handle.abort();
+        }
+        let _ = futures::future::join_all(background_handles).await;
 
         // Remove this pod from the peer list so remaining pods stop hashing
         // flows onto it as a preferred owner.

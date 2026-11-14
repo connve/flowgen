@@ -15,7 +15,7 @@ flow:
   tasks:
     - nats_jetstream_subscribe:
         name: start_subscription
-        credentials_path: /etc/nats/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/nats.json"
         url: "{{env.NATS_URL}}"
         subject: salesforce.platform_events.order_status
         stream:
@@ -32,7 +32,7 @@ flow:
 
     - salesforce_pubsubapi_publish:
         name: publish_order_status
-        credentials_path: /etc/sfdc/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
         topic: /event/OrderStatus__e
         payload:
           from_event: true

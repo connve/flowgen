@@ -748,7 +748,8 @@ struct McpServerConnection {
     connection: McpConnection,
 }
 
-/// Closes the connection, which the tools of a prefixed server would keep open.
+/// Closes the connection, which the tools of a prefixed server would keep
+/// open, when the task did not close it on stopping.
 impl Drop for McpServerConnection {
     fn drop(&mut self) {
         let connection = self.connection.clone();
@@ -768,6 +769,16 @@ struct McpTools {
 }
 
 impl McpTools {
+    /// Closes every connection and waits until each has closed.
+    async fn close(&self) {
+        futures_util::future::join_all(
+            self.connections
+                .iter()
+                .map(|server| server.connection.close()),
+        )
+        .await;
+    }
+
     /// Whether every connection still carries the `Authorization` header it
     /// would get now.
     async fn is_current(&self, user_token: Option<&str>) -> Result<bool, Error> {
@@ -1244,6 +1255,12 @@ impl Toolset {
         }
     }
 
+    async fn close(&self) {
+        if let Some(mcp) = &self.mcp {
+            mcp.close().await;
+        }
+    }
+
     /// The agent client for `rendered`, built on first use.
     async fn client(
         &self,
@@ -1296,6 +1313,14 @@ impl ToolsetSlot {
         let toolset = Arc::new(Toolset::connect(config, user_token).await?);
         *self.toolset.lock().await = Some(Arc::clone(&toolset));
         Ok(toolset)
+    }
+
+    /// Closes the open toolset's connections, if any.
+    async fn close(&self) {
+        let toolset = self.toolset.lock().await.take();
+        if let Some(toolset) = toolset {
+            toolset.close().await;
+        }
     }
 
     async fn fresh(&self, user_token: Option<&str>) -> Result<Option<Arc<Toolset>>, Error> {
@@ -1364,6 +1389,13 @@ impl UserToolsets {
             Arc::clone(user)
         };
         user.slot.current(config, Some(token)).await
+    }
+
+    /// Closes every user's connections.
+    async fn close(&self) {
+        let users: Vec<Arc<UserToolset>> =
+            self.0.lock().await.drain().map(|(_, user)| user).collect();
+        futures_util::future::join_all(users.iter().map(|user| user.slot.close())).await;
     }
 
     /// Closes the connections of users idle for [`USER_MCP_IDLE`] at `now`.
@@ -1448,6 +1480,12 @@ fn user_id(event: &Event) -> Option<&str> {
 }
 
 impl EventHandler {
+    /// Closes the task's and every user's MCP connections and waits until they have closed.
+    async fn close(&self) {
+        self.toolset.close().await;
+        self.users.close().await;
+    }
+
     /// The charge of an agent run's model calls, when the app sets a budget.
     fn spending(&self, event: &Event, model: &str) -> Option<crate::budget::Spending> {
         self.task_context
@@ -2262,7 +2300,7 @@ impl flowgen_core::task::runner::Runner for Processor {
 
         flowgen_core::task::runner::process_events(
             self.rx,
-            event_handler,
+            Arc::clone(&event_handler),
             &retry_config,
             self.config.max_in_flight,
             &self.task_context,
@@ -2271,6 +2309,7 @@ impl flowgen_core::task::runner::Runner for Processor {
         if let Some(sweeper) = sweeper {
             sweeper.abort();
         }
+        event_handler.close().await;
         Ok(())
     }
 }
@@ -2356,13 +2395,16 @@ impl ProcessorBuilder {
 mod tests {
     use super::*;
     use axum::response::IntoResponse;
+    use flowgen_core::task::runner::Runner;
     use serde_json::json;
 
     /// An MCP server with one tool, `lookup`, that records the `Authorization`
-    /// header of every request and, as `call:<name>`, every tool call.
+    /// header of every request, as `call:<name>` every tool call, and as
+    /// `delete` every closed session.
     async fn mcp_server() -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
         let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
         let recorded = Arc::clone(&seen);
+        let deleted = Arc::clone(&seen);
         let post = move |headers: http::HeaderMap, body: axum::Json<serde_json::Value>| {
             let recorded = Arc::clone(&recorded);
             async move {
@@ -2375,6 +2417,7 @@ mod tests {
                 let Some(id) = body.get("id").cloned() else {
                     return axum::http::StatusCode::ACCEPTED.into_response();
                 };
+                let opens_session = body["method"] == "initialize";
                 let result = match body["method"].as_str() {
                     Some("initialize") => json!({
                         "protocolVersion": body["params"]["protocolVersion"],
@@ -2393,14 +2436,24 @@ mod tests {
                     }
                     _ => json!({}),
                 };
-                axum::Json(json!({"jsonrpc": "2.0", "id": id, "result": result})).into_response()
+                let response = axum::Json(json!({"jsonrpc": "2.0", "id": id, "result": result}));
+                match opens_session {
+                    true => ([("mcp-session-id", "a")], response).into_response(),
+                    false => response.into_response(),
+                }
             }
         };
         let app = axum::Router::new().route(
             "/mcp",
             axum::routing::post(post)
                 .get(|| async { axum::http::StatusCode::METHOD_NOT_ALLOWED })
-                .delete(|| async { axum::http::StatusCode::OK }),
+                .delete(move || {
+                    let deleted = Arc::clone(&deleted);
+                    async move {
+                        deleted.lock().unwrap().push("delete".to_string());
+                        axum::http::StatusCode::OK
+                    }
+                }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/mcp", listener.local_addr().unwrap());
@@ -2593,6 +2646,34 @@ mod tests {
                 .await
                 .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn a_stopping_task_closes_its_mcp_sessions_before_it_returns() {
+        let (mcp_url, seen) = mcp_server().await;
+        let config = agent(McpServerConfig {
+            on_behalf_of_user: false,
+            ..user_server(&mcp_url)
+        });
+        let (_tx, rx) = tokio::sync::mpsc::channel(1);
+        let processor = ProcessorBuilder::new()
+            .config(Arc::new(config.clone()))
+            .receiver(rx)
+            .task_type("ai_completion")
+            .task_context(Arc::new(task_context()))
+            .build()
+            .await
+            .unwrap();
+        let handler = processor.init().await.unwrap();
+        handler.toolset.current(&config, None).await.unwrap();
+
+        handler.close().await;
+
+        assert!(seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request == "delete"));
     }
 
     #[tokio::test]

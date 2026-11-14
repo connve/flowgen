@@ -226,8 +226,8 @@ fn tls_config(credentials: &Credentials) -> Result<rustls::ClientConfig, Error> 
                 path: path.clone(),
                 source,
             };
-            let certificates = CertificateDer::pem_file_iter(path)
-                .map_err(read_error)?
+            let pem = flowgen_core::credentials::read(path).map_err(Error::ReadCredentials)?;
+            let certificates = CertificateDer::pem_slice_iter(pem.as_bytes())
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(read_error)?;
             if certificates.is_empty() {

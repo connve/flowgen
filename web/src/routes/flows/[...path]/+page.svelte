@@ -6,6 +6,7 @@
 	import FlowDetails from '$lib/flow/FlowDetails.svelte';
 	import type { Activity } from '$lib/flow/ActivityDetails.svelte';
 	import { EditButton } from '@connve/ui';
+	import FileActions from '$lib/FileActions.svelte';
 	import PendingChanges from '$lib/PendingChanges.svelte';
 	import { activitiesFor, releaseFlowSubscription } from '$lib/activityStore.svelte';
 	import { editUrl, flowFilePath, targetOf } from '$lib/changes';
@@ -37,7 +38,7 @@
 </svelte:head>
 
 <section class="flex h-[calc(100vh-4rem)] min-w-0">
-<div class="flex min-w-0 flex-1 flex-col p-6">
+<div class="flex min-w-0 flex-1 flex-col p-4 md:p-6">
 	<div class="mb-4 shrink-0">
 		<div class="flex min-h-8 items-center justify-between gap-2">
 			<div class="min-w-0">
@@ -53,6 +54,7 @@
 			<div class="flex items-center gap-1">
 				{#if data.targets.length > 0}
 					<EditButton href={editHref} />
+					<FileActions file={flowFilePath(data.identity)} targets={data.targets} />
 				{/if}
 			</div>
 		</div>

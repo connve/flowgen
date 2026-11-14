@@ -11,7 +11,7 @@ use flowgen_core::{
     task::{context::TaskContext, runner::Runner, TaskConfig},
 };
 use serde::{Deserialize, Serialize};
-use std::{fs, path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 use tokio::sync::mpsc::Sender;
 use tracing::{error, info};
 
@@ -82,11 +82,10 @@ pub enum Error {
         #[source]
         source: flowgen_core::config::Error,
     },
-    #[error("Failed to read credentials from {path}: {source}")]
+    #[error("Failed to read credentials: {source}")]
     ReadCredentials {
-        path: std::path::PathBuf,
         #[source]
-        source: std::io::Error,
+        source: flowgen_core::credentials::Error,
     },
     #[error("JSON deserialization error: {source}")]
     SerdeJson {
@@ -190,10 +189,9 @@ impl Runner for Processor {
         // Load tool-specific credentials if a path is configured.
         let credentials = match &event_handler.config.credentials_path {
             Some(path) => {
-                let content = fs::read_to_string(path).map_err(|e| Error::ReadCredentials {
-                    path: path.clone(),
-                    source: e,
-                })?;
+                let content = flowgen_core::credentials::read_async(path)
+                    .await
+                    .map_err(|source| Error::ReadCredentials { source })?;
                 Some(
                     serde_json::from_str::<crate::config::Credentials>(&content)
                         .map_err(|e| Error::SerdeJson { source: e })?,

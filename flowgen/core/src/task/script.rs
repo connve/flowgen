@@ -744,6 +744,30 @@ fn dynamic_to_json(dynamic: Dynamic) -> Result<Value, Error> {
     Ok(value)
 }
 
+/// Converts JSON to Rhai values by hand: with serde_json's `arbitrary_precision`,
+/// `rhai::serde::to_dynamic` turns each number into a map holding its text.
+fn json_to_dynamic(value: Value) -> Dynamic {
+    match value {
+        Value::Null => Dynamic::UNIT,
+        Value::Bool(value) => Dynamic::from(value),
+        Value::Number(number) => match (number.as_i64(), number.as_f64()) {
+            (Some(integer), _) => Dynamic::from(integer),
+            (None, Some(float)) => Dynamic::from(float),
+            (None, None) => Dynamic::from(number.to_string()),
+        },
+        Value::String(value) => Dynamic::from(value),
+        Value::Array(items) => {
+            Dynamic::from_array(items.into_iter().map(json_to_dynamic).collect())
+        }
+        Value::Object(fields) => Dynamic::from_map(
+            fields
+                .into_iter()
+                .map(|(key, value)| (key.into(), json_to_dynamic(value)))
+                .collect(),
+        ),
+    }
+}
+
 /// Script processor that executes Rhai code on events.
 #[derive(Debug)]
 pub struct Processor {
@@ -995,7 +1019,7 @@ impl crate::task::runner::Runner for Processor {
             "parse_json",
             |json: &str| -> Result<Dynamic, Box<rhai::EvalAltResult>> {
                 let value: Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
-                rhai::serde::to_dynamic(value).map_err(|e| e.to_string().into())
+                Ok(json_to_dynamic(value))
             },
         );
 
@@ -1005,7 +1029,7 @@ impl crate::task::runner::Runner for Processor {
             "parse_yaml",
             |yaml: &str| -> Result<Dynamic, Box<rhai::EvalAltResult>> {
                 let value: Value = serde_yaml::from_str(yaml).map_err(|e| e.to_string())?;
-                rhai::serde::to_dynamic(value).map_err(|e| e.to_string().into())
+                Ok(json_to_dynamic(value))
             },
         );
 
@@ -2480,7 +2504,14 @@ mod tests {
             engine: ScriptEngine::Rhai,
             code: crate::resource::Source::Inline(
                 r#"
-                let obj = parse_json(`{"key":"value","count":42}`);
+                let obj = parse_json(`{"key":"value","count":42,"ratio":1.5,"none":null,"list":[1,true]}`);
+                let yaml = parse_yaml("n: 7\nr: 2.5");
+                obj.count_type = type_of(obj.count);
+                obj.next = obj.count + 1;
+                obj.ratio_type = type_of(obj.ratio);
+                obj.none_type = type_of(obj.none);
+                obj.list_type = type_of(obj.list[0]);
+                obj.yaml = [type_of(yaml.n), yaml.n * 2, type_of(yaml.r)];
                 event.data = obj;
                 event
                 "#
@@ -2528,6 +2559,12 @@ mod tests {
             EventData::Json(value) => {
                 assert_eq!(value["key"], "value");
                 assert_eq!(value["count"], 42);
+                assert_eq!(value["count_type"], "i64");
+                assert_eq!(value["next"], 43);
+                assert_eq!(value["ratio_type"], "f64");
+                assert_eq!(value["none_type"], "()");
+                assert_eq!(value["list_type"], "i64");
+                assert_eq!(value["yaml"], json!(["i64", 14, "f64"]));
             }
             _ => panic!("Expected JSON output."),
         }

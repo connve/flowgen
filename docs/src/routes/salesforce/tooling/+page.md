@@ -14,7 +14,7 @@ Manage Salesforce metadata. Currently supports creating managed event subscripti
 - salesforce_toolingapi:
     name: create_subscription
     operation: create_managed_event_subscription
-    credentials_path: /etc/salesforce/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
     full_name: AccountChangeEvent_flowgen
     metadata:
       label: Account CDC Subscription

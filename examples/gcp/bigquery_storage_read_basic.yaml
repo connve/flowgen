@@ -20,7 +20,7 @@ flow:
     # filters server-side; `max_stream_count` upper-bounds parallelism.
     - gcp_bigquery_storage_read:
         name: read_orders_table
-        credentials_path: /etc/gcp/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/gcp.json"
         project_id: my-project-id
         dataset_id: analytics
         table_id: orders

@@ -8,63 +8,13 @@ Flowgen has two categories of tasks: **subscribers** and **processors**.
 
 ### Subscribers
 
-Subscribers are source tasks that ingest data into the flow. They connect to external systems and produce events.
-
-| Task | Description |
-|---|---|
-| `nats_jetstream_subscribe` | Consumes messages from a NATS JetStream stream with durable consumers. |
-| `salesforce_pubsubapi_subscribe` | Subscribes to Salesforce Platform Events via gRPC. |
-| `mongodb_cdc` | Watches a MongoDB database for real-time document changes. |
-| `kafka_subscribe` | Consumes every partition of a Kafka topic. |
-| `http_endpoint` | Listens for incoming HTTP requests and converts them to events. |
-| `generate` | Produces events on a schedule (cron or interval). |
+Subscribers are source tasks that ingest data into the flow. They connect to external systems and produce events: `http_endpoint` turns incoming requests into events, `generate` produces them on a schedule, and the subscribe and change-data-capture tasks of the messaging and database connectors read streams and table changes.
 
 Subscribers appear as the first task in a flow. They manage acknowledgment — a message is only acked when the entire downstream flow completes successfully.
 
 ### Processors
 
-Processors receive events, do something with them, and emit events to the next task.
-
-| Task | Description |
-|---|---|
-| `script` | Executes [Rhai](https://rhai.rs) scripts for transformation, filtering, and routing. |
-| `convert` | Converts between data formats (JSON, Arrow, Avro). |
-| `iterate` | Fans out array data into individual events. |
-| `buffer` | Accumulates events into batches before forwarding. |
-| `log` | Logs event data for debugging. |
-| `http_request` | Makes outbound HTTP calls. |
-| `html_scrape` | Extracts rows from HTML with CSS selectors. |
-| `nats_jetstream_publish` | Publishes events to a NATS JetStream subject. |
-| `kv_store` | Read, write, list, and delete keys in a redb file or a NATS KV bucket. |
-| `salesforce_pubsubapi_publish` | Publishes Salesforce Platform Events. |
-| `salesforce_restapi_sobject` | Salesforce CRUD operations (create, get, update, upsert, delete). |
-| `salesforce_restapi_composite` | Batch Salesforce operations. |
-| `salesforce_bulkapi_query_job` | Salesforce Bulk API query jobs. |
-| `salesforce_toolingapi` | Salesforce metadata management. |
-| `gcp_bigquery_query` | BigQuery SQL queries. |
-| `gcp_bigquery_storage_read` | BigQuery Storage Read API. |
-| `gcp_bigquery_storage_write` | BigQuery Storage Write API. |
-| `gcp_bigquery_job` | BigQuery async jobs (load, monitor, cancel). |
-| `mssql_query` | Microsoft SQL Server queries. |
-| `postgres_query` | PostgreSQL queries. |
-| `postgres_write` | Appends, upserts or deletes rows in a PostgreSQL table with `COPY`. |
-| `postgres_cdc` | Emits each row change of the tables in a PostgreSQL publication. |
-| `braze_export_user_data` | Exports Braze user profiles. |
-| `braze_messaging` | Sends Braze messages, campaigns, and Canvases. |
-| `klaviyo_templates` | Reads and writes Klaviyo email templates. |
-| `klaviyo_campaigns` | Creates, updates, and sends Klaviyo campaigns. |
-| `klaviyo_lists` | Reads Klaviyo lists. |
-| `klaviyo_events` | Sends events to Klaviyo. |
-| `klaviyo_profiles` | Reads and writes Klaviyo profiles. |
-| `mongodb_collection` | Reads or writes documents in a MongoDB collection. |
-| `object_store` | Object storage operations (read, write, list, move) on S3, GCS, Azure, local. |
-| `git_sync` | Clone/pull a Git repository and emit its files in one event. |
-| `oci_sync` | Pull an OCI artifact from a registry and emit its files in one event. |
-| `ai_completion` | LLM completions from multiple providers. |
-| `llm_proxy` | Registers a flow as a backend on the AI gateway server. |
-| `mcp_tool` | Expose flows as MCP tools for LLM agents. |
-| `mcp_resource` | Expose read-only content (schemas, glossaries, docs) as MCP resources. |
-| `mcp_prompt` | Publish slash-command templates with typed arguments for MCP clients. |
+Processors receive events, do something with them, and emit events to the next task. The core tasks — `script`, `convert`, `iterate`, `buffer` and `log` — transform, convert, split, batch and inspect events. Every other processor works with an external system: it calls an API, queries or writes a database, publishes a message, or reads and writes storage. Each connector's page lists its tasks.
 
 ## Task wiring
 
@@ -103,7 +53,7 @@ An event that is being retried keeps its slot until it succeeds or runs out of a
 Tasks can produce and consume three event data formats:
 
 - **JSON** — Default for REST APIs, webhooks, and script output.
-- **Arrow RecordBatch** — Columnar data (BigQuery, Parquet). Zero-copy through the flow.
-- **Avro** — Binary format for gRPC and Pub/Sub (Salesforce Platform Events).
+- **Arrow RecordBatch** — Columnar data, such as query results and Parquet. Zero-copy through the flow.
+- **Avro** — Binary format of gRPC and pub/sub streams.
 
 The `convert` task translates between formats when needed.

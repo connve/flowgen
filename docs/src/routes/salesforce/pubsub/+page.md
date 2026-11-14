@@ -7,7 +7,7 @@ Subscribe to and publish Salesforce platform events and Change Data Capture even
 ```yaml
 - salesforce_pubsubapi_subscribe:
     name: account_changes
-    credentials_path: /etc/salesforce/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
     topic:
       name: /data/AccountChangeEvent
       num_requested: 100
@@ -61,7 +61,7 @@ When the stream breaks, the subscriber reconnects with the [reconnect backoff](/
 ```yaml
 - salesforce_pubsubapi_publish:
     name: publish_event
-    credentials_path: /etc/salesforce/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
     topic: /event/Order_Update__e
     payload:
       Order_Id__c: "{{event.data.order_id}}"

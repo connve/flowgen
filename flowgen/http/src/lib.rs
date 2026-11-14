@@ -4,7 +4,7 @@
 //! management for flowgen event processing pipelines.
 
 use flowgen_core::task::context::{Services, TaskContext};
-use flowgen_core::task::meta::{Connection, Connector, Icon};
+use flowgen_core::task::meta::{Connection, Connector, Icon, HTTP_CREDENTIALS};
 use flowgen_core::task::runner::Runner;
 use flowgen_core::task::{Task, TaskError, TaskIo, TaskMeta};
 use std::sync::Arc;
@@ -24,6 +24,7 @@ pub const CONNECTOR: Connector = Connector {
     label: "HTTP",
     icon: Icon::Svg(include_str!("../icons/http.svg")),
     describe_credentials: None,
+    credentials: HTTP_CREDENTIALS,
 };
 
 impl config::Processor {

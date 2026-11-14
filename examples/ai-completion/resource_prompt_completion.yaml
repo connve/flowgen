@@ -21,7 +21,7 @@ flow:
         name: analyze_data
         provider: anthropic
         model: claude-3-5-sonnet-20241022
-        credentials_path: /etc/anthropic/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/anthropic.json"
         system_prompt:
           resource: "ai-completion/prompts/analyst_system.md"
         prompt:

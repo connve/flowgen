@@ -21,7 +21,7 @@ flow:
         name: cancel_long_running_job
         operation: cancel
         project_id: my-gcp-project
-        credentials_path: /etc/gcp/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/gcp.json"
         job_type: query
         job_id: "job_abc123xyz"
         poll_interval: 1s

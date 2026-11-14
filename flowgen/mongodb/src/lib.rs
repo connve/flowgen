@@ -4,7 +4,9 @@
 //! It includes support for change data capture (CDC), collection read/write/upsert, and message conversion
 //! utilities for working with MongoDB collections and change streams.
 use flowgen_core::task::context::TaskContext;
-use flowgen_core::task::meta::{Connection, Connector, Icon};
+use flowgen_core::task::meta::{
+    Connection, Connector, CredentialsField, CredentialsForm, FieldKind, Icon,
+};
 use flowgen_core::task::runner::Runner;
 use flowgen_core::task::{Task, TaskError, TaskIo, TaskMeta};
 use std::path::{Path, PathBuf};
@@ -25,6 +27,20 @@ pub const CONNECTOR: Connector = Connector {
     label: "MongoDB",
     icon: Icon::Svg(include_str!("../icons/mongodb.svg")),
     describe_credentials: Some(describe_credentials),
+    credentials: &[CredentialsForm {
+        label: "Connection",
+        fields: &[
+            CredentialsField::text("scheme", "Scheme")
+                .of(FieldKind::Choice(&["mongodb", "mongodb+srv"]))
+                .optional(),
+            CredentialsField::text("host", "Host"),
+            CredentialsField::text("port", "Port")
+                .of(FieldKind::Number)
+                .optional(),
+            CredentialsField::text("username", "Username").optional(),
+            CredentialsField::secret("password", "Password").optional(),
+        ],
+    }],
 };
 
 /// The hosts the credentials connect to.

@@ -20,7 +20,7 @@ use reqwest::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use std::{fs, sync::Arc};
+use std::sync::Arc;
 use subtle::ConstantTimeEq;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
@@ -54,11 +54,10 @@ pub enum Error {
         #[source]
         source: serde_json::Error,
     },
-    #[error("Error reading credentials file at {path}: {source}")]
+    #[error("Error reading credentials: {source}")]
     ReadCredentials {
-        path: std::path::PathBuf,
         #[source]
-        source: std::io::Error,
+        source: flowgen_core::credentials::Error,
     },
     #[error("No authorization header provided")]
     NoCredentials,
@@ -175,10 +174,9 @@ impl flowgen_core::task::runner::Runner for Processor {
 
         let credentials = match credentials_path {
             Some(path) => {
-                let content = fs::read_to_string(path).map_err(|e| Error::ReadCredentials {
-                    path: path.clone(),
-                    source: e,
-                })?;
+                let content = flowgen_core::credentials::read_async(path)
+                    .await
+                    .map_err(|source| Error::ReadCredentials { source })?;
                 Some(serde_json::from_str(&content).map_err(|e| Error::SerdeJson { source: e })?)
             }
             None => None,
@@ -815,11 +813,12 @@ mod tests {
 
     #[test]
     fn test_error_read_credentials_structure() {
-        use std::path::PathBuf;
         let io_error = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
         let error = Error::ReadCredentials {
-            path: PathBuf::from("/test/credentials.json"),
-            source: io_error,
+            source: flowgen_core::credentials::Error::ReadFile {
+                path: "/test/credentials.json".to_string(),
+                source: io_error,
+            },
         };
         assert!(matches!(error, Error::ReadCredentials { .. }));
     }

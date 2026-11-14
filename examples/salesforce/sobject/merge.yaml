@@ -26,7 +26,7 @@ flow:
 
     - salesforce_soapapi_merge:
         name: merge
-        credentials_path: /etc/sfdc/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
         sobject_type: "{{event.data.sobject_type}}"
         master_record_id: "{{event.data.master_id}}"
         record_ids_to_merge:
