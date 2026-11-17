@@ -19,7 +19,7 @@ Makes outbound HTTP requests. URL, headers, and payload support templating.
 | `name` | string | required | Task name. |
 | `endpoint` | string | required | Target URL. Supports templating. |
 | `method` | string | `GET` | `GET`, `POST`, `PUT`, `DELETE`, `PATCH`, `HEAD`. |
-| `credentials_path` | string | | Path to credentials file for request authentication. |
+| `credentials_path` | string | | Path to credentials file for request authentication. Credentials are sent only over HTTPS, or over HTTP to a loopback host. |
 | `payload` | object | | Request body (see below). |
 | `headers` | map | | HTTP headers. Values support templating. |
 | `timeout` | duration | `30s` | Total request timeout from start to response body received. Set explicitly to override or omit-with-`null` to disable. |

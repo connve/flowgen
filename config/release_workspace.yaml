@@ -31,13 +31,13 @@ flow:
         path: "{{env.FLOWGEN_WORKSPACE_PATH}}"
         credentials_path: "{{env.FLOWGEN_GIT_CREDENTIALS}}"
 
-    # Keeps the flows and resources, the files a release deploys.
+    # Keeps the flows, resources and flowgen.lock, the files a release deploys.
     - script:
         name: to_release
         code: |
           let files = [];
           for file in event.data.files {
-              if file.path.starts_with("flows/") || file.path.starts_with("resources/") {
+              if file.path.starts_with("flows/") || file.path.starts_with("resources/") || file.path == "flowgen.lock" {
                   files.push(file);
               }
           }

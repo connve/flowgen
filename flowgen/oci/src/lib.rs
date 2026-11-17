@@ -1,15 +1,17 @@
 //! OCI registry tasks.
 //!
-//! `oci_sync` pulls an artifact from an OCI registry (GHCR, ECR, GAR,
-//! Artifactory, Harbor, etc.) when its manifest digest changes and emits one
-//! event per file, in the same shape as `git_sync`.
+//! `oci_sync` pulls an artifact from an OCI registry or an `oci-layout://`
+//! folder when its manifest digest changes and emits one `{digest, files}`
+//! event.
 //!
 //! `oci_push` packs the files of an event into a single-layer tar+gzip
 //! artifact and pushes it to a registry under one or more tags, in the
 //! layout `oci_sync` reads back.
 
 use flowgen_core::task::context::TaskContext;
-use flowgen_core::task::meta::{Connection, Connector, CredentialsField, CredentialsForm, Icon};
+use flowgen_core::task::meta::{
+    parses, Connection, Connector, CredentialsField, CredentialsForm, Icon,
+};
 use flowgen_core::task::runner::Runner;
 use flowgen_core::task::{Task, TaskError, TaskIo, TaskMeta};
 use std::sync::Arc;
@@ -34,10 +36,12 @@ pub const CONNECTOR: Connector = Connector {
                 CredentialsField::text("username", "Username"),
                 CredentialsField::secret("password", "Password or token"),
             ],
+            check: parses::<registry::Credentials>,
         },
         CredentialsForm {
-            label: "Docker config.json",
+            label: "Registry auth file (config.json)",
             fields: &[],
+            check: registry::check_docker_config,
         },
     ],
 };

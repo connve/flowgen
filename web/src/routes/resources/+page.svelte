@@ -253,7 +253,7 @@
 			<StateMessage
 				tone="notice"
 				title={m.resources_empty_title()}
-				message={authoring ? m.resources_empty_message_authoring() : m.resources_empty_message()}
+				message={authoring ? undefined : m.resources_empty_message()}
 			/>
 		{:else}
 			<div class="-mx-6 shrink-0 overflow-x-auto px-6">

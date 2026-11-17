@@ -1,11 +1,11 @@
 # Authoring
 
-Flows and resources can be changed through the web API instead of editing the repository by hand. A change is proposed, reviewed in the web UI, and published by a flow once a signed-in user approves it. Pending changes are linked from the Flows and Resources pages and from each flow or resource they touch.
+Flows and resources can be changed through the web API instead of editing the repository by hand. A change is proposed, reviewed in the web UI, and committed by a flow once a signed-in user approves it. Pending changes are linked from the Flows and Resources pages and from each flow or resource they touch.
 
 In the web UI, **New flow** and **New resource** on the list pages and **Edit** on a flow or resource open an editor that validates the file and proposes it as a change. A flow is edited as `flows/<identity>.yaml`; correct the path when the repository stores it as `.yml` or `.json`, or the change adds a second file next to it.
 
 ```
-propose ──► validate + diff ──► approve (signed-in user) ──► publish flow: git_push
+propose ──► validate + diff ──► approve (signed-in user) ──► commit flow: git_push
                                                                   │
                                          CI or release flow ◄─────┘ commit
                                          oci push ─► oci_sync
@@ -25,7 +25,7 @@ propose ──► validate + diff ──► approve (signed-in user) ──► p
 }
 ```
 
-Paths start at the workspace root and must be under `flows/`, `resources/` or `credentials/`, all within one [target](#targets). Credentials must be [encrypted](/docs/flowgen/concepts/credentials#encrypted-credentials-in-the-workspace); a change with a credentials file that is not is refused. Each file is recorded with the version it is based on: the deployed content — for a flow, the source synced to the flows cache, so a flow that failed to start can be fixed too — with every published change that is not deployed yet applied on top, so editing a file right after an approval builds on that commit. `GET {path}/api/workspace/file?path=` returns that version. The change carries a unified diff per file plus every validation issue. A change with issues can be reviewed but not approved.
+Paths start at the workspace root and must be under `flows/`, `resources/` or `credentials/`, all within one [target](#targets). Credentials must be [encrypted](/docs/flowgen/concepts/credentials#encrypted-credentials-in-the-workspace); a change with a credentials file that is not is refused. Each file is recorded with the version it is based on: the deployed content — for a flow, the source synced to the flows cache, so a flow that failed to start can be fixed too — with every committed change that is not deployed yet applied on top, so editing a file right after an approval builds on that commit. `GET {path}/api/workspace/file?path=` returns that version. The change carries a unified diff per file plus every validation issue. A change with issues can be reviewed but not approved.
 
 While a change is pending, its proposer can extend it: `POST {path}/api/changes/{id}/files` adds files or replaces ones it has, with the same body as `files` above, and `PATCH {path}/api/changes/{id}` sets its `title` and `description`. A replaced file keeps the version recorded when it was first added. Saving in the web UI editor adds the file to the user's most recently edited pending change in the same target, or proposes a new one.
 
@@ -37,12 +37,12 @@ While a change is pending, its proposer can extend it: `POST {path}/api/changes/
 
 ## Targets
 
-`web.authoring.targets` splits the workspace into areas with their own approvers and publish flow. A target's `paths` are folders matched on whole path segments: `flows/user` covers `flows/user/a.yaml` but not `flows/username/a.yaml`. A path covered by several targets belongs to the one with the most specific folder, so a target over `flows/system/` owns `flows/system/a.yaml` even when another covers `flows/`. All files of a change must belong to one target; a change spanning two is rejected, and a path outside every target cannot be changed through the API.
+`web.authoring.targets` splits the workspace into areas with their own approvers and commit flow. A target's `paths` are folders matched on whole path segments: `flows/user` covers `flows/user/a.yaml` but not `flows/username/a.yaml`. A path covered by several targets belongs to the one with the most specific folder, so a target over `flows/system/` owns `flows/system/a.yaml` even when another covers `flows/`. All files of a change must belong to one target; a change spanning two is rejected, and a path outside every target cannot be changed through the API.
 
 A layout with three areas:
 
 ```
-flows/system/     sync, publish, release — changed in the repository only
+flows/system/     commit, release, deploy — changed in the repository only
 flows/platform/   shared flows maintained by the platform team
 flows/user/       flows built by business users and agents
 ```
@@ -96,7 +96,7 @@ The commit flow, with the release and deploy flows below, is in [`config/`](http
 | `FLOWGEN_CACHE_CREDENTIALS` | The `cache` credentials file, or empty. | |
 | `FLOWGEN_SYSTEM_BUCKET` | The system bucket. | |
 
-flowgen sets a variable only when the environment does not. An empty credentials variable means none. Without sign-in, the commit is by the git user of the machine; a commit to a URL needs the approving user, so a cluster needs `web.auth`. The release and deploy flows have `require_leader_election`, so one pod runs each.
+flowgen sets a variable only when the environment does not; a local run always sets `FLOWGEN_REPOSITORY` and `FLOWGEN_WORKSPACE_PATH`. An empty credentials variable means none. Without sign-in, the commit is by the git user of the machine; a commit to a URL needs the approving user, so a cluster needs `web.auth`. The release and deploy flows have `require_leader_election`, so one pod runs each.
 
 Once a change is committed, flowgen puts its commit at `commits.latest` in the system bucket. The release flow watches that key with [`kv_watch`](/docs/flowgen/kv-store/kv-watch) and records each release under `releases.latest` as well as `releases.<commit>`, which the deploy flow watches, so an approved change is released and deployed as soon as it is committed. Both flows also look every minute for commits and releases made outside flowgen.
 
@@ -134,7 +134,9 @@ A machine key reaches only what an agent needs: reading flows, resources, logs a
 
 ## Flowgen Agent
 
-A local workspace starts with Flowgen Agent, `flows/system/flowgen_agent.yaml`, an agent for the built-in Agents chat. Its tools are the flows in `flows/system/flowgen_agent/`, served as the MCP toolset `/mcp/v1/system/flowgen_agent`. They call the web API to list and read deployed flows and resources, validate drafts, run draft Rhai scripts on sample events with `POST /api/workspace/test`, propose changes, and read a flow's logs after it is deployed. With `web.auth` set, give each tool's `http_request` a machine key with `credentials_path`.
+A local workspace starts with Flowgen Agent, `flows/system/flowgen_agent.yaml`, an agent for the built-in Agents chat. Its tools are the flows in `flows/system/flowgen_agent/`, served as the MCP toolset `/mcp/v1/system/flowgen_agent`. They call the web API to list and read deployed flows and resources, read the docs pages of this version (`GET /api/docs`), read a hub's templates as working examples, validate drafts, run draft Rhai scripts on sample events with `POST /api/workspace/test`, propose changes, and read a flow's logs after it is deployed. With `web.auth` set, give each tool's `http_request` a machine key with `credentials_path`.
+
+The toolset's [instructions](/docs/flowgen/ai/mcp#instructions), how to work with the tools, are the system resource `system/flowgen_agent/instructions.md`, and the basics Flowgen Agent always has in context are `system/flowgen_agent/basics.md`; both are built into flowgen, and a file with the same key in the workspace's `resources/` takes their place. Other agents use the same toolset and get the same instructions; see [Agent setup](/docs/flowgen/getting-started/agent-setup).
 
 The agent asks the AI gateway for the model `default`, served by an `llm_proxy` named `default`, such as a model flow from a hub's templates. The agent and its tools reach the servers of the run through variables that every run sets unless they are set already:
 

@@ -2,7 +2,7 @@
 
 Start a flow with the value of a key, or of each key under a prefix, whenever it changes in a bucket of a key-value store. The `url` picks the store as in [KV Store](/docs/flowgen/kv-store/kv-store): `redb://<path>` or a NATS JetStream server.
 
-At start, the task sends the current value of each watched key the flow has not finished; after that, each value put. A value the flow finished is not sent again, also after a restart. Values put while a value is in the flow are sent one after another, so a flow that only needs the latest value can treat each event as "look again". Deletes send nothing.
+At start, the task sends the current value of each watched key the flow has not finished; after that, each value put. A value the flow finished is not sent again, even after a restart. Values put while a value is in the flow are sent one after another. Deletes send nothing.
 
 ## Configuration
 

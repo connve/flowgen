@@ -201,10 +201,10 @@ fn resolve_workspace(folder: Option<&std::path::Path>) -> Workspace {
 
 /// The age key flowgen decrypts credentials with, ahead of any `SOPS_AGE_KEY_FILE`.
 fn identity_path(app_config: &AppConfig) -> Option<&std::path::PathBuf> {
-    app_config
-        .credentials
-        .as_ref()
-        .and_then(|credentials| credentials.identity_path.as_ref())
+    match &app_config.credentials {
+        Some(credentials) => credentials.identity_path.as_ref(),
+        None => None,
+    }
 }
 
 /// Prepares a run without a config file: creates the workspace when its folder
@@ -292,9 +292,7 @@ fn init_tracing(metrics_store: Arc<dyn MetricsStore>, logs_writer: Option<Memory
 
     let env_filter = match tracing_subscriber::EnvFilter::try_from_default_env() {
         Ok(filter) => filter,
-        Err(_) => {
-            tracing_subscriber::EnvFilter::new("info,opentelemetry=warn,opentelemetry_sdk=warn")
-        }
+        Err(_) => tracing_subscriber::EnvFilter::new("warn,flowgen=info"),
     };
 
     let activity_layer = FlowActivityLayer::new(metrics_store);

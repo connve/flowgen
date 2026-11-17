@@ -82,15 +82,14 @@ flowgen:
     # web:
     #   type: LoadBalancer
 
-  # Internal port pods read each other's logs and counters from in cluster
-  # mode (no Service). Match `telemetry.backend.port`.
+  # Pods read each other's logs and counters from the port
+  # `config.settings.telemetry.backend.port`, 8082 by default. It has no Service.
   cluster:
-    port: 8082
     # Admits the cluster port only from flowgen pods; blocks ports not declared here.
     networkPolicy: false
 
-  # Probes of the health listener at `config.settings.health.port`: /livez
-  # (always 200), /readyz (200 once startup has finished).
+  # Probes of the health listener at `config.settings.health.port`, set when
+  # it is enabled: /livez (always 200), /readyz (200 once startup has finished).
   health:
     # Probe tuning. Set timeoutSeconds explicitly on all three: the
     # Kubernetes default is 1s, which restarts a worker that is merely busy.
@@ -171,19 +170,15 @@ flowgen:
   # Also accessible in flow configs via {{env.VAR_NAME}}.
   #
   # Logging Configuration:
-  # - RUST_LOG: Controls log verbosity (default: info)
+  # - RUST_LOG: Controls log verbosity (default: warn,flowgen=info)
   # - LOG_FORMAT: Override log format - "json" (structured) or "compact" (human-readable)
   #   Default behavior: Auto-detects TTY (terminal → compact, Docker/K8s → json)
   #
-  # OpenTelemetry/OTLP Configuration:
-  # Configure telemetry in the config.inline section above.
-  # Exports metrics and distributed traces to OTLP-compatible collectors (Grafana, Datadog, etc.)
-  # Default endpoint: http://localhost:4317
-  # Default metrics interval: 60s
+  # Telemetry is set under `config.settings.telemetry`.
   #
   # Example:
   # - name: RUST_LOG
-  #   value: "info,async_nats=warn,opentelemetry=warn,tiberius=warn"
+  #   value: "warn,flowgen=debug"
   # - name: LOG_FORMAT
   #   value: "json"  # Force JSON logging (recommended for production)
   env: []
@@ -203,7 +198,7 @@ flowgen:
     # empty for the whole repository.
     workspacePath: ""
     # FLOWGEN_RELEASES: the registry repository releases are pushed to and
-    # deployed from, e.g. ghcr.io/acme/workspace.
+    # deployed from, e.g. registry.example.com/acme/workspace.
     releases: ""
     # Secret holding the git credentials file ({token, username?}).
     gitCredentials:
@@ -215,12 +210,11 @@ flowgen:
       secretName: ""
       key: registry.json
 
-  # Credentials added in the web UI: one Secret per name, which Flux decrypts
-  # from the workspace's credentials/ folder, mounted together read-only at
-  # credentialsPath, which FLOWGEN_CREDENTIALS names; a Secret not there yet is
-  # skipped. flowgen keeps the list in the ConfigMap flowgen-credentials; a
-  # HelmRelease reads it with
-  # valuesFrom: [{kind: ConfigMap, name: flowgen-credentials, valuesKey: values.yaml, optional: true}].
+  # Credentials added in the web UI, one Secret per name. The cluster decrypts
+  # them from the workspace's credentials/ folder. The listed Secrets are
+  # mounted together, read-only, at credentialsPath, which FLOWGEN_CREDENTIALS
+  # names. A Secret not there yet is skipped. flowgen keeps the list in the
+  # ConfigMap flowgen-credentials, under the key values.yaml.
   credentials: []
   credentialsPath: /etc/flowgen/credentials
 

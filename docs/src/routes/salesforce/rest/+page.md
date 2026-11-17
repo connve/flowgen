@@ -195,7 +195,7 @@ Execute [SOSL](https://developer.salesforce.com/docs/atlas.en-us.soql_sosl.meta/
 |---|---|---|---|
 | `name` | string | required | Task name. |
 | `credentials_path` | string | required | Path to Salesforce credentials. |
-| `query` | string | required | SOSL query string. Supports templating. |
+| `query` | string or `{resource: <path>}` | required | SOSL query, inline or from a resource file. Supports templating. |
 | `depends_on` | list | | Upstream task names. |
 | `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
 

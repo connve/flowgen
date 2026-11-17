@@ -40,6 +40,7 @@ async fn boot_server() -> (Arc<McpServer>, String, tokio::task::JoinHandle<()>) 
         None,
         None,
         "flowgen".to_string(),
+        None,
     ));
 
     let server_clone = Arc::clone(&server);

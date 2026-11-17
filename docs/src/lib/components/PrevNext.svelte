@@ -51,6 +51,12 @@
 		border-color: var(--color-primary);
 		transform: translateY(-1px);
 	}
+	@media (max-width: 40rem) {
+		.prev-next-link {
+			flex: 1 1 0;
+			min-width: 0;
+		}
+	}
 	.prev-next-next {
 		align-items: flex-end;
 		text-align: right;

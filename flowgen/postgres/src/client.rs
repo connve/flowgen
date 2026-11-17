@@ -99,7 +99,7 @@ impl Client {
         connection_timeout: Duration,
         query_timeout: Duration,
     ) -> Result<Self, Error> {
-        let (mut config, tls) = connection_config(credentials, connection_timeout)?;
+        let (mut config, tls) = connection_config(credentials, connection_timeout).await?;
         config.options(format!(
             "-c statement_timeout={}",
             query_timeout.as_millis()
@@ -171,7 +171,7 @@ pub fn is_transient(error: &tokio_postgres::Error) -> bool {
 
 /// Connection settings and TLS connector for `credentials`, with TCP
 /// keepalives that notice a dead network path within about a minute.
-pub fn connection_config(
+pub async fn connection_config(
     credentials: &Credentials,
     connection_timeout: Duration,
 ) -> Result<(tokio_postgres::Config, MakeRustlsConnect), Error> {
@@ -189,7 +189,10 @@ pub fn connection_config(
         .keepalives_interval(Duration::from_secs(10))
         .keepalives_retries(3)
         .application_name("flowgen");
-    Ok((config, MakeRustlsConnect::new(tls_config(credentials)?)))
+    Ok((
+        config,
+        MakeRustlsConnect::new(tls_config(credentials).await?),
+    ))
 }
 
 /// Reads the credentials file.
@@ -217,7 +220,7 @@ fn parse_credentials(path: &Path, raw: &str) -> Result<Credentials, Error> {
     })
 }
 
-fn tls_config(credentials: &Credentials) -> Result<rustls::ClientConfig, Error> {
+async fn tls_config(credentials: &Credentials) -> Result<rustls::ClientConfig, Error> {
     let mut roots = rustls::RootCertStore::empty();
     match (&credentials.ca_certificate_path, credentials.ssl_mode) {
         (_, SslMode::Disable) => {}
@@ -226,7 +229,9 @@ fn tls_config(credentials: &Credentials) -> Result<rustls::ClientConfig, Error> 
                 path: path.clone(),
                 source,
             };
-            let pem = flowgen_core::credentials::read(path).map_err(Error::ReadCredentials)?;
+            let pem = flowgen_core::credentials::read_async(path)
+                .await
+                .map_err(Error::ReadCredentials)?;
             let certificates = CertificateDer::pem_slice_iter(pem.as_bytes())
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(read_error)?;
@@ -286,7 +291,9 @@ mod tests {
             r#"{{"host": "127.0.0.1", "port": {port}, "database": "postgres", "username": "postgres", "password": "secret", "ssl_mode": "disable"}}"#
         ))
         .unwrap();
-        let (config, tls) = connection_config(&credentials, Duration::from_secs(5)).unwrap();
+        let (config, tls) = connection_config(&credentials, Duration::from_secs(5))
+            .await
+            .unwrap();
         let manager = ConnectionManager {
             postgres: PostgresConnectionManager::new(config, tls),
             check_timeout: Duration::from_secs(1),
@@ -311,30 +318,33 @@ mod tests {
         assert!(matches!(silent, Ok(Err(ConnectionError::Silent { .. }))));
     }
 
-    #[test]
-    fn an_empty_ca_file_is_rejected() {
+    #[tokio::test]
+    async fn an_empty_ca_file_is_rejected() {
         let file = tempfile::NamedTempFile::new().unwrap();
         let path = file.path().display().to_string();
         let result = tls_config(&credentials(&format!(
             r#", "ca_certificate_path": "{path}""#
-        )));
+        )))
+        .await;
         assert!(matches!(result, Err(Error::EmptyCaFile { .. })));
     }
 
-    #[test]
-    fn a_disabled_ssl_mode_ignores_the_ca_file() {
+    #[tokio::test]
+    async fn a_disabled_ssl_mode_ignores_the_ca_file() {
         let result = tls_config(&credentials(
             r#", "ssl_mode": "disable", "ca_certificate_path": "/missing.pem""#,
-        ));
+        ))
+        .await;
         assert!(result.is_ok());
     }
 
-    #[test]
-    fn connections_send_tcp_keepalives() {
+    #[tokio::test]
+    async fn connections_send_tcp_keepalives() {
         let (config, _) = connection_config(
             &credentials(r#", "ssl_mode": "disable""#),
             Duration::from_secs(5),
         )
+        .await
         .unwrap();
         assert!(config.get_keepalives());
         assert_eq!(config.get_keepalives_idle(), Duration::from_secs(30));

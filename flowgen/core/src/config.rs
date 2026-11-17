@@ -198,6 +198,16 @@ where
     Ok(path.filter(|path| !path.as_os_str().is_empty()))
 }
 
+/// Options a task sets for a provider other than the one it uses, such as `s3` options on a `gs://` path.
+#[derive(thiserror::Error, Debug)]
+#[error("`{options}` options don't apply to {used}")]
+pub struct ProviderOptionsMismatch {
+    /// The options, such as `s3`.
+    pub options: &'static str,
+    /// The provider the task uses, such as `gs://data`.
+    pub used: String,
+}
+
 /// Extension trait for configuration types that support template rendering.
 ///
 /// Enables configuration structures to render themselves as Handlebars templates

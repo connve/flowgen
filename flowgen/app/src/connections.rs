@@ -114,6 +114,11 @@ struct Row {
     users: Vec<User>,
 }
 
+/// The connector named `name`.
+pub(crate) fn connector(name: &str) -> Option<Connector> {
+    connectors().remove(name).map(|(connector, _)| connector)
+}
+
 /// Every connector by name, with its task types.
 fn connectors() -> BTreeMap<&'static str, (Connector, Vec<&'static str>)> {
     let mut connectors = BTreeMap::new();
@@ -136,6 +141,7 @@ fn credentials_form(form: &CredentialsForm) -> api::CredentialsForm {
             .map(|field| {
                 let (kind, choices, checked) = match field.kind {
                     FieldKind::Text => (api::CredentialsFieldKind::Text, Vec::new(), false),
+                    FieldKind::Url => (api::CredentialsFieldKind::Url, Vec::new(), false),
                     FieldKind::Secret => (api::CredentialsFieldKind::Secret, Vec::new(), false),
                     FieldKind::Number => (api::CredentialsFieldKind::Number, Vec::new(), false),
                     FieldKind::Boolean(checked) => {
@@ -537,7 +543,7 @@ mod tests {
     name: publish
     url: "nats://user:secret@nats:4222"
     subject: a
-- nats_kv_store:
+- kv_store:
     name: store
     url: "nats://other:4222"
     bucket: b
@@ -621,6 +627,46 @@ mod tests {
 
         assert_eq!(found[0].account.as_deref(), Some("db:1433/sales"));
         assert!(!format!("{found:?}").contains("secret"));
+    }
+
+    #[test]
+    fn every_credentials_form_makes_a_file_its_tasks_read() {
+        let mut failed = Vec::new();
+        for (connector, _) in connectors().into_values() {
+            for form in connector
+                .credentials
+                .iter()
+                .filter(|form| !form.fields.is_empty())
+            {
+                let mut document = serde_json::Map::new();
+                for field in form.fields {
+                    let value: serde_json::Value = match field.kind {
+                        FieldKind::Url => "https://a.io".into(),
+                        FieldKind::Number => 1.into(),
+                        FieldKind::Boolean(checked) => checked.into(),
+                        FieldKind::Choice(choices) => choices[0].into(),
+                        FieldKind::List => vec!["a"].into(),
+                        FieldKind::Text | FieldKind::Secret => "a".into(),
+                    };
+                    let mut keys: Vec<&str> = field.key.split('.').collect();
+                    let last = keys.pop().unwrap();
+                    let mut node = &mut document;
+                    for key in keys {
+                        node = node
+                            .entry(key)
+                            .or_insert_with(|| serde_json::Value::Object(Default::default()))
+                            .as_object_mut()
+                            .unwrap();
+                    }
+                    node.insert(last.to_string(), value);
+                }
+                if let Err(message) = (form.check)(&serde_json::Value::Object(document).to_string())
+                {
+                    failed.push(format!("{} / {}: {message}", connector.name, form.label));
+                }
+            }
+        }
+        assert!(failed.is_empty(), "{failed:#?}");
     }
 
     #[test]

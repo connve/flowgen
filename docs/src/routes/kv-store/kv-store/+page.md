@@ -44,7 +44,7 @@ Any other scheme fails when the flow loads.
 | `allow_empty` | bool | `false` | With `prune`: let an empty `entries` list delete every key under `key_prefix`. Otherwise it fails and deletes nothing. |
 | `include_values` | bool | `false` | For `list`: also return each key's value under `values`. |
 | `ttl` | duration | | For `put`: how long the value lives, e.g. `30d`. On NATS it needs a bucket with per-key TTL (NATS 2.11+), as this task creates; on another bucket the task fails to start. |
-| `history` | int | `1` | Values a NATS bucket keeps per key, 1 to 64, set when this task creates the bucket. A redb file keeps only the latest. |
+| `nats` | object | | Options of a NATS server `url`: `history`, the values the bucket keeps per key, 1 to 64 (default `1`), set when this task creates the bucket. Set on a `redb://` URL, the task fails to load. |
 | `depends_on` | list | | Upstream task names. |
 | `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
 

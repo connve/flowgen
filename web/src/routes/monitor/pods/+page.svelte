@@ -42,14 +42,7 @@
 					<tr>
 						<th>{m.pods_column_pod()}</th>
 						<th>{m.pods_column_status()}</th>
-						<th>
-							<span
-								class="tooltip tooltip-bottom before:normal-case before:tracking-normal"
-								data-tip={m.pods_column_flows_tooltip()}
-							>
-								{m.pods_column_flows()}
-							</span>
-						</th>
+						<th>{m.pods_column_flows()}</th>
 					</tr>
 				</thead>
 				<tbody>

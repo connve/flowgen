@@ -1,12 +1,4 @@
-//! Validation helpers for config-supplied identifiers and paths.
-//!
-//! Names and paths from config flow into derived filesystem locations
-//! (e.g. the default `git_sync` `clone_path`). These helpers reject
-//! inputs that could escape the intended directory or otherwise break
-//! path handling, and are reused by both the flow loader and individual
-//! processor configs.
-
-use std::path::{Path, PathBuf};
+//! Validation of flow, task and resource names, which become path segments.
 
 /// Identifies which config field a name belongs to so error messages
 /// can point at the offending source without stringly-typed labels.
@@ -27,20 +19,6 @@ impl NameField {
     }
 }
 
-/// Identifies which config field a filesystem path belongs to.
-///
-/// Carries the field name as a static string so callers (e.g. `clone_path`,
-/// `credentials_path`) can reuse the same validator without this enum
-/// growing a variant per call site.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct PathField(pub &'static str);
-
-impl PathField {
-    const fn as_str(self) -> &'static str {
-        self.0
-    }
-}
-
 /// Errors produced by the validation helpers.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
@@ -53,8 +31,6 @@ pub enum Error {
         field.as_str()
     )]
     InvalidNameChars { field: NameField, name: String },
-    #[error("{} '{}' contains a '..' segment which is not allowed", field.as_str(), path.display())]
-    PathTraversal { field: PathField, path: PathBuf },
 }
 
 /// Validates that a name is safe to use as a filesystem path segment.
@@ -74,25 +50,6 @@ pub fn validate_name(field: NameField, name: &str) -> Result<(), Error> {
             field,
             name: name.to_string(),
         });
-    }
-    Ok(())
-}
-
-/// Validates that an operator-supplied path is safe to use as a working
-/// directory.
-///
-/// Rejects paths containing `..` segments. Absolute paths are accepted
-/// because overriding to a stable persistent volume is a legitimate use
-/// case; traversal segments never are.
-pub fn validate_path(field: PathField, path: &Path) -> Result<(), Error> {
-    use std::path::Component;
-    for component in path.components() {
-        if matches!(component, Component::ParentDir) {
-            return Err(Error::PathTraversal {
-                field,
-                path: path.to_path_buf(),
-            });
-        }
     }
     Ok(())
 }
@@ -136,23 +93,5 @@ mod tests {
     fn name_rejects_dot_segment() {
         assert!(validate_name(NameField::Flow, ".").is_err());
         assert!(validate_name(NameField::Flow, "a.b").is_err());
-    }
-
-    #[test]
-    fn path_accepts_normal() {
-        assert!(validate_path(PathField("clone_path"), &PathBuf::from("/var/tmp/repo")).is_ok());
-        assert!(validate_path(PathField("clone_path"), &PathBuf::from("repos/x")).is_ok());
-    }
-
-    #[test]
-    fn path_rejects_traversal() {
-        assert!(matches!(
-            validate_path(PathField("clone_path"), &PathBuf::from("/tmp/../etc")),
-            Err(Error::PathTraversal {
-                field: PathField("clone_path"),
-                ..
-            })
-        ));
-        assert!(validate_path(PathField("clone_path"), &PathBuf::from("../escape")).is_err());
     }
 }

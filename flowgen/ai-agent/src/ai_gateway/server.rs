@@ -1067,7 +1067,7 @@ enum DispatchError {
     UnknownProxy { name: String },
     #[error("LLM proxy '{name}' does not speak the protocol expected at this URL")]
     WrongProtocolForUrl { name: String },
-    #[error("LLM proxy '{name}' needs the model '{missing}', which no flow serves")]
+    #[error("LLM proxy '{name}' requires '{missing}', which no flow registers")]
     MissingRequirement { name: String, missing: String },
     #[error("No authorization header provided")]
     NoCredentials,

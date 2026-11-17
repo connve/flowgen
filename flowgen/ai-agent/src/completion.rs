@@ -96,6 +96,8 @@ pub struct Completion {
     /// Ollama only), same shape as `http_endpoint.headers`.
     #[serde(default)]
     pub headers: Option<std::collections::HashMap<String, String>>,
+    /// Options of `provider: vertexai`.
+    pub vertexai: Option<VertexAiOptions>,
     /// Optional system prompt to set context for the AI (supports resource loading).
     /// Can be inline string or external file (e.g., .md, .txt) via resource loader.
     pub system_prompt: Option<Source>,
@@ -412,7 +414,7 @@ pub enum Provider {
     Cohere,
     /// Google AI provider (Gemini API).
     Google,
-    /// Google Vertex AI provider (uses Application Default Credentials).
+    /// Google Vertex AI provider; a service account key, else Application Default Credentials.
     VertexAi,
     /// Groq provider.
     Groq,
@@ -530,6 +532,8 @@ pub enum Error {
     McpConnection { url: String, reason: String },
     #[error("MCP server {url} cannot set both on_behalf_of_user and credentials_path")]
     McpUserCredentials { url: String },
+    #[error(transparent)]
+    ProviderOptions(#[from] flowgen_core::config::ProviderOptionsMismatch),
     #[error("MCP server {url} needs a signed-in user")]
     McpUserRequired { url: String },
     #[error("MCP server {url} rejected the signed-in user's token")]
@@ -604,6 +608,16 @@ impl Error {
 impl Completion {
     /// Checks that `max_turns` leaves room for the model calls the task needs.
     pub fn validate(&self) -> Result<(), Error> {
+        match (&self.vertexai, &self.provider) {
+            (None, _) | (Some(_), Provider::VertexAi) => {}
+            (Some(_), provider) => {
+                return Err(flowgen_core::config::ProviderOptionsMismatch {
+                    options: "vertexai",
+                    used: provider.as_str().to_string(),
+                }
+                .into())
+            }
+        }
         let min_turns = match self.mcp_servers.is_empty() {
             true => 1,
             false => 2,
@@ -718,22 +732,26 @@ impl From<CompletionUsage> for crate::ai_gateway::config::Usage {
     }
 }
 
-/// API credentials for AI providers.
+/// Options of `provider: vertexai`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq, Hash)]
+#[serde(deny_unknown_fields)]
+pub struct VertexAiOptions {
+    /// Google Cloud project; defaults to `GOOGLE_CLOUD_PROJECT`, else the service account key's `project_id`.
+    pub project_id: Option<String>,
+    /// Google Cloud location; defaults to `GOOGLE_CLOUD_LOCATION`, else `global`.
+    pub location: Option<String>,
+}
+
+/// API credentials for AI providers; `vertexai` reads a service account key instead.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Credentials {
-    /// API key for the provider; every provider needs one except `vertexai`, `ollama` and `custom`.
+    /// API key for the provider; `ollama` and `custom` can go without.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
     /// Optional organization ID (OpenAI, Anthropic).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub organization_id: Option<String>,
-    /// Optional project ID (Google/Gemini).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub project_id: Option<String>,
-    /// Optional region (AWS Bedrock).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub region: Option<String>,
 }
 
 /// One live MCP server connection plus the credentials used to establish it.
@@ -745,6 +763,8 @@ struct McpServerConnection {
     on_behalf_of_user: bool,
     /// Header value the connection was opened with, for change detection.
     active_header: Option<String>,
+    /// How to use the server, from its `initialize` response.
+    instructions: Option<String>,
     connection: McpConnection,
 }
 
@@ -766,6 +786,29 @@ impl Drop for McpServerConnection {
 struct McpTools {
     handle: ToolServerHandle,
     connections: Vec<McpServerConnection>,
+    /// The servers' instructions for the system prompt.
+    instructions: Option<String>,
+}
+
+/// The `instructions` of the servers that give them, separated by a blank line.
+fn servers_instructions(connections: &[McpServerConnection]) -> Option<String> {
+    let given: Vec<&str> = connections
+        .iter()
+        .filter_map(|server| server.instructions.as_deref())
+        .collect();
+    match given.is_empty() {
+        true => None,
+        false => Some(given.join("\n\n")),
+    }
+}
+
+/// The task's system prompt followed by its MCP servers' instructions.
+fn with_instructions(system_prompt: Option<String>, instructions: Option<&str>) -> Option<String> {
+    match (system_prompt, instructions) {
+        (Some(prompt), Some(instructions)) => Some(format!("{prompt}\n\n{instructions}")),
+        (prompt, None) => prompt,
+        (None, Some(instructions)) => Some(instructions.to_string()),
+    }
 }
 
 impl McpTools {
@@ -1022,17 +1065,24 @@ async fn connect_mcp_tools(
             }
         }
 
+        let instructions = connection
+            .peer()
+            .peer_info()
+            .and_then(|info| info.instructions.clone())
+            .filter(|text| !text.trim().is_empty());
         connections.push(McpServerConnection {
             url: mcp_config.url.clone(),
             creds: oauth_creds,
             on_behalf_of_user: mcp_config.on_behalf_of_user,
             active_header: header_value,
+            instructions,
             connection,
         });
     }
 
     Ok(McpTools {
         handle,
+        instructions: servers_instructions(&connections),
         connections,
     })
 }
@@ -1109,30 +1159,23 @@ async fn build_agent_client(
     task_context: &flowgen_core::task::context::TaskContext,
     static_context: Option<Vec<flowgen_core::resource::Source>>,
 ) -> Result<crate::agent::AgentClient, Error> {
-    let credentials =
-        match config.provider {
-            Provider::Custom => {
-                if let Some(path) = &config.credentials_path {
-                    Some(load_credentials(path).await?)
-                } else {
-                    None
-                }
-            }
-            _ => {
-                let path = config.credentials_path.as_ref().ok_or_else(|| {
-                    Error::MissingCredentialsPath {
-                        provider: config.provider.as_str().to_string(),
-                    }
-                })?;
-                Some(load_credentials(path).await?)
-            }
-        };
-
     let mut builder =
         crate::agent::ClientBuilder::new(config.provider.clone(), config.model.clone());
 
-    if let Some(creds) = credentials {
-        builder = builder.credentials(creds);
+    match (&config.provider, &config.credentials_path) {
+        (Provider::VertexAi, Some(path)) => {
+            builder = builder.service_account(load_credentials(path).await?);
+        }
+        (_, Some(path)) => builder = builder.credentials(load_credentials(path).await?),
+        (Provider::VertexAi | Provider::Ollama | Provider::Custom, None) => {}
+        (provider, None) => {
+            return Err(Error::MissingCredentialsPath {
+                provider: provider.as_str().to_string(),
+            })
+        }
+    }
+    if let Some(vertexai) = &config.vertexai {
+        builder = builder.vertexai(vertexai.clone());
     }
     if let Some(endpoint) = &config.endpoint {
         builder = builder.endpoint(endpoint.clone());
@@ -1187,7 +1230,9 @@ async fn build_agent_client(
 }
 
 /// Loads credentials from a JSON file, or its keychain entry.
-async fn load_credentials(path: &std::path::Path) -> Result<Credentials, Error> {
+async fn load_credentials<T: serde::de::DeserializeOwned>(
+    path: &std::path::Path,
+) -> Result<T, Error> {
     flowgen_core::credentials::load_credentials(path)
         .await
         .map_err(Error::Credentials)
@@ -1226,6 +1271,7 @@ struct ClientId {
     model: String,
     endpoint: Option<String>,
     credentials_path: Option<std::path::PathBuf>,
+    vertexai: Option<VertexAiOptions>,
 }
 
 /// MCP connections and the agent clients built on their tools, kept per task
@@ -1255,6 +1301,11 @@ impl Toolset {
         }
     }
 
+    /// Its MCP servers' instructions for the system prompt.
+    fn instructions(&self) -> Option<&str> {
+        self.mcp.as_ref()?.instructions.as_deref()
+    }
+
     async fn close(&self) {
         if let Some(mcp) = &self.mcp {
             mcp.close().await;
@@ -1273,6 +1324,7 @@ impl Toolset {
             model: rendered.model.clone(),
             endpoint: rendered.endpoint.clone(),
             credentials_path: rendered.credentials_path.clone(),
+            vertexai: rendered.vertexai.clone(),
         };
         let mut clients = self.clients.lock().await;
         if let Some(client) = clients.get(&id) {
@@ -1411,7 +1463,7 @@ impl UserToolsets {
 struct Agent {
     client: Arc<crate::agent::AgentClient>,
     images: Vec<String>,
-    _toolset: Arc<Toolset>,
+    toolset: Arc<Toolset>,
 }
 
 /// Images go as base64, since some providers don't fetch URLs.
@@ -1555,7 +1607,7 @@ impl EventHandler {
         Ok(Agent {
             client,
             images,
-            _toolset: toolset,
+            toolset,
         })
     }
 
@@ -1566,7 +1618,7 @@ impl EventHandler {
         let Agent {
             client,
             images,
-            _toolset,
+            toolset,
         } = self.resolve_client(&event).await?;
         let event = Arc::new(event);
         let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
@@ -1588,10 +1640,11 @@ impl EventHandler {
                     .await;
             }
 
+            let system_prompt = with_instructions(rendered_system_prompt, toolset.instructions());
             let completion = client
                 .complete(
                     user_message(&self.image_client, &self.config, rendered_prompt, images).await?,
-                    rendered_system_prompt.as_deref(),
+                    system_prompt.as_deref(),
                     self.spending(&event, client.model()),
                 )
                 .await
@@ -1882,7 +1935,7 @@ impl EventHandler {
         let Agent {
             client,
             images,
-            _toolset,
+            toolset,
         } = self.resolve_client(&event).await?;
 
         flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
@@ -1902,10 +1955,11 @@ impl EventHandler {
                     .await;
             }
 
+            let system_prompt = with_instructions(rendered_system_prompt, toolset.instructions());
             let mut stream = client
                 .complete_stream(
                     user_message(&self.image_client, &self.config, rendered_prompt, images).await?,
-                    rendered_system_prompt.as_deref(),
+                    system_prompt.as_deref(),
                     self.spending(&event, client.model()),
                 )
                 .await;
@@ -2422,7 +2476,8 @@ mod tests {
                     Some("initialize") => json!({
                         "protocolVersion": body["params"]["protocolVersion"],
                         "capabilities": {"tools": {}},
-                        "serverInfo": {"name": "a", "version": "0"}
+                        "serverInfo": {"name": "a", "version": "0"},
+                        "instructions": "Use lookup."
                     }),
                     Some("tools/list") => json!({
                         "tools": [{"name": "lookup", "inputSchema": {"type": "object"}}]
@@ -2470,6 +2525,7 @@ mod tests {
             credentials_path: None,
             endpoint: None,
             headers: None,
+            vertexai: None,
             system_prompt: None,
             temperature: None,
             max_tokens: None,
@@ -2626,6 +2682,39 @@ mod tests {
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await });
         (address, bodies)
+    }
+
+    #[tokio::test]
+    async fn the_servers_instructions_follow_the_system_prompt() {
+        let (first_url, _) = mcp_server().await;
+        let (second_url, _) = mcp_server().await;
+        let server = |url: &str, prefix: Option<&str>| McpServerConfig {
+            on_behalf_of_user: false,
+            prefix: prefix.map(str::to_string),
+            ..user_server(url)
+        };
+        let mut config = agent(server(&first_url, None));
+        let one = connect_mcp_tools(&config, None).await.unwrap();
+        config.mcp_servers = vec![server(&first_url, None), server(&second_url, Some("b_"))];
+        let two = connect_mcp_tools(&config, None).await.unwrap();
+
+        assert_eq!(one.instructions.as_deref(), Some("Use lookup."));
+        assert_eq!(
+            two.instructions.as_deref(),
+            Some("Use lookup.\n\nUse lookup.")
+        );
+        assert_eq!(
+            with_instructions(Some("Be brief.".to_string()), one.instructions.as_deref()),
+            Some("Be brief.\n\nUse lookup.".to_string())
+        );
+        assert_eq!(
+            with_instructions(None, one.instructions.as_deref()),
+            Some("Use lookup.".to_string())
+        );
+        assert_eq!(
+            with_instructions(Some("Be brief.".to_string()), None),
+            Some("Be brief.".to_string())
+        );
     }
 
     #[tokio::test]
@@ -3278,8 +3367,6 @@ mod tests {
         let creds = Credentials {
             api_key: Some("sk-test123".to_string()),
             organization_id: Some("org-123".to_string()),
-            project_id: None,
-            region: None,
         };
 
         let json = serde_json::to_string(&creds).unwrap();
@@ -3453,23 +3540,14 @@ mod tests {
         let creds: Credentials = serde_json::from_str(json).unwrap();
         assert_eq!(creds.api_key.as_deref(), Some("sk-abc"));
         assert_eq!(creds.organization_id, None);
-        assert_eq!(creds.project_id, None);
-        assert_eq!(creds.region, None);
     }
 
     #[test]
     fn credentials_all_fields() {
-        let json = r#"{
-            "api_key": "sk-123",
-            "organization_id": "org-456",
-            "project_id": "proj-789",
-            "region": "us-east-1"
-        }"#;
+        let json = r#"{"api_key": "sk-123", "organization_id": "org-456"}"#;
         let creds: Credentials = serde_json::from_str(json).unwrap();
         assert_eq!(creds.api_key.as_deref(), Some("sk-123"));
         assert_eq!(creds.organization_id, Some("org-456".to_string()));
-        assert_eq!(creds.project_id, Some("proj-789".to_string()));
-        assert_eq!(creds.region, Some("us-east-1".to_string()));
     }
 
     #[test]
@@ -3477,29 +3555,66 @@ mod tests {
         let creds = Credentials {
             api_key: Some("sk-x".to_string()),
             organization_id: None,
-            project_id: None,
-            region: None,
         };
         let v = serde_json::to_value(&creds).unwrap();
         let obj = v.as_object().unwrap();
         assert!(obj.contains_key("api_key"));
         assert!(!obj.contains_key("organization_id"));
-        assert!(!obj.contains_key("project_id"));
-        assert!(!obj.contains_key("region"));
     }
 
     #[test]
-    fn a_vertex_ai_file_without_a_key_loads_and_a_keyed_provider_needs_one() {
-        let vertex: Credentials =
-            serde_json::from_str(r#"{"project_id": "p", "region": "r"}"#).unwrap();
+    fn a_keyed_provider_needs_a_key() {
         let keyless = crate::agent::ClientBuilder::new(Provider::OpenAi, "m".to_string())
-            .credentials(vertex.clone())
+            .credentials(Credentials {
+                api_key: None,
+                organization_id: None,
+            })
             .build();
 
-        assert_eq!(vertex.api_key, None);
         assert!(matches!(
             keyless,
             Err(crate::agent::Error::MissingCredentials)
+        ));
+    }
+
+    #[test]
+    fn vertex_ai_options_are_task_config_for_vertex_ai_only() {
+        let config = |provider: &str| -> Completion {
+            serde_yaml::from_str(&format!(
+                "name: a\nprovider: {provider}\nmodel: m\nprompt: p\nvertexai:\n  project_id: p\n  location: l\n"
+            ))
+            .unwrap()
+        };
+        let credentials = serde_json::from_str::<Credentials>(r#"{"project_id": "p"}"#);
+
+        assert_eq!(
+            config("vertexai").vertexai,
+            Some(VertexAiOptions {
+                project_id: Some("p".to_string()),
+                location: Some("l".to_string()),
+            })
+        );
+        assert!(config("vertexai").validate().is_ok());
+        assert_eq!(
+            config("openai").validate().unwrap_err().to_string(),
+            "`vertexai` options don't apply to openai"
+        );
+        assert!(credentials.is_err());
+    }
+
+    #[test]
+    fn a_vertex_ai_client_signs_in_with_its_service_account_key() {
+        let client = crate::agent::ClientBuilder::new(Provider::VertexAi, "m".to_string())
+            .vertexai(VertexAiOptions {
+                project_id: Some("p".to_string()),
+                location: None,
+            })
+            .service_account(serde_json::Value::Object(Default::default()))
+            .build();
+
+        assert!(matches!(
+            client,
+            Err(crate::agent::Error::ServiceAccount { .. })
         ));
     }
 
@@ -3513,6 +3628,7 @@ mod tests {
             credentials_path: None,
             endpoint: None,
             headers: None,
+            vertexai: None,
             system_prompt: None,
             temperature: None,
             max_tokens: None,
@@ -3556,6 +3672,7 @@ mod tests {
             credentials_path: Some(PathBuf::from("/secrets/anthropic.json")),
             endpoint: None,
             headers: None,
+            vertexai: None,
             system_prompt: Some(Source::Inline("You are a helpful assistant.".to_string())),
             temperature: Some(0.7),
             max_tokens: Some(1000),
@@ -3611,6 +3728,7 @@ mod tests {
             credentials_path: None,
             endpoint: None,
             headers: None,
+            vertexai: None,
             system_prompt: None,
             temperature: None,
             max_tokens: None,
@@ -3641,6 +3759,7 @@ mod tests {
             credentials_path: None, // Local providers may not need credentials.
             endpoint: Some("http://localhost:11434/v1".to_string()),
             headers: None,
+            vertexai: None,
             system_prompt: None,
             temperature: Some(0.8),
             max_tokens: Some(2000),
@@ -3676,6 +3795,7 @@ mod tests {
             credentials_path: Some(PathBuf::from("/secrets/openai.json")),
             endpoint: None,
             headers: None,
+            vertexai: None,
             system_prompt: Some(Source::Resource {
                 resource: "prompts/system.md".to_string(),
             }),
@@ -3711,6 +3831,7 @@ mod tests {
             credentials_path: Some(PathBuf::from("/secrets/openai.json")),
             endpoint: None,
             headers: None,
+            vertexai: None,
             system_prompt: Some(Source::Inline("Answer based on context".to_string())),
             temperature: Some(0.3),
             max_tokens: Some(500),

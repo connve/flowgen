@@ -30,6 +30,16 @@ pub struct CredentialsForm {
     pub label: &'static str,
     /// The fields making up the file; none when the whole file is uploaded.
     pub fields: &'static [CredentialsField],
+    /// Checks a file made this way, as the task reads it, such as [`parses`].
+    pub check: fn(&str) -> Result<(), String>,
+}
+
+/// Whether `content` reads as `T`, the type a task reads its credentials file as.
+pub fn parses<T: serde::de::DeserializeOwned>(content: &str) -> Result<(), String> {
+    match serde_json::from_str::<T>(content) {
+        Ok(_) => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 /// A value of a credentials file.
@@ -50,6 +60,8 @@ pub struct CredentialsField {
 pub enum FieldKind {
     /// A line of text.
     Text,
+    /// An `http` or `https` URL.
+    Url,
     /// Text masked when typed, never shown again.
     Secret,
     /// A number.
@@ -103,6 +115,7 @@ pub const HTTP_CREDENTIALS: &[CredentialsForm] = &[
     CredentialsForm {
         label: "Bearer token",
         fields: &[CredentialsField::secret("bearer_auth", "Token")],
+        check: parses::<crate::credentials::HttpCredentials>,
     },
     CredentialsForm {
         label: "Basic auth",
@@ -110,15 +123,18 @@ pub const HTTP_CREDENTIALS: &[CredentialsForm] = &[
             CredentialsField::text("basic_auth.username", "Username"),
             CredentialsField::secret("basic_auth.password", "Password"),
         ],
+        check: parses::<crate::credentials::HttpCredentials>,
     },
     CredentialsForm {
         label: "OAuth 2.0 client credentials",
         fields: &[
-            CredentialsField::text("oauth2_client_credentials.token_url", "Token URL"),
+            CredentialsField::text("oauth2_client_credentials.token_url", "Token URL")
+                .of(FieldKind::Url),
             CredentialsField::text("oauth2_client_credentials.client_id", "Client ID"),
             CredentialsField::secret("oauth2_client_credentials.client_secret", "Client secret"),
             CredentialsField::text("oauth2_client_credentials.scope", "Scope").optional(),
         ],
+        check: parses::<crate::credentials::HttpCredentials>,
     },
 ];
 

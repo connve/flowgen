@@ -8,7 +8,6 @@
 		approveChange,
 		editChange,
 		errorMessage,
-		getWorkspaceFile,
 		isStatus,
 		proposeChange,
 		rejectChange,
@@ -17,7 +16,7 @@
 	} from '$lib/api';
 	import { deploymentsStream } from '$lib/urls';
 	import { auth } from '$lib/auth.svelte';
-	import { actor, editUrl, ownLabel } from '$lib/changes';
+	import { actor, baseContent, editUrl, ownLabel } from '$lib/changes';
 	import { m } from '$lib/paraglide/messages.js';
 	import { pageTitle } from '$lib/pageTitle';
 	import { MINUTE, formatAbsolute, formatRelative } from '$lib/time';
@@ -108,12 +107,7 @@
 		reverting = true;
 		revertError = null;
 		try {
-			const current = await Promise.all(
-				change.files.map(async (file) => {
-					const { data } = await getWorkspaceFile({ query: { path: file.path } });
-					return data.content ?? null;
-				})
-			);
+			const current = await Promise.all(change.files.map((file) => baseContent(file.path)));
 			const changed = change.files
 				.filter((file, i) => (file.content ?? null) !== current[i])
 				.map((file) => file.path);
@@ -331,7 +325,7 @@
 								</button>
 							</div>
 						</div>
-					{:else if change.status === 'committed'}
+					{:else if change.status === 'committed' && !change.template}
 						<button
 							type="button"
 							class="btn btn-ghost btn-sm gap-1.5"

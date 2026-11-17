@@ -231,13 +231,12 @@ fn paths_of(event: &Event) -> Vec<String> {
     paths
 }
 
-fn base_config(url: &str, clone_path: PathBuf) -> GitSync {
+fn base_config(url: &str) -> GitSync {
     GitSync {
         name: "sync".to_string(),
         repository: url.to_string(),
         branch: Some("main".to_string()),
         path: None,
-        clone_path: Some(clone_path),
         credentials_path: None,
         force_pull: false,
         depends_on: None,
@@ -262,11 +261,7 @@ async fn git_sync_emits_one_snapshot_of_every_file_at_the_head_commit() {
         "initial",
     );
 
-    let clone_dir = tempfile::tempdir().expect("clone tempdir");
-    let config = Arc::new(base_config(
-        &repo.file_url(),
-        clone_dir.path().to_path_buf(),
-    ));
+    let config = Arc::new(base_config(&repo.file_url()));
     let events = run_once(config, test_task_context()).await;
 
     assert_eq!(events.len(), 1, "one snapshot per sync");
@@ -303,8 +298,7 @@ async fn git_sync_only_emits_files_under_the_configured_path() {
         "initial",
     );
 
-    let clone_dir = tempfile::tempdir().expect("clone tempdir");
-    let mut config = base_config(&repo.file_url(), clone_dir.path().to_path_buf());
+    let mut config = base_config(&repo.file_url());
     config.path = Some("flows".to_string());
     let events = run_once(Arc::new(config), test_task_context()).await;
 
@@ -316,15 +310,26 @@ async fn git_sync_only_emits_files_under_the_configured_path() {
 }
 
 #[tokio::test]
+async fn git_sync_fails_when_path_is_not_a_folder_in_the_repository() {
+    let repo = TestRepo::new();
+    commit_files(repo.path(), &[("flows/a.yaml", "name: a\n")], "initial");
+
+    for path in ["missing", "flows/a.yaml"] {
+        let mut config = base_config(&repo.file_url());
+        config.path = Some(path.to_string());
+        let events = run_once(Arc::new(config), test_task_context()).await;
+
+        assert_eq!(events.len(), 1, "{path}");
+        assert!(events[0].is_error(), "{path} must fail, not emit no files");
+    }
+}
+
+#[tokio::test]
 async fn git_sync_skips_the_file_walk_when_head_matches_last_sync() {
     let repo = TestRepo::new();
     commit_files(repo.path(), &[("flows/a.yaml", "name: a\n")], "initial");
 
-    let clone_dir = tempfile::tempdir().expect("clone tempdir");
-    let config = Arc::new(base_config(
-        &repo.file_url(),
-        clone_dir.path().to_path_buf(),
-    ));
+    let config = Arc::new(base_config(&repo.file_url()));
     // Share the TaskContext so the two invocations see the same cache.
     let ctx = test_task_context();
 
@@ -344,8 +349,7 @@ async fn git_sync_force_pull_reemits_even_when_head_is_unchanged() {
     let repo = TestRepo::new();
     commit_files(repo.path(), &[("flows/a.yaml", "name: a\n")], "initial");
 
-    let clone_dir = tempfile::tempdir().expect("clone tempdir");
-    let mut cfg = base_config(&repo.file_url(), clone_dir.path().to_path_buf());
+    let mut cfg = base_config(&repo.file_url());
     cfg.force_pull = true;
     let config = Arc::new(cfg);
     let ctx = test_task_context();
@@ -366,11 +370,7 @@ async fn git_sync_reemits_with_new_commit_when_upstream_advances() {
     let repo = TestRepo::new();
     let first_commit = commit_files(repo.path(), &[("flows/a.yaml", "name: a\n")], "initial");
 
-    let clone_dir = tempfile::tempdir().expect("clone tempdir");
-    let config = Arc::new(base_config(
-        &repo.file_url(),
-        clone_dir.path().to_path_buf(),
-    ));
+    let config = Arc::new(base_config(&repo.file_url()));
     let ctx = test_task_context();
 
     let first_run = run_once(Arc::clone(&config), Arc::clone(&ctx)).await;
@@ -411,11 +411,7 @@ async fn git_sync_reemits_with_new_commit_when_upstream_advances() {
 
 #[tokio::test]
 async fn git_sync_rejects_ssh_url_before_touching_the_network() {
-    let clone_dir = tempfile::tempdir().expect("clone tempdir");
-    let config = Arc::new(base_config(
-        "git@github.com:org/repo.git",
-        clone_dir.path().to_path_buf(),
-    ));
+    let config = Arc::new(base_config("git@github.com:org/repo.git"));
     let events = run_once(config, test_task_context()).await;
 
     // The processor rejects SSH inside init, so nothing should flow
@@ -430,9 +426,8 @@ async fn git_sync_rejects_ssh_url_before_touching_the_network() {
 #[tokio::test]
 async fn git_sync_forwards_a_failure_downstream_once_retries_run_out() {
     let missing = tempfile::tempdir().expect("tempdir");
-    let clone_dir = tempfile::tempdir().expect("clone tempdir");
     let url = format!("file://{}/missing", missing.path().display());
-    let config = Arc::new(base_config(&url, clone_dir.path().to_path_buf()));
+    let config = Arc::new(base_config(&url));
 
     let events = run_once(config, test_task_context()).await;
 

@@ -94,6 +94,7 @@ export type KeyValue = Types.KeyValue;
 export type UserContext = Types.UserContext;
 export type Change = Types.Change;
 export type ChangeSummary = Types.ChangeSummary;
+export type ChangeProposal = Types.ChangeProposal;
 export type ChangeStatus = Types.ChangeStatus;
 export type AuthoringTarget = Types.AuthoringTarget;
 export type ValidationIssue = Types.ValidationIssue;

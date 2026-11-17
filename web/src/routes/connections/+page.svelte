@@ -4,10 +4,12 @@
 	import { encodePath, type Connection, type FlowStatus } from '$lib/api';
 	import Icon from '@iconify/svelte';
 	import { Badge, IconButton, Inspector, InspectorSection, StateMessage, StatusDot } from '@connve/ui';
+	import Actor from '$lib/Actor.svelte';
 	import CredentialsForm from '$lib/CredentialsForm.svelte';
 	import { connectorByName } from '$lib/connectors';
 	import { m } from '$lib/paraglide/messages.js';
 	import { pageTitle } from '$lib/pageTitle';
+	import { formatAbsolute } from '$lib/time';
 	import type { PageProps } from './$types';
 
 	const REFRESH_MS = 30_000;
@@ -141,6 +143,7 @@
 	{@const status = STATUS[selected.status]}
 	{@const name = nameOf(selected, connector.label)}
 	{@const addable = data.credentials ? selected.credentialsName : undefined}
+	{@const changed = addable && selected.credentialsFound ? data.changes[addable] : undefined}
 	<Inspector title={name} label={m.connections_details()} onclose={() => (selectedId = null)}>
 		{#snippet subtitle()}
 			<img src={connector.iconUrl} alt="" class="h-3.5 w-3.5 shrink-0" />
@@ -162,8 +165,16 @@
 				<CredentialsForm name={addable} {connector} found={selected.credentialsFound} />
 			{/key}
 		{/if}
-		{#if selected.account || selected.targets.length > 0 || selected.perEvent || selected.onBehalfOfUser}
+		{#if changed || selected.account || selected.targets.length > 0 || selected.perEvent || selected.onBehalfOfUser}
 			<dl class="grid grid-cols-[max-content_minmax(0,1fr)] gap-x-4 gap-y-1">
+				{#if changed}
+					<dt class="text-base-content/50">{m.connections_field_updated()}</dt>
+					<dd>
+						<a href="{base}/changes/{encodeURIComponent(changed.id)}" class="hover:underline">
+							<Actor label={changed.by} /> · {formatAbsolute(changed.at)}
+						</a>
+					</dd>
+				{/if}
 				{#if selected.account}
 					<dt class="text-base-content/50">{m.connections_field_account()}</dt>
 					<dd class="[overflow-wrap:anywhere]">{selected.account}</dd>

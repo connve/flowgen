@@ -26,9 +26,9 @@ jobs:
           VERSION=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.name == "flowgen") | .version')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-      # Release whenever the version has no tag yet. The tag is created by
-      # `gh release create` at the end, so a release that fails before then
-      # is retried on the next push to main.
+      # Release whenever the version has no tag yet. The tag is created when
+      # the draft release is published at the end, so a release that fails
+      # before then is retried on the next push to main.
       - name: Detect unreleased version
         id: detect
         env:
@@ -185,14 +185,17 @@ jobs:
           echo "$CHANGELOG" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-      - name: Create GitHub Release
+      # A draft until publish-release; a draft left by a failed run is replaced.
+      - name: Create draft GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.detect-version.outputs.tag }}
           CHANGELOG: ${{ steps.changelog.outputs.changelog }}
         run: |
           printf '## Changes in %s\n\n%s\n' "$TAG" "$CHANGELOG" > release-notes.md
+          gh release delete "$TAG" --yes 2>/dev/null || true
           gh release create "$TAG" \
+            --draft \
             --target "${{ github.sha }}" \
             --title "Release $TAG" \
             --notes-file release-notes.md
@@ -295,67 +298,81 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "${{ needs.detect-version.outputs.tag }}" "${{ env.ARCHIVE }}" "${{ env.ARCHIVE }}.sha256" --clobber
 
-  # bump-homebrew:
-  #   needs: [detect-version, extract-linux-binaries, build-macos-binaries]
-  #   if: needs.detect-version.outputs.version-changed == 'true'
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - name: Download SHA256 checksums from release
-  #       env:
-  #         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-  #         TAG: ${{ needs.detect-version.outputs.tag }}
-  #         VERSION: ${{ needs.detect-version.outputs.version }}
-  #       run: |
-  #         mkdir -p sums
-  #         cd sums
-  #         for name in flowgen-darwin-arm64 flowgen-darwin-amd64 flowgen-linux-arm64 flowgen-linux-amd64; do
-  #           gh release download "$TAG" --repo "${{ github.repository }}" --pattern "${name}-${VERSION}.tar.gz.sha256"
-  #         done
+  # Publishes the release once every binary is uploaded, so the latest
+  # release always has them.
+  publish-release:
+    needs: [detect-version, extract-linux-binaries, build-macos-binaries]
+    if: needs.detect-version.outputs.version-changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "${{ needs.detect-version.outputs.tag }}" --repo "${{ github.repository }}" --draft=false
 
-  #     - name: Compute SHA env vars
-  #       id: shas
-  #       run: |
-  #         echo "darwin_arm64=$(cat sums/flowgen-darwin-arm64-${{ needs.detect-version.outputs.version }}.tar.gz.sha256)" >> $GITHUB_OUTPUT
-  #         echo "darwin_amd64=$(cat sums/flowgen-darwin-amd64-${{ needs.detect-version.outputs.version }}.tar.gz.sha256)" >> $GITHUB_OUTPUT
-  #         echo "linux_arm64=$(cat sums/flowgen-linux-arm64-${{ needs.detect-version.outputs.version }}.tar.gz.sha256)" >> $GITHUB_OUTPUT
-  #         echo "linux_amd64=$(cat sums/flowgen-linux-amd64-${{ needs.detect-version.outputs.version }}.tar.gz.sha256)" >> $GITHUB_OUTPUT
+  bump-homebrew:
+    needs: [detect-version, publish-release]
+    if: needs.detect-version.outputs.version-changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download SHA256 checksums from release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.detect-version.outputs.tag }}
+          VERSION: ${{ needs.detect-version.outputs.version }}
+        run: |
+          mkdir -p sums
+          cd sums
+          for name in flowgen-darwin-arm64 flowgen-darwin-amd64 flowgen-linux-arm64 flowgen-linux-amd64; do
+            gh release download "$TAG" --repo "${{ github.repository }}" --pattern "${name}-${VERSION}.tar.gz.sha256"
+          done
 
-  #     - name: Checkout homebrew tap
-  #       uses: actions/checkout@v4
-  #       with:
-  #         repository: connve/homebrew-tap
-  #         token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-  #         path: tap
+      - name: Compute SHA env vars
+        id: shas
+        run: |
+          echo "darwin_arm64=$(cat sums/flowgen-darwin-arm64-${{ needs.detect-version.outputs.version }}.tar.gz.sha256)" >> $GITHUB_OUTPUT
+          echo "darwin_amd64=$(cat sums/flowgen-darwin-amd64-${{ needs.detect-version.outputs.version }}.tar.gz.sha256)" >> $GITHUB_OUTPUT
+          echo "linux_arm64=$(cat sums/flowgen-linux-arm64-${{ needs.detect-version.outputs.version }}.tar.gz.sha256)" >> $GITHUB_OUTPUT
+          echo "linux_amd64=$(cat sums/flowgen-linux-amd64-${{ needs.detect-version.outputs.version }}.tar.gz.sha256)" >> $GITHUB_OUTPUT
 
-  #     - name: Render formula from template
-  #       working-directory: tap
-  #       env:
-  #         VERSION: ${{ needs.detect-version.outputs.version }}
-  #         DARWIN_ARM64: ${{ steps.shas.outputs.darwin_arm64 }}
-  #         DARWIN_AMD64: ${{ steps.shas.outputs.darwin_amd64 }}
-  #         LINUX_ARM64: ${{ steps.shas.outputs.linux_arm64 }}
-  #         LINUX_AMD64: ${{ steps.shas.outputs.linux_amd64 }}
-  #       run: |
-  #         sed \
-  #           -e "s/__VERSION__/${VERSION}/g" \
-  #           -e "s/__SHA_DARWIN_ARM64__/${DARWIN_ARM64}/g" \
-  #           -e "s/__SHA_DARWIN_AMD64__/${DARWIN_AMD64}/g" \
-  #           -e "s/__SHA_LINUX_ARM64__/${LINUX_ARM64}/g" \
-  #           -e "s/__SHA_LINUX_AMD64__/${LINUX_AMD64}/g" \
-  #           Formula/flowgen.rb.tmpl > Formula/flowgen.rb
-  #         cat Formula/flowgen.rb
+      - name: Checkout homebrew tap
+        uses: actions/checkout@v4
+        with:
+          repository: connve/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
 
-  #     - name: Commit and push formula
-  #       working-directory: tap
-  #       env:
-  #         VERSION: ${{ needs.detect-version.outputs.version }}
-  #       run: |
-  #         git config user.name "github-actions[bot]"
-  #         git config user.email "github-actions[bot]@users.noreply.github.com"
-  #         if git diff --quiet Formula/flowgen.rb; then
-  #           echo "No formula changes."
-  #           exit 0
-  #         fi
-  #         git add Formula/flowgen.rb
-  #         git commit -m "flowgen ${VERSION}"
-  #         git push
+      - name: Render formula from template
+        working-directory: tap
+        env:
+          VERSION: ${{ needs.detect-version.outputs.version }}
+          DARWIN_ARM64: ${{ steps.shas.outputs.darwin_arm64 }}
+          DARWIN_AMD64: ${{ steps.shas.outputs.darwin_amd64 }}
+          LINUX_ARM64: ${{ steps.shas.outputs.linux_arm64 }}
+          LINUX_AMD64: ${{ steps.shas.outputs.linux_amd64 }}
+        run: |
+          sed \
+            -e "s/__VERSION__/${VERSION}/g" \
+            -e "s/__SHA_DARWIN_ARM64__/${DARWIN_ARM64}/g" \
+            -e "s/__SHA_DARWIN_AMD64__/${DARWIN_AMD64}/g" \
+            -e "s/__SHA_LINUX_ARM64__/${LINUX_ARM64}/g" \
+            -e "s/__SHA_LINUX_AMD64__/${LINUX_AMD64}/g" \
+            Formula/flowgen.rb.tmpl > Formula/flowgen.rb
+          cat Formula/flowgen.rb
+
+      - name: Commit and push formula
+        working-directory: tap
+        env:
+          VERSION: ${{ needs.detect-version.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/flowgen.rb
+          if git diff --cached --quiet; then
+            echo "No formula changes."
+            exit 0
+          fi
+          git commit -m "flowgen ${VERSION}"
+          git push

@@ -9,19 +9,20 @@ use crate::remote::{CloneError, Credentials};
 use gix::objs::tree::EntryKind;
 use gix::odb::pack::data::entry::Header as PackEntryHeader;
 use gix::protocol::transport::packetline;
+use gix::refs::file::transaction::prepare::Error as RefPrepareError;
 use gix::ObjectId;
 use secrecy::ExposeSecret;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Failure to commit or push.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("Invalid file path '{path}': must be relative and name a file, without '.', '..' or '.git' segments")]
     InvalidPath { path: String },
-    #[error("'{path}' changed in the repository. Please propose the change again.")]
+    #[error("'{path}' changed on the branch since the change was prepared")]
     Conflict { path: String },
     #[error("Nothing to push to an empty repository")]
     NothingToPush,
@@ -110,6 +111,8 @@ pub enum Error {
     ServerError { message: String },
     #[error("Branch '{branch}' moved while the commit was being built")]
     BranchMoved { branch: String },
+    #[error("The commit ran out of time before the branch was moved")]
+    Interrupted,
     #[error("Failed to create a temporary directory: {source}")]
     TempDir {
         #[source]
@@ -511,11 +514,11 @@ pub struct Commit {
 }
 
 impl Commit {
-    /// Commits `changes` on top of the branch, moves the branch to the commit
-    /// and writes the files into the working tree. A file whose working copy
-    /// differs from the branch is a [`Error::Conflict`], so edits not yet
-    /// committed are never overwritten. Without `author` the commit is the
-    /// git user's of this machine.
+    /// Commits `changes` on top of the branch, writes the files into the
+    /// working tree and the index, then moves the branch to the commit. A file
+    /// whose working copy differs from the branch is a [`Error::Conflict`], so
+    /// edits not yet committed are never overwritten. Without `author` the
+    /// commit is the git user's of this machine.
     pub async fn commit(
         &self,
         changes: Vec<FileChange>,
@@ -523,21 +526,23 @@ impl Commit {
         message: String,
     ) -> Result<Pushed, Error> {
         let commit = self.clone();
-        crate::remote::run_blocking(self.timeout, move |_| {
-            commit.commit_blocking(changes, author, &message)
+        crate::remote::run_blocking(self.timeout, move |interrupt| {
+            commit.commit_blocking(changes, author, &message, interrupt)
         })
         .await?
     }
 
-    /// [`Self::commit`] on the calling thread.
+    /// [`Self::commit`] on the calling thread; once `interrupt` is set the
+    /// branch is left where it is.
     pub(crate) fn commit_blocking(
         &self,
         changes: Vec<FileChange>,
         author: Option<Author>,
         message: &str,
+        interrupt: &AtomicBool,
     ) -> Result<Pushed, Error> {
         let (prefix, full_paths) = resolve(self.path.as_deref(), changes)?;
-        self.write(&full_paths, &author, message, &prefix)
+        self.write(&full_paths, &author, message, &prefix, interrupt)
     }
 
     fn write(
@@ -546,6 +551,7 @@ impl Commit {
         author: &Option<Author>,
         message: &str,
         prefix: &str,
+        interrupt: &AtomicBool,
     ) -> Result<Pushed, Error> {
         let repo = gix::open(&self.repository_path).map_err(|source| Error::OpenRepository {
             path: self.repository_path.display().to_string(),
@@ -616,24 +622,34 @@ impl Commit {
             message,
             self.signing_key.as_deref(),
         )?;
+        for (path, change) in changes {
+            write_worktree(&root, path, change.content.as_deref())?;
+        }
+        update_index(&repo, &root, tree, changes)?;
+
+        if interrupt.load(Ordering::Relaxed) {
+            return Err(Error::Interrupted);
+        }
         let previous = match parent {
             Some(parent) => gix::refs::transaction::PreviousValue::MustExistAndMatch(
                 gix::refs::Target::Object(parent),
             ),
             None => gix::refs::transaction::PreviousValue::MustNotExist,
         };
-        repo.reference(
+        match repo.reference(
             reference.as_str(),
             commit,
             previous,
             format!("commit: {message}"),
-        )
-        .map_err(|_| Error::BranchMoved { branch })?;
-
-        for (path, change) in changes {
-            write_worktree(&root, path, change.content.as_deref())?;
+        ) {
+            Ok(_) => {}
+            Err(gix::reference::edit::Error::FileTransactionPrepare(
+                RefPrepareError::ReferenceOutOfDate { .. }
+                | RefPrepareError::MustExist { .. }
+                | RefPrepareError::MustNotExist { .. },
+            )) => return Err(Error::BranchMoved { branch }),
+            Err(error) => return Err(write_error(error)),
         }
-        update_index(&repo, &root, tree, changes)?;
 
         Ok(Pushed {
             commit: commit.to_string(),
@@ -1781,6 +1797,71 @@ mod tests {
                 .unwrap()
                 .object_id()
         );
+    }
+
+    fn head(root: &Path) -> ObjectId {
+        gix::open(root).unwrap().head_id().unwrap().detach()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_write_leaves_the_branch_so_a_retry_commits() {
+        let (_dir, root) = workspace(&[]);
+        let first = head(&root);
+        std::os::unix::fs::symlink(root.join("missing"), root.join("docs")).unwrap();
+        let change = || vec![edit("docs/a.yaml", Some("a"), Expected::Missing)];
+
+        let failed = local(&root)
+            .commit(change(), author(), "Add a".to_string())
+            .await;
+
+        assert!(matches!(failed, Err(Error::Worktree { .. })), "{failed:?}");
+        assert_eq!(head(&root), first);
+        std::fs::remove_file(root.join("docs")).unwrap();
+        let committed = local(&root)
+            .commit(change(), author(), "Add a".to_string())
+            .await
+            .unwrap();
+        assert_eq!(head(&root).to_string(), committed.commit);
+        assert!(clean(&root));
+    }
+
+    #[tokio::test]
+    async fn a_locked_branch_is_a_write_error_not_a_moved_branch() {
+        let (_dir, root) = workspace(&[]);
+        let first = head(&root);
+        let branch = gix::open(&root).unwrap().head_name().unwrap().unwrap();
+        std::fs::write(root.join(format!(".git/{}.lock", branch.as_bstr())), "").unwrap();
+
+        let result = local(&root)
+            .commit(
+                vec![edit("flows/a.yaml", Some("a"), Expected::Missing)],
+                author(),
+                "Add a".to_string(),
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(Error::WriteRepository { .. })),
+            "{result:?}"
+        );
+        assert_eq!(head(&root), first);
+    }
+
+    #[test]
+    fn an_interrupted_commit_leaves_the_branch() {
+        let (_dir, root) = workspace(&[]);
+        let first = head(&root);
+
+        let result = local(&root).commit_blocking(
+            vec![edit("flows/a.yaml", Some("a"), Expected::Missing)],
+            author(),
+            "Add a",
+            &AtomicBool::new(true),
+        );
+
+        assert!(matches!(result, Err(Error::Interrupted)), "{result:?}");
+        assert_eq!(head(&root), first);
     }
 
     #[test]

@@ -29,3 +29,6 @@ export const logoutUrl = (): string => apiUrl('auth/logout');
 
 export const connectorIconUrl = (name: string): string =>
 	apiUrl(`api/connectors/${encodeURIComponent(name)}/icon`);
+
+/** How to connect a coding agent to flowgen, in the docs. */
+export const AGENT_SETUP_URL = 'https://connve.com/docs/flowgen/getting-started/agent-setup';

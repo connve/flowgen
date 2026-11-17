@@ -61,7 +61,7 @@ pub(crate) fn literal(value: &str) -> Option<&str> {
 ///     key_prefix: "flows."
 ///     prune: true
 /// ```
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, TaskConfig)]
 #[serde(deny_unknown_fields)]
 pub struct KvStore {
     /// Task name.
@@ -117,12 +117,11 @@ pub struct KvStore {
     /// Example: `ttl: "1h"`
     #[serde(default, with = "humantime_serde")]
     pub ttl: Option<std::time::Duration>,
-    /// Values a NATS bucket keeps per key, 1 to 64, set when this task
-    /// creates the bucket; a redb file keeps only the latest.
+    /// Options of a NATS server `url`.
     ///
-    /// Example: `history: 10`
-    #[serde(default = "default_history")]
-    pub history: i64,
+    /// Example: `nats: { history: 10 }`
+    #[serde(default)]
+    pub nats: Option<NatsOptions>,
     /// Optional list of upstream task names this task depends on.
     ///
     /// Example: `depends_on: [to_entries]`
@@ -138,29 +137,16 @@ pub struct KvStore {
     pub max_in_flight: Option<std::num::NonZeroUsize>,
 }
 
-impl Default for KvStore {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            url: String::new(),
-            credentials_path: None,
-            bucket: String::new(),
-            operation: Operation::default(),
-            key: None,
-            key_prefix: None,
-            prune: false,
-            allow_empty: false,
-            include_values: false,
-            ttl: None,
-            history: default_history(),
-            depends_on: None,
-            retry: None,
-            max_in_flight: None,
-        }
-    }
-}
-
 impl ConfigExt for KvStore {}
+
+/// Options of a NATS server `url`.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NatsOptions {
+    /// Values the bucket keeps per key, 1 to 64, set when this task creates it.
+    #[serde(default = "default_history")]
+    pub history: i64,
+}
 
 /// Key-value store operations.
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
@@ -231,7 +217,10 @@ impl KvStore {
             url: &self.url,
             credentials_path: &self.credentials_path,
             name: &self.bucket,
-            history: self.history,
+            history: match &self.nats {
+                Some(nats) => nats.history,
+                None => default_history(),
+            },
             ttl: self.ttl.is_some(),
         }
     }
@@ -239,11 +228,20 @@ impl KvStore {
     /// The store, the keys the operation needs and a prune prefix that can
     /// only delete its own keys; templated values are checked once rendered.
     pub fn check_config(&self) -> Result<(), ConfigError> {
-        self.backend()?;
-        if !(1..=MAX_HISTORY).contains(&self.history) {
-            return Err(ConfigError::InvalidHistory {
-                history: self.history,
-            });
+        match (self.backend()?, &self.nats) {
+            (Backend::Redb(_), Some(_)) => {
+                return Err(flowgen_core::config::ProviderOptionsMismatch {
+                    options: "nats",
+                    used: self.url.clone(),
+                }
+                .into())
+            }
+            (Backend::Nats(_), Some(nats)) if !(1..=MAX_HISTORY).contains(&nats.history) => {
+                return Err(ConfigError::InvalidHistory {
+                    history: nats.history,
+                })
+            }
+            _ => {}
         }
         let key = self.key.as_deref();
         let prefix = self.key_prefix.as_deref();
@@ -292,8 +290,10 @@ pub enum ConfigError {
     InvalidKey { key: String },
     #[error("Prune needs a key_prefix ending in '.' or '/', got '{prefix}'")]
     UnsafePrunePrefix { prefix: String },
-    #[error("history must be 1 to 64, got {history}")]
+    #[error("nats.history must be 1 to 64, got {history}")]
     InvalidHistory { history: i64 },
+    #[error(transparent)]
+    ProviderOptions(#[from] flowgen_core::config::ProviderOptionsMismatch),
     #[error("A watch needs either key or key_prefix")]
     KeyOrPrefix,
     #[error("'{key}' is not a key or a key_prefix ending in '.' or '/' under a folder, such as 'releases.latest' or 'releases.'")]
@@ -1046,13 +1046,21 @@ mod tests {
             }
             .to_string()
         );
+        assert_eq!(
+            check(json!({"key": "a", "nats": {"history": 10}})),
+            "`nats` options don't apply to redb://a.redb"
+        );
+        let nats = |fields| match config("nats://a:4222", fields).check_config() {
+            Ok(()) => "ok".to_string(),
+            Err(error) => error.to_string(),
+        };
         for history in [0, 65] {
             assert_eq!(
-                check(json!({"key": "a", "history": history})),
+                nats(json!({"key": "a", "nats": {"history": history}})),
                 ConfigError::InvalidHistory { history }.to_string()
             );
         }
-        assert_eq!(check(json!({"key": "a", "history": 64})), "ok");
+        assert_eq!(nats(json!({"key": "a", "nats": {"history": 64}})), "ok");
         assert_eq!(check(json!({"key": "flows.{{event.data.path}}"})), "ok");
         assert_eq!(check(json!({"operation": "list"})), "ok");
         assert_eq!(check(json!({"key_prefix": "flows.", "prune": true})), "ok");

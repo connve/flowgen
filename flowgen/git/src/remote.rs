@@ -8,9 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Username sent for basic auth when the user did not override it. Accepted
-/// by GitHub Personal Access Tokens and App installation tokens, GitLab
-/// personal and deploy tokens, and Bitbucket app passwords.
+/// Username sent for basic auth when the credentials name none.
 const DEFAULT_TOKEN_USERNAME: &str = "x-access-token";
 
 /// Git credentials loaded from the credentials JSON file.
@@ -19,17 +17,12 @@ const DEFAULT_TOKEN_USERNAME: &str = "x-access-token";
 /// `git_sync` in answer to the server's `WWW-Authenticate` challenge. It
 /// never appears in the repository URL, in `.git/config`, or in logs.
 ///
-/// `username` defaults to `x-access-token`, which works for GitHub Personal
-/// Access Tokens and GitHub App installation tokens, and is accepted as the
-/// basic-auth user by GitLab personal and deploy tokens and Bitbucket app
-/// passwords. Override it for hosts that require a specific literal
-/// username (GitLab OAuth tokens expect `oauth2`, Bitbucket Cloud
-/// token-auth expects `x-token-auth`).
+/// `username` defaults to `x-access-token`; set it when the host expects
+/// another basic-auth user.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Credentials {
-    /// HTTPS token, e.g. a GitHub Personal Access Token, a GitLab deploy
-    /// token, or a Bitbucket app password.
+    /// HTTPS token, sent as the basic-auth password.
     pub token: SecretString,
     /// Optional username paired with the token for basic auth. Defaults to
     /// `x-access-token` when omitted.
@@ -65,11 +58,6 @@ pub enum CloneError {
     #[error("Git clone failed for {url}: {source}")]
     Clone {
         url: String,
-        #[source]
-        source: Box<dyn std::error::Error + Send + Sync>,
-    },
-    #[error("Failed to checkout worktree: {source}")]
-    Checkout {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
@@ -166,27 +154,6 @@ fn single_commit_of(
     }
 }
 
-/// Shallow-clones a single branch into `path` and checks out its worktree.
-pub(crate) fn shallow_clone(
-    url: &str,
-    branch: &str,
-    path: &Path,
-    credentials: Option<&Credentials>,
-    interrupt: &AtomicBool,
-) -> Result<(), CloneError> {
-    let prepare = gix::prepare_clone(url, path).map_err(|e| clone_error(url, e))?;
-    let mut prepare = single_commit_of(prepare, url, branch, credentials)?;
-    let (mut checkout, _outcome) = prepare
-        .fetch_then_checkout(gix::progress::Discard, interrupt)
-        .map_err(|e| clone_error(url, e))?;
-    checkout
-        .main_worktree(gix::progress::Discard, interrupt)
-        .map_err(|e| CloneError::Checkout {
-            source: Box::new(e),
-        })?;
-    Ok(())
-}
-
 /// Shallow-fetches a single branch into a bare repository at `path`, with
 /// `HEAD` on the branch tip.
 pub(crate) fn shallow_fetch_bare(
@@ -211,6 +178,8 @@ pub enum UrlError {
     Ssh { url: String },
     #[error("Credentials are only sent over HTTPS, or over HTTP to a loopback host: {url}")]
     Insecure { url: String },
+    #[error("The repository URL for {host} holds a username or password; put the token in the credentials_path file")]
+    Userinfo { host: String },
     #[error("Invalid repository URL '{url}': {source}")]
     Parse {
         url: String,
@@ -230,27 +199,31 @@ pub fn is_url(repository: &str) -> bool {
     repository.contains("://") || repository.starts_with("git@")
 }
 
-/// Rejects SSH URLs, and with credentials any URL but HTTPS or HTTP to a
-/// loopback host, because the push sends the token with its first request.
+/// Rejects SSH URLs and URLs holding a username or password, and with
+/// credentials any URL but HTTPS or HTTP to a loopback host, because the push
+/// sends the token with its first request.
 pub fn check_url(url: &str, credentials: Option<&Credentials>) -> Result<(), UrlError> {
-    let ssh = url.starts_with("git@") || url.starts_with("ssh://");
-    match (ssh, credentials) {
-        (true, _) => Err(UrlError::Ssh {
+    if url.starts_with("git@") || url.starts_with("ssh://") {
+        return Err(UrlError::Ssh {
+            url: url.to_string(),
+        });
+    }
+    let parsed = url::Url::parse(url).map_err(|source| UrlError::Parse {
+        url: url.to_string(),
+        source,
+    })?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        let host = match parsed.host_str() {
+            Some(host) => host.to_string(),
+            None => String::new(),
+        };
+        return Err(UrlError::Userinfo { host });
+    }
+    match (credentials, parsed.scheme(), is_loopback(&parsed)) {
+        (None, _, _) | (Some(_), "https", _) | (Some(_), "http", true) => Ok(()),
+        (Some(_), _, _) => Err(UrlError::Insecure {
             url: url.to_string(),
         }),
-        (false, None) => Ok(()),
-        (false, Some(_)) => {
-            let parsed = url::Url::parse(url).map_err(|source| UrlError::Parse {
-                url: url.to_string(),
-                source,
-            })?;
-            match (parsed.scheme(), is_loopback(&parsed)) {
-                ("https", _) | ("http", true) => Ok(()),
-                _ => Err(UrlError::Insecure {
-                    url: url.to_string(),
-                }),
-            }
-        }
     }
 }
 
@@ -364,14 +337,6 @@ mod tests {
     }
 
     #[test]
-    fn error_display_checkout() {
-        let err = CloneError::Checkout {
-            source: "conflict".into(),
-        };
-        assert_eq!(err.to_string(), "Failed to checkout worktree: conflict");
-    }
-
-    #[test]
     fn credential_helper_default_username() {
         let helper = CredentialHelper::new(&credentials(r#"{"token": "ghp_secret"}"#));
         let action = gix::credentials::helper::Action::get_for_url("https://github.com/org/repo");
@@ -453,6 +418,23 @@ mod tests {
             check_url("not a url", Some(&creds)),
             Err(UrlError::Parse { .. })
         ));
+    }
+
+    #[test]
+    fn a_url_holding_a_username_or_password_is_rejected_without_echoing_it() {
+        let creds = credentials(r#"{"token": "t"}"#);
+        for url in [
+            "https://user:secret-token@git.example.com/a.git",
+            "https://secret-token@git.example.com/a.git",
+            "http://user:secret-token@127.0.0.1/a.git",
+        ] {
+            for credentials in [None, Some(&creds)] {
+                let error = check_url(url, credentials).unwrap_err();
+                assert!(matches!(error, UrlError::Userinfo { .. }), "{url}");
+                assert!(!error.to_string().contains("secret-token"), "{error}");
+                assert!(error.to_string().contains("credentials_path"), "{error}");
+            }
+        }
     }
 
     #[test]

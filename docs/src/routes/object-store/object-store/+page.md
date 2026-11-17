@@ -29,7 +29,7 @@ Read, write, list, and move files on S3, GCS, Azure Blob Storage, or local files
 | `operation` | string | required | One of `read`, `write`, `list`, `move`. |
 | `path` | string | | Object store path (required for read, write, list). |
 | `credentials_path` | string | | Path to credentials file (GCS service account, AWS credentials). |
-| `client_options` | map | | Additional client options (region, endpoint, etc.). |
+| `s3` | object | | Options of `s3://` paths, see [Amazon S3](#amazon-s3). Set on another path, the task fails to load. |
 | `depends_on` | list | | Upstream task names. |
 | `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
 
@@ -83,22 +83,7 @@ Pass a GCP service account JSON file via `credentials_path`:
 
 ### Amazon S3
 
-Three authentication methods are supported, in order of precedence:
-
-**1. Inline credentials via `client_options`:**
-
-```yaml
-- object_store:
-    name: read_s3
-    operation: read
-    path: s3://my-bucket/data/
-    client_options:
-      aws_access_key_id: "{{env.AWS_ACCESS_KEY_ID}}"
-      aws_secret_access_key: "{{env.AWS_SECRET_ACCESS_KEY}}"
-      aws_region: eu-west-1
-```
-
-**2. Credentials JSON file via `credentials_path`:**
+An access key goes in the file `credentials_path` names:
 
 ```yaml
 - object_store:
@@ -106,35 +91,30 @@ Three authentication methods are supported, in order of precedence:
     operation: read
     path: s3://my-bucket/data/
     credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/aws.json"
+    s3:
+      region: eu-west-1
 ```
-
-The file must contain a JSON object with one or more of these keys:
 
 ```json
 {
   "aws_access_key_id": "AKIA...",
   "aws_secret_access_key": "...",
-  "aws_session_token": "...",
-  "aws_region": "eu-west-1"
+  "aws_session_token": "..."
 }
 ```
 
-Values from `client_options` take precedence over the credentials file.
+`aws_session_token` is optional. Without `credentials_path`, the client signs in with the `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` environment variables, IRSA (EKS web identity token), EKS Pod Identity, ECS task roles or EC2 instance profiles, in that order.
 
-**3. Environment variables and IAM roles (automatic):**
+`s3` options:
 
-When no `credentials_path` or inline AWS keys in `client_options` are provided, the client resolves credentials automatically in this order: `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` environment variables, IRSA (EKS web identity token), EKS Pod Identity, ECS task roles, or EC2 instance profiles. You still need `aws_region` in `client_options`.
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `region` | string | `AWS_REGION` or `AWS_DEFAULT_REGION` | AWS region. |
+| `endpoint` | string | `AWS_ENDPOINT` | Endpoint of an S3-compatible store, such as MinIO or LocalStack. |
+| `virtual_hosted_style_request` | bool | `true`, or `false` with `endpoint` | Bucket in the host name, `{bucket}.s3.{region}.amazonaws.com`; `false` puts it in the path, as MinIO and LocalStack expect. |
+| `allow_http` | bool | `AWS_ALLOW_HTTP` | Whether an `http://` endpoint is allowed. |
 
-S3 requests use virtual-hosted style URLs by default (`{bucket}.s3.{region}.amazonaws.com`), matching the AWS SDK convention. Set `aws_virtual_hosted_style_request: "false"` in `client_options` for path-style URLs (e.g. MinIO, LocalStack).
-
-**Additional `client_options` for S3:**
-
-| Key | Description |
-|---|---|
-| `aws_region` | AWS region (required unless `AWS_REGION` / `AWS_DEFAULT_REGION` is set). |
-| `aws_role_session_name` | Override the STS session name for IRSA (`AssumeRoleWithWebIdentity`). Defaults to `WebIdentitySession`. |
-| `aws_virtual_hosted_style_request` | `"true"` (default) for virtual-hosted URLs, `"false"` for path-style. |
-| `aws_endpoint` | Custom S3 endpoint URL (for S3-compatible stores). |
+`AWS_ROLE_SESSION_NAME` sets the STS session name for IRSA.
 
 ### Local filesystem
 
@@ -170,8 +150,8 @@ No credentials needed. Use `file://` paths:
     path: s3://output-bucket/results/
     credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/aws.json"
     format: parquet
-    client_options:
-      aws_region: eu-west-1
+    s3:
+      region: eu-west-1
     hive_partition_options:
       enabled: true
       partition_keys:

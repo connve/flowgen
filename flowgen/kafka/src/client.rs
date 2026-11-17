@@ -183,12 +183,14 @@ fn sasl_config(sasl: &SaslCredentials) -> Result<SaslConfig, Error> {
     }
 }
 
-fn certificates(path: &Path) -> Result<Vec<CertificateDer<'static>>, Error> {
+async fn certificates(path: &Path) -> Result<Vec<CertificateDer<'static>>, Error> {
     let read_error = |source| Error::ReadCertificate {
         path: path.to_path_buf(),
         source,
     };
-    let pem = flowgen_core::credentials::read(path).map_err(Error::ReadCredentials)?;
+    let pem = flowgen_core::credentials::read_async(path)
+        .await
+        .map_err(Error::ReadCredentials)?;
     CertificateDer::pem_slice_iter(pem.as_bytes())
         .collect::<Result<Vec<_>, _>>()
         .map_err(read_error)
@@ -199,8 +201,10 @@ const ENCRYPTED_PRIVATE_KEY_LABEL: &str = "ENCRYPTED PRIVATE KEY";
 
 /// Loads a PEM private key, decrypting it with `password` when it is an
 /// encrypted PKCS#8 key. The password is ignored for an unencrypted key.
-fn private_key(path: &Path, password: Option<&str>) -> Result<PrivateKeyDer<'static>, Error> {
-    let pem = flowgen_core::credentials::read(path).map_err(Error::ReadCredentials)?;
+async fn private_key(path: &Path, password: Option<&str>) -> Result<PrivateKeyDer<'static>, Error> {
+    let pem = flowgen_core::credentials::read_async(path)
+        .await
+        .map_err(Error::ReadCredentials)?;
     let decrypt_error = |source| Error::DecryptPrivateKey {
         path: path.to_path_buf(),
         source,
@@ -227,7 +231,7 @@ fn private_key(path: &Path, password: Option<&str>) -> Result<PrivateKeyDer<'sta
     )))
 }
 
-fn tls_config(ssl: Option<&SslCredentials>) -> Result<Arc<rustls::ClientConfig>, Error> {
+async fn tls_config(ssl: Option<&SslCredentials>) -> Result<Arc<rustls::ClientConfig>, Error> {
     let client_auth = match ssl {
         Some(ssl) => (
             ssl.certificate_location.as_deref(),
@@ -242,7 +246,7 @@ fn tls_config(ssl: Option<&SslCredentials>) -> Result<Arc<rustls::ClientConfig>,
     let mut roots = rustls::RootCertStore::empty();
     match ssl.and_then(|ssl| ssl.ca_location.as_deref()) {
         Some(ca) => {
-            let ca_certificates = certificates(ca)?;
+            let ca_certificates = certificates(ca).await?;
             if ca_certificates.is_empty() {
                 return Err(Error::EmptyCaFile {
                     path: ca.to_path_buf(),
@@ -273,12 +277,13 @@ fn tls_config(ssl: Option<&SslCredentials>) -> Result<Arc<rustls::ClientConfig>,
     let config = match client_auth {
         (Some(certificate), Some(key)) => builder
             .with_client_auth_cert(
-                certificates(certificate)?,
+                certificates(certificate).await?,
                 private_key(
                     key,
                     ssl.and_then(|ssl| ssl.key_password.as_ref())
                         .map(ExposeSecret::expose_secret),
-                )?,
+                )
+                .await?,
             )
             .map_err(|source| Error::Tls { source })?,
         _ => builder.with_no_client_auth(),
@@ -337,7 +342,7 @@ pub async fn client_builder(
         .ok_or(Error::NoCredentials)?;
     let protocol = SecurityProtocol::parse(protocol_name)?;
     if protocol.uses_tls() {
-        builder = builder.tls_config(tls_config(credentials.ssl.as_ref())?);
+        builder = builder.tls_config(tls_config(credentials.ssl.as_ref()).await?);
     }
     if protocol.uses_sasl() {
         let sasl = credentials
@@ -540,8 +545,8 @@ mod tests {
         assert!(matches!(result, Err(Error::MissingSaslCredentials { .. })));
     }
 
-    #[test]
-    fn test_client_certificate_needs_both_certificate_and_key() {
+    #[tokio::test]
+    async fn test_client_certificate_needs_both_certificate_and_key() {
         let ssl = SslCredentials {
             ca_location: None,
             certificate_location: Some(PathBuf::from("/client.pem")),
@@ -549,7 +554,7 @@ mod tests {
             key_password: None,
         };
 
-        let result = tls_config(Some(&ssl));
+        let result = tls_config(Some(&ssl)).await;
 
         assert!(matches!(result, Err(Error::IncompleteClientCertificate)));
     }
@@ -584,8 +589,8 @@ mod tests {
         assert_eq!(with_default_port("[::1]:19092"), "[::1]:19092");
     }
 
-    #[test]
-    fn test_empty_ca_file_is_rejected() {
+    #[tokio::test]
+    async fn test_empty_ca_file_is_rejected() {
         let ca = tempfile::NamedTempFile::new().unwrap();
         let ssl = SslCredentials {
             ca_location: Some(ca.path().to_path_buf()),
@@ -595,7 +600,7 @@ mod tests {
         };
 
         assert!(matches!(
-            tls_config(Some(&ssl)),
+            tls_config(Some(&ssl)).await,
             Err(Error::EmptyCaFile { path }) if path == ca.path()
         ));
     }
@@ -623,22 +628,22 @@ mod tests {
         file
     }
 
-    #[test]
-    fn test_password_is_ignored_for_an_unencrypted_key() {
+    #[tokio::test]
+    async fn test_password_is_ignored_for_an_unencrypted_key() {
         let key = pem_file("PRIVATE KEY");
 
         assert!(matches!(
-            private_key(key.path(), Some("secret")),
+            private_key(key.path(), Some("secret")).await,
             Ok(PrivateKeyDer::Pkcs8(_))
         ));
     }
 
-    #[test]
-    fn test_encrypted_key_is_decrypted_with_the_password() {
+    #[tokio::test]
+    async fn test_encrypted_key_is_decrypted_with_the_password() {
         let key = pem_file(ENCRYPTED_PRIVATE_KEY_LABEL);
 
         assert!(matches!(
-            private_key(key.path(), Some("secret")),
+            private_key(key.path(), Some("secret")).await,
             Err(Error::DecryptPrivateKey { .. })
         ));
     }

@@ -1,0 +1,40 @@
+# Flowgen Agent tool: reads one hub template with its files.
+flow:
+  labels:
+    display_name: "Get Template"
+    description: "Returns one hub template with its files and README for Flowgen Agent."
+    tags: ["mcp", "agent", "flowgen"]
+  tasks:
+    - mcp_tool:
+        name: get_template
+        description: "Get a hub template by slug: its flows, resources and README, to reuse as a working example."
+        input_schema:
+          type: object
+          properties:
+            slug:
+              type: string
+            hub:
+              type: string
+              description: "Hub id. Defaults to connve."
+          required: [slug]
+
+    - script:
+        name: hub
+        code: |
+          ctx.meta.template = event.data.slug;
+          let data = event.data;
+          if type_of(data.hub) != "string" || data.hub == "" { data.hub = "connve"; }
+          data
+
+    - http_request:
+        name: fetch
+        endpoint: "{{env.FLOWGEN_URL}}/api/hubs/{{event.data.hub}}/templates"
+        method: GET
+
+    - script:
+        name: pick
+        code: |
+          let slug = event.meta.template;
+          let found = event.data.templates.filter(|template| template.slug == slug);
+          if found.len() == 0 { throw `No template ${slug}`; }
+          found[0]

@@ -17,12 +17,16 @@ pub mod config;
 pub mod connections;
 /// Credentials added in the web UI, encrypted with SOPS and committed.
 pub mod credentials;
+/// The docs pages of this version, embedded for agents.
+pub mod docs;
 /// Flow execution and task management.
 pub mod flow;
 /// Hubs: templates to start new flows and resources from, read through hub flows.
 pub mod hubs;
 /// Running without a config file, on a workspace in the home folder.
 pub mod local;
+/// `flowgen.lock`: what a workspace installed from hubs, by digest.
+pub mod lock;
 /// Browser-facing OIDC login for the web UI.
 pub mod login;
 /// Hot-reload reconciler for cache-sourced flows.

@@ -64,7 +64,7 @@ pub fn validate(file: &str, content: &str) -> Vec<crate::validation::Issue> {
     if file == LIST_FILE {
         return vec![issue(
             None,
-            "flowgen writes this file when credentials are added or removed",
+            "Written by flowgen when credentials are added or removed",
         )];
     }
     let Some(name) = name_of(file) else {
@@ -273,6 +273,12 @@ pub enum RequestError {
     InvalidName { name: String },
     #[error("Credentials must be a JSON object")]
     NotJson,
+    #[error("No connector '{connector}'")]
+    UnknownConnector { connector: String },
+    #[error("{connector} credentials need one of its forms")]
+    NoForm { connector: &'static str },
+    #[error("The credentials don't fit {form}: {message}")]
+    Invalid { form: &'static str, message: String },
     #[error(transparent)]
     Keys(#[from] Error),
     #[error("Failed to encrypt the credentials: {0}")]
@@ -284,7 +290,11 @@ impl axum::response::IntoResponse for RequestError {
         use axum::http::StatusCode;
         let status = match &self {
             RequestError::NotConfigured => StatusCode::NOT_FOUND,
-            RequestError::InvalidName { .. } | RequestError::NotJson => StatusCode::BAD_REQUEST,
+            RequestError::InvalidName { .. }
+            | RequestError::NotJson
+            | RequestError::UnknownConnector { .. }
+            | RequestError::NoForm { .. }
+            | RequestError::Invalid { .. } => StatusCode::BAD_REQUEST,
             RequestError::Keys(_) | RequestError::Encrypt(_) => {
                 tracing::warn!(error = %self, "Failed to encrypt credentials");
                 return (
@@ -295,6 +305,35 @@ impl axum::response::IntoResponse for RequestError {
             }
         };
         (status, self.to_string()).into_response()
+    }
+}
+
+/// Checks the credentials against the connector form that made them, as its tasks read them.
+fn check(input: &flowgen_client::types::CredentialInput) -> Result<(), RequestError> {
+    let connector = match crate::connections::connector(&input.connector) {
+        Some(connector) => connector,
+        None => {
+            return Err(RequestError::UnknownConnector {
+                connector: input.connector.clone(),
+            })
+        }
+    };
+    let form = match input.form.map(usize::try_from) {
+        Some(Ok(index)) => connector.credentials.get(index),
+        _ => None,
+    };
+    match (form, connector.credentials.is_empty()) {
+        (Some(form), _) => match (form.check)(&input.content) {
+            Ok(()) => Ok(()),
+            Err(message) => Err(RequestError::Invalid {
+                form: form.label,
+                message,
+            }),
+        },
+        (None, true) => Ok(()),
+        (None, false) => Err(RequestError::NoForm {
+            connector: connector.label,
+        }),
     }
 }
 
@@ -314,6 +353,7 @@ pub(crate) async fn encrypt(
     if serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&input.content).is_err() {
         return Err(RequestError::NotJson);
     }
+    check(&input)?;
     let recipients = recipients(options)?;
     let file = format!("{}.json", input.name);
     let content =
@@ -331,6 +371,40 @@ pub(crate) async fn encrypt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn input(
+        connector: &str,
+        form: Option<u64>,
+        content: &str,
+    ) -> flowgen_client::types::CredentialInput {
+        flowgen_client::types::CredentialInput {
+            name: "a".to_string(),
+            content: content.to_string(),
+            connector: connector.to_string(),
+            form,
+        }
+    }
+
+    #[test]
+    fn credentials_are_checked_against_the_form_that_made_them() {
+        assert!(check(&input("http", Some(0), r#"{"bearer_auth": "t"}"#)).is_ok());
+        assert!(matches!(
+            check(&input("http", Some(0), r#"{"bearer_auth": 1}"#)),
+            Err(RequestError::Invalid {
+                form: "Bearer token",
+                ..
+            })
+        ));
+        assert!(matches!(
+            check(&input("http", None, r#"{"bearer_auth": "t"}"#)),
+            Err(RequestError::NoForm { .. })
+        ));
+        assert!(matches!(
+            check(&input("unknown", Some(0), "{}")),
+            Err(RequestError::UnknownConnector { .. })
+        ));
+        assert!(check(&input("kv", None, r#"{"any": "thing"}"#)).is_ok());
+    }
 
     fn secret(name: &str, file: &str, recipient: &age::x25519::Recipient) -> String {
         flowgen_core::sops::encrypt_secret(

@@ -21,15 +21,15 @@ query:
 
 When a resource is referenced, flowgen loads it through the configured `ResourceLoader` and renders it as a Handlebars template against the current event (see [Templating](/docs/flowgen/concepts/templating)).
 
-## Backends
+## Where resources come from
 
-The `ResourceLoader` has three backends, configured at the worker level under `resources`:
+flowgen reads a resource from the first place that has it:
 
-| Backend | When to use | Key resolution |
-|---|---|---|
-| **Filesystem** (default) | Local development, mounted ConfigMaps in Kubernetes, simple deployments. | `resources.path = "/etc/flowgen/resources"` → key `queries/orders.sql` resolves to `/etc/flowgen/resources/queries/orders.sql`. |
-| **Cache** | Hot-reload across replicas, git-synced flows, multi-tenant workers. | `resources.cache.prefix = "resources"` → key `queries/orders.sql` resolves to cache key `resources.queries/orders.sql`. |
-| **Disabled** | Inline-only flows. | All `resource:` references fail with a clear error. Default when neither `path` nor `cache` is configured. |
+1. A file under `resources.path`.
+2. The cache, if `resources.cache.enabled` is on. It's the same cache your flows use: a local redb file, or NATS.
+3. flowgen's own resources, under `system/`.
+
+`flowgen` turns the cache on for you. With `--config`, set `resources.path`, `resources.cache` or both.
 
 ## Filesystem backend
 
@@ -61,7 +61,7 @@ resources:
     enabled: true
 ```
 
-Resource keys map to entries in the distributed cache (NATS JetStream KV). Every replica reads the same content, and updates propagate without restarting workers.
+Resource keys map to entries in the system bucket of the cache. Every replica reads the same content, and updates propagate without restarting workers.
 
 This is the recommended setup for:
 

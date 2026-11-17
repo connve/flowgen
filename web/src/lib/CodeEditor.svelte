@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { EditorState, type Extension } from '@codemirror/state';
+	import { Compartment, EditorState, type Extension } from '@codemirror/state';
 	import { EditorView, drawSelection, highlightActiveLine, keymap } from '@codemirror/view';
 	import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
 	import {
@@ -28,6 +28,7 @@
 
 	let host: HTMLDivElement;
 	let view: EditorView | undefined;
+	const languageSlot = new Compartment();
 
 	// Language per file extension. Rhai has no grammar; JavaScript covers what
 	// Rhai scripts use (let, if/else, operators, string literals).
@@ -53,7 +54,7 @@
 		}
 	}
 
-	// The colors of the read-only views, from the --prism-* variables in app.css.
+	// The colors of the read-only views, from the --prism-* variables of @connve/ui.
 	const colors = HighlightStyle.define([
 		{ tag: tags.comment, color: 'var(--prism-comment)', fontStyle: 'italic' },
 		{
@@ -107,7 +108,7 @@
 					keymap.of([indentWithTab, ...defaultKeymap, ...historyKeymap, ...searchKeymap]),
 					syntaxHighlighting(colors),
 					theme,
-					language(extension),
+					languageSlot.of(language(extension)),
 					EditorView.contentAttributes.of({ 'aria-label': label, spellcheck: 'false' }),
 					EditorView.updateListener.of((update) => {
 						if (update.docChanged) value = update.state.doc.toString();
@@ -116,6 +117,11 @@
 			})
 		});
 		return () => view?.destroy();
+	});
+
+	$effect(() => {
+		const next = language(extension);
+		view?.dispatch({ effects: languageSlot.reconfigure(next) });
 	});
 
 	// A value set from outside, such as a formatted save or a reload, replaces the text.

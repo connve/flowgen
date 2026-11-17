@@ -5,7 +5,7 @@
 //! utilities for working with MongoDB collections and change streams.
 use flowgen_core::task::context::TaskContext;
 use flowgen_core::task::meta::{
-    Connection, Connector, CredentialsField, CredentialsForm, FieldKind, Icon,
+    parses, Connection, Connector, CredentialsField, CredentialsForm, FieldKind, Icon,
 };
 use flowgen_core::task::runner::Runner;
 use flowgen_core::task::{Task, TaskError, TaskIo, TaskMeta};
@@ -40,6 +40,7 @@ pub const CONNECTOR: Connector = Connector {
             CredentialsField::text("username", "Username").optional(),
             CredentialsField::secret("password", "Password").optional(),
         ],
+        check: parses::<client::MongoCredentials>,
     }],
 };
 

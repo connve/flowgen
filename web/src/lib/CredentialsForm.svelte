@@ -31,8 +31,35 @@
 
 	let forms = $derived(connector.credentials);
 	let form = $derived(forms[chosen]);
-	let other = $derived(form === undefined);
+	let other = $derived(forms.length === 0);
 	let upload = $derived(form !== undefined && form.fields.length === 0);
+
+	// The list of ways already names a field called like the chosen way.
+	function labelled(label: string | undefined): boolean {
+		return forms.length === 1 || label !== form?.label;
+	}
+
+	function inputType(field: CredentialsField): string {
+		switch (field.kind) {
+			case 'secret':
+				return 'password';
+			case 'number':
+				return 'number';
+			case 'url':
+				return 'url';
+			default:
+				return 'text';
+		}
+	}
+
+	function isUrl(text: string): boolean {
+		try {
+			const url = new URL(text);
+			return url.protocol === 'https:' || url.protocol === 'http:';
+		} catch {
+			return false;
+		}
+	}
 
 	/** Starts the chosen form over at its defaults, dropping anything typed. */
 	function reset() {
@@ -71,6 +98,12 @@
 	let missing = $derived(
 		form?.fields.filter((field) => field.required && value(field) === undefined) ?? []
 	);
+	let invalid = $derived(
+		form?.fields.filter((field) => {
+			const typed = value(field);
+			return field.kind === 'url' && typeof typed === 'string' && !isUrl(typed);
+		}) ?? []
+	);
 
 	function content(): string {
 		if (other || upload) return file;
@@ -89,7 +122,9 @@
 		return JSON.stringify(document, null, 2);
 	}
 
-	let ready = $derived((other || upload ? file.trim() !== '' : missing.length === 0) && !saving);
+	let ready = $derived(
+		(other || upload ? file.trim() !== '' : missing.length === 0 && invalid.length === 0) && !saving
+	);
 
 	async function read(event: Event) {
 		const picked = (event.currentTarget as HTMLInputElement).files?.[0];
@@ -100,7 +135,11 @@
 		saving = true;
 		failure = null;
 		try {
-			const encrypted = (await encryptCredential({ body: { name, content: content() } })).data;
+			const encrypted = (
+				await encryptCredential({
+					body: { name, content: content(), connector: connector.name, form: other ? undefined : chosen }
+				})
+			).data;
 			const change = await proposeFile(
 				{ path: encrypted.path, content: encrypted.content ?? null },
 				await authoringTargets(),
@@ -121,7 +160,7 @@
 
 <div class="space-y-3">
 	{#if open}
-		{#if forms.length > 0}
+		{#if forms.length > 1}
 			<label class="block space-y-1">
 				<span class="text-xs text-base-content/60">{m.credentials_way()}</span>
 				<select
@@ -132,7 +171,6 @@
 					{#each forms as option, index (option.label)}
 						<option value={index}>{option.label}</option>
 					{/each}
-					<option value={forms.length}>{m.credentials_other()}</option>
 				</select>
 			</label>
 		{/if}
@@ -143,11 +181,14 @@
 			</div>
 		{:else if upload}
 			<label class="block space-y-1">
-				<span class="text-xs text-base-content/60">{form?.label}</span>
+				{#if labelled(undefined)}
+					<span class="text-xs text-base-content/60">{form?.label}</span>
+				{/if}
 				<input
 					type="file"
+					aria-label={form?.label}
 					accept="application/json,.json"
-					class="file-input file-input-sm w-full border border-base-300 bg-base-100"
+					class="file-input file-input-sm w-full border border-base-300 bg-base-100 outline-none focus:border-primary"
 					onchange={read}
 				/>
 			</label>
@@ -160,12 +201,15 @@
 					</label>
 				{:else}
 					<label class="block space-y-1">
-						<span class="text-xs text-base-content/60">
-							{field.label}{field.required ? '' : ` · ${m.credentials_optional()}`}
-						</span>
+						{#if labelled(field.label)}
+							<span class="text-xs text-base-content/60">
+								{field.label}{field.required ? '' : ` · ${m.credentials_optional()}`}
+							</span>
+						{/if}
 						{#if field.kind === 'choice'}
 							<select
 								class="select select-sm w-full border border-base-300 bg-base-100 outline-none focus:border-primary"
+								aria-label={field.label}
 								bind:value={values[field.key]}
 							>
 								{#if !field.required}
@@ -179,24 +223,28 @@
 							<textarea
 								class="textarea textarea-sm w-full border border-base-300 bg-base-100 font-mono outline-none focus:border-primary"
 								rows="3"
+								aria-label={field.label}
 								bind:value={values[field.key]}
 							></textarea>
 						{:else}
 							<span class={INPUT}>
 								<input
-									type={field.kind === 'secret' ? 'password' : field.kind === 'number' ? 'number' : 'text'}
+									type={inputType(field)}
+									aria-label={field.label}
 									autocomplete="off"
 									spellcheck="false"
 									bind:value={values[field.key]}
 								/>
 							</span>
+							{#if invalid.includes(field)}
+								<span class="block text-xs text-error">{m.credentials_invalid_url()}</span>
+							{/if}
 						{/if}
 					</label>
 				{/if}
 			{/each}
 		{/if}
 
-		<p class="text-xs text-base-content/50">{m.credentials_content_hint()}</p>
 		{#if failure}
 			<p class="text-sm text-error">{failure}</p>
 		{/if}
@@ -214,7 +262,7 @@
 			</button>
 			<button type="button" class="btn btn-primary btn-sm gap-1.5" disabled={!ready} onclick={save}>
 				<Icon icon="tabler:lock" class="h-4 w-4" />
-				{m.credentials_add_propose()}
+				{m.common_save()}
 			</button>
 		</div>
 	{:else}

@@ -573,10 +573,10 @@
 		<StateMessage
 			tone="notice"
 			title={m.flows_empty_title()}
-			message={authoring ? m.flows_empty_message_authoring() : m.flows_empty_message()}
+			message={authoring ? undefined : m.flows_empty_message()}
 		/>
 	{:else if visibleFlows.length === 0}
-		<StateMessage tone="notice" title={m.flows_no_match_title()} message={m.flows_no_match_message()} />
+		<StateMessage tone="notice" title={m.flows_no_match_title()} />
 	{:else}
 		<div class="-mx-6 shrink-0 overflow-x-auto px-6">
 			<table class="table table-sm w-full bg-base-100">

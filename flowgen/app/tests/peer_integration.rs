@@ -231,7 +231,6 @@ fn app_config_with_cache(url: String) -> flowgen::config::AppConfig {
             credentials_path: None,
             url,
             path: std::path::PathBuf::from(".flowgen/state.redb"),
-            db_name: None,
             runtime: flowgen::config::BucketOptions::default(),
             system: flowgen::config::SystemBucketOptions::default(),
             history: Some(64),

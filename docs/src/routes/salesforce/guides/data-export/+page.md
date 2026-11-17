@@ -250,7 +250,7 @@ Both branches are independent — remove or replace either one without affecting
 | Cloud | Path prefix | Credentials |
 |---|---|---|
 | GCS | `gs://bucket/path` | GCP service account JSON |
-| AWS S3 | `s3://bucket/path` | AWS access key JSON + `client_options.aws_region` |
+| AWS S3 | `s3://bucket/path` | AWS access key JSON + `s3.region` |
 | Azure | `az://container/path` | Azure storage account JSON |
 
 **Data warehouse** — the example above uses `gcp_bigquery_storage_write`. Replace it with the appropriate warehouse task for your stack. See the task reference for configuration details.

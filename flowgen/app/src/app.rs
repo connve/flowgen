@@ -860,6 +860,27 @@ impl App {
                 _ => None,
             };
 
+        let (path, cached) = match app_config.resources.as_ref() {
+            Some(options) => (
+                options.path.clone(),
+                matches!(&options.cache, Some(cache) if cache.enabled),
+            ),
+            None => (None, false),
+        };
+        let mut loader = flowgen_core::resource::ResourceLoader::new(path)
+            .with_defaults(crate::local::system_resources());
+        if cached {
+            let bucket = app_config.cache_options().system.db_name;
+            match system.open_sibling(&app_config, &bucket).await {
+                Ok(cache) => {
+                    loader =
+                        loader.with_cache(cache, crate::config::RESOURCES_CACHE_PREFIX.to_string())
+                }
+                Err(e) => warn!(error = %e, "Resources will load from filesystem only"),
+            }
+        }
+        let resource_loader = Some(loader);
+
         let mcp_enabled = app_config
             .mcp_server
             .as_ref()
@@ -905,6 +926,7 @@ impl App {
                 credentials,
                 auth_provider,
                 resource_uri_scheme,
+                resource_loader.clone(),
             )))
         } else {
             None
@@ -949,48 +971,6 @@ impl App {
             };
 
         let cache = Arc::clone(&self.cache);
-
-        // Build the resource loader. Filesystem and cache sources are
-        // independent: configure either, both, or neither. When both are
-        // active, the loader tries the filesystem first and falls back to
-        // the cache on a miss, matching the gradual-migration semantics used
-        // for flow loading.
-        let resource_loader = match app_config.resources.as_ref() {
-            Some(resource_options) => {
-                let base_path = resource_options.path.clone();
-
-                let cache_source = match resource_options.cache.as_ref() {
-                    Some(rc) if rc.enabled => {
-                        let bucket = app_config.cache_options().system.db_name;
-                        match system.open_sibling(&app_config, &bucket).await {
-                            Ok(cache) => {
-                                Some((cache, crate::config::RESOURCES_CACHE_PREFIX.to_string()))
-                            }
-                            Err(e) => {
-                                warn!(error = %e, "Resources will load from filesystem only");
-                                None
-                            }
-                        }
-                    }
-                    _ => None,
-                };
-
-                match (base_path, cache_source) {
-                    (Some(path), Some((cache, prefix))) => Some(
-                        flowgen_core::resource::ResourceLoader::new(Some(path))
-                            .with_cache(cache, prefix),
-                    ),
-                    (Some(path), None) => {
-                        Some(flowgen_core::resource::ResourceLoader::new(Some(path)))
-                    }
-                    (None, Some((cache, prefix))) => Some(
-                        flowgen_core::resource::ResourceLoader::from_cache(cache, prefix),
-                    ),
-                    (None, None) => None,
-                }
-            }
-            None => None,
-        };
 
         // Shared client registry for deduplicating connections to external services.
         // Created once at the worker level and shared across all flows so tasks with
@@ -1658,7 +1638,6 @@ async fn init_flows(flows: Vec<super::flow::Flow>) -> Vec<super::flow::Flow> {
     initialized
 }
 
-/// Port peers read this pod's logs and counters from; `None` with the `remote` backend.
 /// The port pods share logs and metrics on; none for a single process on a local file cache.
 fn cluster_port(app_config: &AppConfig) -> Option<u16> {
     if app_config.cache_options().cache_type == crate::config::CacheType::Redb {

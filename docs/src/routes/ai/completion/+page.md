@@ -21,7 +21,8 @@ Run LLM completions from multiple providers within a flow. Supports custom OpenA
 | `provider` | string | required | LLM provider — see [Providers](#providers) below. |
 | `model` | string | required | Model identifier (e.g. `gpt-4`, `claude-3-5-sonnet-20241022`, `gemini-2.5-flash-lite`). |
 | `prompt` | string/resource | required | User prompt template. Supports handlebars templating and resource files. |
-| `credentials_path` | string | | Path to provider credentials JSON. Required for hosted providers, optional for `custom`/`ollama` (local providers without auth). |
+| `credentials_path` | string | | Path to provider credentials JSON. Required for API-key providers, optional for `vertexai`, `ollama` and `custom`. |
+| `vertexai` | object | | Options of `provider: vertexai`: `project_id` (default `GOOGLE_CLOUD_PROJECT`, else the service account key's `project_id`) and `location` (default `GOOGLE_CLOUD_LOCATION`, else `global`). Set with another provider, the task fails to load. |
 | `endpoint` | string | | Base URL of a custom OpenAI-compatible endpoint. Required when `provider: custom` or `provider: ollama`. Example: `https://llm-gateway.internal.example.com/v1`. |
 | `headers` | map of string to string | | HTTP headers sent with every request (`provider: custom`/`ollama` only), such as a key the endpoint requires. |
 | `system_prompt` | string/resource | | System prompt. |
@@ -30,7 +31,7 @@ Run LLM completions from multiple providers within a flow. Supports custom OpenA
 | `stream` | bool | `false` | Stream response as separate events instead of one final event. |
 | `static_context` | list | | RAG documents (inline strings or `resource:` references) always available to the agent. |
 | `max_turns` | int | `10` | Most model calls one event may make, tool calls included. At least 1, and at least 2 with `mcp_servers`: one call to use a tool and one to answer. |
-| `mcp_servers` | list | | MCP server URLs for tool discovery. The agent connects to each, discovers tools, and makes them callable during completion. |
+| `mcp_servers` | list | | MCP server URLs for tool discovery. The agent connects to each, discovers tools, and makes them callable during completion. The servers' [instructions](/docs/flowgen/ai/mcp#instructions) follow `system_prompt`. |
 | `tool_passthrough` | bool | `false` | Skip rig's agent loop and forward caller-supplied `tools` verbatim to the upstream provider. See [Tool-use passthrough](#tool-use-passthrough). |
 | `output_schema` | object | | JSON Schema the answer must match. The answer stays JSON text in `text`; parse it with `parse_json` in a `script`. |
 | `images` | list of string | | Images sent with the prompt, for models that read images: http(s) URLs, downloaded and sent as base64, or base64 `data:` URLs. Each must be a PNG, JPEG, GIF, WebP, HEIC, HEIF or SVG image of at most `image_max_bytes`. A URL must reach a public address: loopback, private, link-local and other non-public addresses are refused, also after a redirect, and proxy settings are not used. A refused, empty or malformed URL fails the event without a retry. Supports handlebars templating. |
@@ -54,7 +55,7 @@ Run LLM completions from multiple providers within a flow. Supports custom OpenA
 | `openrouter` | API key | `api_key` |
 | `perplexity` | API key | `api_key` |
 | `huggingface` | API key | `api_key` |
-| `vertexai` | Google ADC | `project_id`, `region` (optional, can come from env) |
+| `vertexai` | Service account key, or Google ADC without `credentials_path` | the service account key file |
 | `ollama` | Optional API key | optional `api_key` |
 | `custom` | Optional API key | optional `api_key` |
 
@@ -68,10 +69,17 @@ For API-key providers, credentials file is a simple JSON:
 { "api_key": "sk-..." }
 ```
 
-For `vertexai`, the JSON sets the project and region; **authentication itself goes through Google Application Default Credentials (ADC)** — the pod must have access to a service account via the `GOOGLE_APPLICATION_CREDENTIALS` env var or workload identity:
+For `vertexai`, `credentials_path` points at a service account key file. Without it, flowgen signs in with Google Application Default Credentials, such as workload identity. The project and location are `vertexai` options:
 
-```json
-{ "project_id": "my-gcp-project", "region": "us-central1" }
+```yaml
+- ai_completion:
+    name: analyze
+    provider: vertexai
+    model: gemini-2.5-flash
+    vertexai:
+      project_id: my-project
+      location: europe-west4
+    prompt: "Analyze this data: {{event.data}}"
 ```
 
 ## Example: custom OpenAI-compatible endpoint
@@ -224,7 +232,7 @@ With `on_behalf_of_user: true`, the agent calls the server as the user who sent 
 
 ## Tool-use passthrough
 
-When `tool_passthrough: true`, the task bypasses rig's agent loop and forwards caller-supplied `tools` and `tool_choice` (from the request body) directly to the upstream provider. Tool invocations returned by the model surface as `tool_calls` on the response instead of being executed in-process. The client — typically opencode, Claude Desktop, or any OpenAI-tool-use SDK — runs the tools locally and posts the results back as `role: "tool"` follow-up messages.
+When `tool_passthrough: true`, the task bypasses rig's agent loop and forwards caller-supplied `tools` and `tool_choice` (from the request body) directly to the upstream provider. Tool invocations returned by the model surface as `tool_calls` on the response instead of being executed in-process. The client, typically one of the MCP clients such as coding agents and chat apps, runs the tools locally and posts the results back as `role: "tool"` follow-up messages.
 
 Use this mode when flowgen is the AI gateway for a tool-executing client. Leave it `false` for agent-mode flows that execute tools themselves via [`mcp_servers`](#example-mcp-tool-calling) or inline definitions.
 

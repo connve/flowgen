@@ -6,6 +6,7 @@
 	import { base } from '$app/paths';
 	import Icon from '@iconify/svelte';
 	import {
+		CodingAgentsLink,
 		CopyButton,
 		FolderTree,
 		Inspector,
@@ -18,7 +19,7 @@
 		isMobile
 	} from '@connve/ui';
 	import { agentsModels, errorMessage, listAgentTools } from '$lib/api';
-	import { replyStream } from '$lib/urls';
+	import { AGENT_SETUP_URL, replyStream } from '$lib/urls';
 	import { m } from '$lib/paraglide/messages.js';
 	import { pageTitle } from '$lib/pageTitle';
 	import { formatRelative } from '$lib/time';
@@ -475,6 +476,18 @@
 		}
 	}
 
+	const CODING_AGENTS_HIDDEN_KEY = 'flowgen-agents-coding-agents-hidden';
+	let codingAgentsHidden = $state(false);
+
+	function hideCodingAgents() {
+		codingAgentsHidden = true;
+		try {
+			localStorage.setItem(CODING_AGENTS_HIDDEN_KEY, '1');
+		} catch {
+			// Not remembered, but the link stays hidden for this visit.
+		}
+	}
+
 	function toggleHistoryPane() {
 		historyPaneOpen = !historyPaneOpen;
 		try {
@@ -561,6 +574,7 @@
 		try {
 			const pane = localStorage.getItem('flowgen-agents-history-pane');
 			if (pane !== null) historyPaneOpen = pane === '1';
+			codingAgentsHidden = localStorage.getItem(CODING_AGENTS_HIDDEN_KEY) === '1';
 		} catch {
 			// Storage can be unavailable; the pane starts open.
 		}
@@ -1062,14 +1076,11 @@
 			/>
 		</div>
 	{:else if modelsEmpty}
-		<div class="flex flex-1 items-center justify-center">
-			<StateMessage
-				tone="notice"
-				title={m.agents_models_empty_title()}
-				message={m.agents_models_empty_message()}
-			>
+		<div class="flex flex-1 flex-col items-center justify-center gap-8 px-6">
+			<StateMessage tone="notice" title={m.agents_models_empty_title()}>
 				<a href="{base}/new?kind=flow" class="btn btn-primary btn-sm">{m.agents_models_add()}</a>
 			</StateMessage>
+			<CodingAgentsLink href={AGENT_SETUP_URL} label={m.agents_connect_coding_agent()} />
 		</div>
 	{:else if convoLoading && messages.length === 0}
 		<!-- Loading a session by id — spinner instead of a flashing empty state. -->
@@ -1087,6 +1098,16 @@
 				{m.agents_greeting()}
 			</p>
 			<div class="relative w-full max-w-2xl">
+				{#if !codingAgentsHidden}
+					<div class="-mt-4 mb-3 flex justify-center">
+						<CodingAgentsLink
+							href={AGENT_SETUP_URL}
+							label={m.agents_connect_coding_agent()}
+							ondismiss={hideCodingAgents}
+							dismissLabel={m.agents_connect_coding_agent_dismiss()}
+						/>
+					</div>
+				{/if}
 				{@render composer()}
 			</div>
 		</div>
@@ -1287,7 +1308,6 @@
 							<option value={folder}></option>
 						{/each}
 					</datalist>
-					<p class="text-xs opacity-60">{m.agents_session_move_hint()}</p>
 				</div>
 				<div class="flex justify-end gap-2">
 					<button type="button" class="btn btn-ghost btn-sm" onclick={() => (moving = null)}>
@@ -1318,7 +1338,6 @@
 		>
 			<div class="w-full max-w-sm space-y-4 rounded-xl bg-base-100 p-5 shadow-2xl">
 				<h2 class="text-[0.9375rem] font-semibold">{m.agents_session_delete_title()}</h2>
-				<p class="text-sm text-base-content/70">{m.agents_session_delete_message()}</p>
 				<div class="flex justify-end gap-2">
 					<button
 						type="button"

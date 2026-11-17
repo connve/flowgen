@@ -440,7 +440,6 @@ task_types! {
     /// PostgreSQL change data capture task.
     postgres_cdc(flowgen_postgres::cdc::Cdc),
     /// Key-value store operations (get, put, list, delete) on a redb file or NATS.
-    #[serde(alias = "nats_kv_store")]
     kv_store(flowgen_kv_store::store::KvStore),
     /// Starts the flow with a key's value whenever it changes, on a redb file or NATS.
     kv_watch(flowgen_kv_store::watch::KvWatch),
@@ -550,12 +549,12 @@ pub struct AppConfig {
 #[serde(deny_unknown_fields)]
 pub struct CredentialsOptions {
     /// age public keys each credential is encrypted for, such as the key
-    /// Flux decrypts with and the keys of the people who may read them.
+    /// the cluster decrypts with and the keys of the people who may read them.
     #[serde(default)]
     pub recipients: Vec<String>,
     /// age key file this instance decrypts credentials with, set as
     /// `SOPS_AGE_KEY_FILE` for the run; its public key is a recipient too.
-    /// Omit where Flux decrypts them.
+    /// Omit where the cluster decrypts them.
     #[serde(default)]
     pub identity_path: Option<PathBuf>,
     /// The folder flows read credentials from, which `FLOWGEN_CREDENTIALS`
@@ -572,15 +571,6 @@ pub enum ValidationError {
         #[from]
         source: flowgen_ai_agent::budget::Error,
     },
-    #[error(
-        "Move `cache.db_name` under `cache.runtime`:\n\
-         \x20 cache:\n\
-         \x20   runtime:\n\
-         \x20     db_name: {db_name:?}\n\
-         Left in place it is ignored, and the cache reads bucket `flowgen_cache` \
-         while the existing data stays in {db_name:?}. No other cache key changes."
-    )]
-    RenamedCacheDbName { db_name: String },
     #[error("`web.agents.{field}` must be longer than 0s, e.g. \"3s\"")]
     ZeroAgentsDuration { field: &'static str },
     #[error(
@@ -686,11 +676,6 @@ impl AppConfig {
 
     /// Rejects configuration that parses but would run with the wrong meaning.
     pub fn validate(&self) -> Result<(), ValidationError> {
-        if let Some(db_name) = self.cache.as_ref().and_then(|c| c.db_name.as_ref()) {
-            return Err(ValidationError::RenamedCacheDbName {
-                db_name: db_name.clone(),
-            });
-        }
         if let Some(budget) = self.ai_budget.as_ref() {
             budget.validate()?;
         }
@@ -742,10 +727,6 @@ pub struct CacheOptions {
     /// The file of a `redb` cache. Defaults to `.flowgen/state.redb`.
     #[serde(default = "default_redb_path")]
     pub path: PathBuf,
-    /// Pre-0.135 spelling of `runtime.db_name`. Kept solely to reject it with
-    /// a migration hint naming the old bucket.
-    #[serde(default)]
-    pub db_name: Option<String>,
     /// Runtime bucket, reachable from scripts through `ctx.cache`.
     #[serde(default)]
     pub runtime: BucketOptions,
@@ -753,9 +734,7 @@ pub struct CacheOptions {
     /// Kept apart from `runtime` so scripts cannot reach coordination state.
     #[serde(default)]
     pub system: SystemBucketOptions,
-    /// Number of historical entries retained per key in a NATS KV bucket.
-    /// Only applies when the bucket is created; changing this on an existing
-    /// bucket has no effect. Defaults to 10.
+    /// Values a NATS bucket keeps per key, set when it is created. Defaults to 64.
     pub history: Option<i64>,
     /// TTL for KV delete and purge tombstone markers.
     /// Accepts human-readable durations (e.g., "1h", "30m", "1d").
@@ -773,7 +752,6 @@ impl Default for CacheOptions {
             credentials_path: None,
             url: default_nats_url(),
             path: default_redb_path(),
-            db_name: None,
             runtime: BucketOptions::default(),
             system: SystemBucketOptions::default(),
             history: None,
@@ -1103,7 +1081,7 @@ pub struct UpdateCheckOptions {
     /// Whether to check. Defaults to `true`.
     #[serde(default = "default_update_check_enabled")]
     pub enabled: bool,
-    /// The newest release, as a GitHub releases API `latest` response.
+    /// The newest release, as a releases API `latest` response with `tag_name`.
     #[serde(default = "default_update_check_url")]
     pub url: String,
     /// How often to check. Defaults to 24 hours.
@@ -1188,7 +1166,7 @@ pub struct AuthoringOptions {
     /// Whether change proposals are enabled.
     pub enabled: bool,
     /// Where changes can be proposed. Defaults to one `workspace` target
-    /// covering `flows/` and `resources/`.
+    /// covering `flows/`, `resources/` and `credentials/`.
     #[serde(default = "default_targets")]
     pub targets: Vec<AuthoringTarget>,
     /// Claim of the signed-in user that lists their groups. Defaults to `groups`.
@@ -1900,7 +1878,6 @@ mod tests {
                 credentials_path: Some(PathBuf::from("/test/cache")),
                 url: "localhost:4222".to_string(),
                 path: default_redb_path(),
-                db_name: None,
                 runtime: BucketOptions::default(),
                 system: SystemBucketOptions::default(),
                 history: None,
@@ -1972,7 +1949,6 @@ mod tests {
                 credentials_path: Some(PathBuf::from("/serialize/cache")),
                 url: "localhost:4222".to_string(),
                 path: default_redb_path(),
-                db_name: None,
                 runtime: BucketOptions {
                     db_name: "test_db".to_string(),
                 },
@@ -2012,7 +1988,6 @@ mod tests {
                 credentials_path: Some(PathBuf::from("/clone/cache")),
                 url: "localhost:4222".to_string(),
                 path: default_redb_path(),
-                db_name: None,
                 runtime: BucketOptions::default(),
                 system: SystemBucketOptions::default(),
                 history: None,
@@ -2039,24 +2014,6 @@ mod tests {
 
         let cloned = app_config.clone();
         assert_eq!(app_config, cloned);
-    }
-
-    #[test]
-    fn validate_rejects_pre_0_135_cache_db_name() {
-        let yaml = r#"
-cache:
-  type: nats
-  url: "localhost:4222"
-  db_name: "legacy_bucket"
-flows:
-  path: "/flows"
-"#;
-        let config: AppConfig = serde_yaml::from_str(yaml).expect("parses");
-        let err = config.validate().expect_err("renamed key must be rejected");
-        assert!(
-            err.to_string().contains("legacy_bucket"),
-            "the error must name the bucket the operator would lose: {err}"
-        );
     }
 
     #[test]
@@ -2187,7 +2144,6 @@ flows:
             credentials_path: Some(PathBuf::from("/test/credentials_path")),
             url: "localhost:4222".to_string(),
             path: default_redb_path(),
-            db_name: None,
             runtime: BucketOptions::default(),
             system: SystemBucketOptions::default(),
             history: None,
@@ -2218,7 +2174,6 @@ flows:
             credentials_path: Some(PathBuf::from("/serialize/credentials_path")),
             url: "localhost:4222".to_string(),
             path: default_redb_path(),
-            db_name: None,
             runtime: BucketOptions::default(),
             system: SystemBucketOptions::default(),
             history: None,

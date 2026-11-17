@@ -106,7 +106,87 @@ fn system_flows_run_from_flowgen_with_their_variables_and_credentials() {
     );
 }
 
+#[test]
+fn system_flows_require_a_repository_and_releases() {
+    for (missing, values) in [
+        ("repository", "releases: registry.example.com/a"),
+        ("releases", "repository: https://git.example.com/a.git"),
+    ] {
+        let output = helm_template(&format!(
+            "flowgen:\n  systemFlows:\n    enabled: true\n    {values}\n"
+        ));
+        assert!(!output.status.success(), "{missing}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains(&format!("flowgen.systemFlows.{missing} is required")),
+            "{missing}"
+        );
+    }
+}
+
+fn config_checksum(values: &str) -> String {
+    let spec = find_deployment(&render(values))
+        .spec
+        .expect("Deployment should have a spec");
+    spec["template"]["metadata"]["annotations"]["checksum/config"]
+        .as_str()
+        .expect("pod should have a checksum/config annotation")
+        .to_string()
+}
+
+#[test]
+fn a_settings_change_changes_the_config_checksum() {
+    assert_ne!(
+        config_checksum(""),
+        config_checksum("flowgen:\n  config:\n    settings:\n      health:\n        port: 9091\n")
+    );
+}
+
+#[test]
+fn health_disabled_renders_without_probes_or_port() {
+    let manifests = render(
+        r#"flowgen:
+  config:
+    settings:
+      health:
+        enabled: false
+"#,
+    );
+    let deployment = find_deployment(&manifests);
+    let container = container(pod_spec(&deployment));
+    for probe in ["startupProbe", "readinessProbe", "livenessProbe"] {
+        assert!(container.get(probe).is_none(), "{probe}");
+    }
+    assert!(!container["ports"]
+        .as_sequence()
+        .expect("container should declare ports")
+        .iter()
+        .any(|p| p["name"] == "health"));
+}
+
 fn render(values: &str) -> Vec<Manifest> {
+    let output = helm_template(values);
+    assert!(
+        output.status.success(),
+        "helm template failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("helm output is utf-8");
+    let mut manifests = Vec::new();
+    for doc in serde_yaml::Deserializer::from_str(&stdout) {
+        let value = serde_yaml::Value::deserialize(doc).expect("rendered doc is valid YAML");
+        if value.is_null() {
+            continue;
+        }
+        let manifest: Manifest =
+            serde_yaml::from_value(value).expect("rendered manifest matches schema");
+        manifests.push(manifest);
+    }
+    manifests
+}
+
+fn helm_template(values: &str) -> std::process::Output {
     let chart_dir = env!("CARGO_MANIFEST_DIR");
     let chart_path = std::path::Path::new(chart_dir)
         .parent()
@@ -129,26 +209,7 @@ fn render(values: &str) -> Vec<Manifest> {
         .write_all(values.as_bytes())
         .expect("write values to helm stdin");
 
-    let output = child.wait_with_output().expect("helm template should run");
-
-    assert!(
-        output.status.success(),
-        "helm template failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let stdout = String::from_utf8(output.stdout).expect("helm output is utf-8");
-    let mut manifests = Vec::new();
-    for doc in serde_yaml::Deserializer::from_str(&stdout) {
-        let value = serde_yaml::Value::deserialize(doc).expect("rendered doc is valid YAML");
-        if value.is_null() {
-            continue;
-        }
-        let manifest: Manifest =
-            serde_yaml::from_value(value).expect("rendered manifest matches schema");
-        manifests.push(manifest);
-    }
-    manifests
+    child.wait_with_output().expect("helm template should run")
 }
 
 fn find_deployment(manifests: &[Manifest]) -> Manifest {
@@ -535,4 +596,33 @@ fn cluster_network_policy_limits_cluster_port_to_flowgen_pods() {
     assert!(rules[0].get("from").is_some());
     assert_eq!(rule_ports(&rules[1]), vec![3000, 8080, 8081]);
     assert!(rules[1].get("from").is_none());
+}
+
+#[test]
+fn cluster_port_is_the_telemetry_backend_port() {
+    let manifests = render(
+        r#"flowgen:
+  config:
+    settings:
+      telemetry:
+        enabled: true
+        backend:
+          type: memory
+          port: 9092
+  cluster:
+    networkPolicy: true
+"#,
+    );
+    let deployment = find_deployment(&manifests);
+    let cluster_port = container(pod_spec(&deployment))["ports"]
+        .as_sequence()
+        .expect("container should declare ports")
+        .iter()
+        .find(|p| p["name"] == "cluster")
+        .and_then(|p| p["containerPort"].as_u64());
+    let policy = network_policy(&manifests).expect("NetworkPolicy should render");
+    let spec = policy.spec.expect("NetworkPolicy should have a spec");
+
+    assert_eq!(cluster_port, Some(9092));
+    assert_eq!(rule_ports(&spec["ingress"][0]), vec![9092]);
 }

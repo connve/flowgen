@@ -138,7 +138,7 @@ Both branches are independent — remove or replace either one without affecting
 | Cloud | Path prefix | Credentials |
 |---|---|---|
 | GCS | `gs://bucket/path` | GCP service account JSON |
-| AWS S3 | `s3://bucket/path` | AWS access key JSON + `client_options.aws_region` |
+| AWS S3 | `s3://bucket/path` | AWS access key JSON + `s3.region` |
 | Azure | `az://container/path` | Azure storage account JSON |
 
 ```yaml
@@ -148,8 +148,8 @@ Both branches are independent — remove or replace either one without affecting
         operation: write
         credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/aws.json"
         path: s3://my-bucket/salesforce/{{event.subject}}
-        client_options:
-          aws_region: us-east-1
+        s3:
+          region: us-east-1
         hive_partition_options:
           enabled: true
           partition_keys:

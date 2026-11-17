@@ -1,5 +1,5 @@
-//! The `git_push` task: commits the files of each event and pushes them over
-//! smart HTTP.
+//! The `git_push` task: commits the files of each event onto a branch,
+//! pushed over smart HTTP or moved in a repository on this machine.
 
 /// Commit building and the receive-pack exchange.
 pub mod client;
@@ -96,7 +96,7 @@ pub struct GitPush {
     /// `git commit -S` does with `gpg.format=ssh`.
     ///
     /// Example: `signing_key_path: /etc/git/signing_key`
-    #[serde(default)]
+    #[serde(default, deserialize_with = "flowgen_core::config::optional_path")]
     pub signing_key_path: Option<PathBuf>,
     /// Commit message.
     ///
@@ -548,7 +548,7 @@ impl flowgen_core::task::runner::Runner for Processor {
             .render(&serde_json::Map::new())
             .map_err(|source| Error::RenderConfig { source })?;
         let credentials = load_credentials(rendered.credentials_path.as_deref()).await?;
-        let signing_key = match &self.config.signing_key_path {
+        let signing_key = match &rendered.signing_key_path {
             Some(path) => Some(Arc::new(load_signing_key(path).await?)),
             None => None,
         };
@@ -820,6 +820,53 @@ mod tests {
             load_signing_key(&dir.path().join("missing")).await,
             Err(Error::ReadSigningKey { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn the_signing_key_path_is_rendered_and_an_empty_one_is_unset() {
+        use flowgen_core::task::runner::Runner;
+        let dir = tempfile::TempDir::new().unwrap();
+        let key = keygen(dir.path(), "ed25519", &["-t", "ed25519", "-N", ""]);
+        std::env::set_var("GIT_PUSH_TEST_SIGNING_KEY", &key);
+        let task_manager = Arc::new(
+            flowgen_core::task::manager::TaskManagerBuilder::new()
+                .build()
+                .unwrap(),
+        );
+        let cache = Arc::new(flowgen_core::cache::memory::MemoryCache::new())
+            as Arc<dyn flowgen_core::cache::Cache>;
+        let context = Arc::new(
+            flowgen_core::task::context::TaskContextBuilder::new()
+                .flow_name("a".to_string())
+                .task_manager(task_manager)
+                .cache(cache)
+                .build()
+                .unwrap(),
+        );
+        let signing_key = |path: &'static str| {
+            let context = Arc::clone(&context);
+            async move {
+                let config: GitPush = serde_json::from_str(&format!(
+                    r#"{{"name": "push", "repository": ".", "message": "m", "signing_key_path": "{path}"}}"#
+                ))
+                .unwrap();
+                let (_, rx) = tokio::sync::mpsc::channel(1);
+                let processor = ProcessorBuilder::new()
+                    .config(Arc::new(config))
+                    .receiver(rx)
+                    .task_type("git_push")
+                    .task_context(context)
+                    .build()
+                    .await
+                    .unwrap();
+                processor.init().await.unwrap().signing_key
+            }
+        };
+
+        assert!(signing_key("{{env.GIT_PUSH_TEST_SIGNING_KEY}}")
+            .await
+            .is_some());
+        assert!(signing_key("").await.is_none());
     }
 
     #[test]

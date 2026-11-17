@@ -20,10 +20,11 @@ spec:
       {{- include "flowgen.selectorLabels" . | nindent 6 }}
   template:
     metadata:
-      {{- with $worker.podAnnotations }}
       annotations:
+        checksum/config: {{ include "flowgen.settings" . | sha256sum }}
+        {{- with $worker.podAnnotations }}
         {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- end }}
       labels:
         {{- include "flowgen.selectorLabels" . | nindent 8 }}
     spec:
@@ -64,13 +65,11 @@ spec:
         {{- $system := $worker.systemFlows }}
         {{- if $system.enabled }}
         - name: FLOWGEN_REPOSITORY
-          value: {{ $system.repository | quote }}
+          value: {{ required "flowgen.systemFlows.repository is required when flowgen.systemFlows.enabled is true" $system.repository | quote }}
         - name: FLOWGEN_WORKSPACE_PATH
           value: {{ $system.workspacePath | quote }}
-        {{- with $system.releases }}
         - name: FLOWGEN_RELEASES
-          value: {{ . | quote }}
-        {{- end }}
+          value: {{ required "flowgen.systemFlows.releases is required when flowgen.systemFlows.enabled is true" $system.releases | quote }}
         {{- if $system.gitCredentials.secretName }}
         - name: FLOWGEN_GIT_CREDENTIALS
           value: {{ printf "/etc/flowgen/system-flows/git/%s" $system.gitCredentials.key | quote }}
@@ -94,9 +93,10 @@ spec:
         {{- end }}
         {{- if $worker.cluster }}
         - name: cluster
-          containerPort: {{ default 8082 $worker.cluster.port }}
+          containerPort: {{ dig "telemetry" "backend" "port" 8082 $settings }}
           protocol: TCP
         {{- end }}
+        {{- if dig "health" "enabled" true $settings }}
         - name: health
           containerPort: {{ dig "health" "port" 8081 $settings }}
           protocol: TCP
@@ -116,6 +116,7 @@ spec:
             path: /livez
             port: health
           {{- toYaml (dig "liveness" dict $probes) | nindent 10 }}
+        {{- end }}
         resources:
           {{- toYaml $worker.resources | nindent 12 }}
         volumeMounts:

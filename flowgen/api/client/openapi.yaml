@@ -5,7 +5,7 @@ info:
     HTTP API for flowgen. Two listeners: `web` (flow / resource /
     SSE endpoints under `web.path`) and `health` (Kubernetes probes
     on the root path).
-  version: 0.154.0
+  version: 0.155.0
   license:
     name: MPL-2.0
 servers:
@@ -85,7 +85,7 @@ paths:
       tags: [resources]
       responses:
         "200":
-          description: One entry per resource (filesystem + cache combined).
+          description: One entry per resource (filesystem, cache and system resources combined).
           content:
             application/json:
               schema:
@@ -681,7 +681,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/WorkspaceFile"
         "400":
-          description: The name is not a valid file name.
+          description: The name, content or form is invalid.
         "404":
           description: "`credentials` is not configured."
         "500":
@@ -738,6 +738,45 @@ paths:
                 $ref: "#/components/schemas/ScriptTestResult"
         "400":
           description: No samples or more than 100, an invalid draft path, a script that could not start, or a test past 30 seconds.
+
+  /api/docs:
+    get:
+      operationId: listDocs
+      summary: The docs pages of this version.
+      description: |
+        Embedded in the binary, so they describe the tasks it runs; the same
+        pages as the docs site's `llms.txt`.
+      tags: [workspace]
+      responses:
+        "200":
+          description: The pages, by path.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DocPages"
+
+  /api/docs/{page}:
+    get:
+      operationId: readDoc
+      summary: One docs page as Markdown.
+      description: The `{page}` path parameter is greedy and matches slashes.
+      tags: [workspace]
+      parameters:
+        - name: page
+          in: path
+          required: true
+          description: The page's path, such as `object-store/object-store`.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The page.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DocContent"
+        "404":
+          description: No page at that path.
 
   /api/hubs:
     get:
@@ -876,9 +915,9 @@ paths:
       summary: Releases and deployments as they happen.
       description: |
         Server-Sent Events: a `deployment` event each time a commit is
-        released or a flow or resource that flowgen loads from the cache
-        changes, after which the `deployment` of committed changes may have
-        moved on.
+        released, a flow starts or stops, or a resource that flowgen loads
+        from the cache changes, after which the `deployment` of committed
+        changes may have moved on.
       tags: [changes]
       responses:
         "200":
@@ -1325,8 +1364,8 @@ components:
           type: string
         kind:
           type: string
-          enum: [text, secret, number, boolean, choice, list]
-          description: "`secret` is masked; `list` takes one value per line."
+          enum: [text, url, secret, number, boolean, choice, list]
+          description: "`url` is an `http` or `https` URL; `secret` is masked; `list` takes one value per line."
         choices:
           type: array
           description: The values a `choice` takes.
@@ -1694,14 +1733,21 @@ components:
 
     CredentialInput:
       type: object
-      required: [name, content]
+      required: [name, content, connector]
       properties:
         name:
           type: string
-          description: Letters, digits, `.`, `_` and `-`; flows read the file as `<name>.json`.
+          description: Lowercase letters, digits and `-`; flows read the file as `<name>.json`.
         content:
           type: string
-          description: The credentials file, usually JSON.
+          description: The credentials file, as JSON.
+        connector:
+          type: string
+          description: The connector the credentials are for, such as `http`.
+        form:
+          type: integer
+          minimum: 0
+          description: Which of the connector's credentials forms made the file; required when it has any.
 
     WorkspaceFiles:
       type: object
@@ -1733,7 +1779,7 @@ components:
 
     HubTemplate:
       type: object
-      required: [slug, name, tags, files]
+      required: [slug, name, tags, files, digest]
       properties:
         slug:
           type: string
@@ -1755,6 +1801,65 @@ components:
           description: Its `flows/` and `resources/` files, by their path in the workspace.
           items:
             $ref: "#/components/schemas/WorkspaceFile"
+        digest:
+          type: string
+          description: The SHA-256 of its files, as `sha256:<hex>`; it changes when the template does.
+        installedDigest:
+          type: string
+          description: The digest `flowgen.lock` holds for it; absent when it was not installed from the hub.
+        installedFiles:
+          type: array
+          description: The paths of the files `flowgen.lock` holds for it, which an update deletes when the template no longer has them and an uninstall deletes.
+          items:
+            type: string
+
+    TemplateSource:
+      type: object
+      description: The hub template a change installs, updates or removes, recorded in `flowgen.lock` when it is committed.
+      required: [hub, slug, digest]
+      properties:
+        hub:
+          type: string
+        slug:
+          type: string
+        digest:
+          type: string
+        removed:
+          type: boolean
+          default: false
+          description: The change uninstalls the template, so flowgen.lock drops it.
+
+    DocPage:
+      type: object
+      required: [page, title, summary]
+      properties:
+        page:
+          type: string
+          description: The page's path, such as `object-store/object-store`.
+        title:
+          type: string
+        summary:
+          type: string
+          description: The first sentence of the page.
+
+    DocPages:
+      type: object
+      required: [pages]
+      properties:
+        pages:
+          type: array
+          items:
+            $ref: "#/components/schemas/DocPage"
+
+    DocContent:
+      type: object
+      required: [page, content]
+      properties:
+        page:
+          type: string
+        content:
+          type: string
+          description: The page as Markdown.
 
     HubTemplates:
       type: object
@@ -1838,6 +1943,8 @@ components:
           description: The files to change, each path at most once.
           items:
             $ref: "#/components/schemas/WorkspaceFile"
+        template:
+          $ref: "#/components/schemas/TemplateSource"
 
     ChangeEdit:
       type: object
@@ -1933,6 +2040,8 @@ components:
         stalled:
           type: boolean
           description: Committing ran past the `ack_timeout` of the commit flow's `inproc_endpoint`, so approving the change again retries it.
+        template:
+          $ref: "#/components/schemas/TemplateSource"
 
     ChangeSummary:
       type: object
@@ -1959,6 +2068,10 @@ components:
         updatedAt:
           type: integer
           format: int64
+        decidedAt:
+          type: integer
+          format: int64
+          description: When the change was approved or rejected.
         fileCount:
           type: integer
         deployment:

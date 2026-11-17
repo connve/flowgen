@@ -5,7 +5,9 @@
 //! multi-modal capabilities (text, images, speech, etc.).
 
 use flowgen_core::task::context::{Services, TaskContext};
-use flowgen_core::task::meta::{Connection, Connector, CredentialsField, CredentialsForm, Icon};
+use flowgen_core::task::meta::{
+    parses, Connection, Connector, CredentialsField, CredentialsForm, Icon,
+};
 use flowgen_core::task::runner::Runner;
 use flowgen_core::task::{Task, TaskError, TaskIo, TaskMeta};
 use std::sync::Arc;
@@ -41,13 +43,12 @@ pub const CONNECTOR: Connector = Connector {
         CredentialsForm {
             label: "API key",
             fields: &[CredentialsField::secret("api_key", "API key")],
+            check: parses::<completion::Credentials>,
         },
         CredentialsForm {
-            label: "Cloud project",
-            fields: &[
-                CredentialsField::text("project_id", "Project ID"),
-                CredentialsField::text("region", "Region"),
-            ],
+            label: "Service account file",
+            fields: &[],
+            check: flowgen_core::credentials::check_service_account,
         },
     ],
 };

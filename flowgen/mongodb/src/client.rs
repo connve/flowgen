@@ -141,6 +141,14 @@ impl MongoCredentials {
         serde_json::from_str(&content).map_err(|source| Error::CredentialsFileParse { source })
     }
 
+    /// [`Self::from_file`] on a blocking thread, as the keychain and the file system block.
+    pub async fn load(path: &Path) -> Result<Self, Error> {
+        let content = flowgen_core::credentials::read_async(path)
+            .await
+            .map_err(|source| Error::CredentialsFileRead { source })?;
+        serde_json::from_str(&content).map_err(|source| Error::CredentialsFileParse { source })
+    }
+
     /// Builds a connection string from the structured fields, with
     /// `options` appended as query parameters.
     ///
@@ -238,7 +246,7 @@ pub struct MongoClient {
 impl MongoClient {
     pub async fn connect(self) -> Result<Client, Error> {
         let credentials = match &self.credentials_path {
-            Some(path) => MongoCredentials::from_file(path)?,
+            Some(path) => MongoCredentials::load(path).await?,
             None => MongoCredentials::default(),
         };
         let uri = credentials.build_connection_string()?;
@@ -418,6 +426,31 @@ mod tests {
 
         assert_eq!(creds.host, MongoHost::One("example.com".to_string()));
         assert_eq!(creds.port, Some(27018));
+    }
+
+    #[tokio::test]
+    async fn credentials_load_off_the_runtime() {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "flowgen_test_mongo_creds_load_{}.json",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, r#"{"host": "example.com"}"#).unwrap();
+
+        let creds = MongoCredentials::load(&path).await;
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(
+            creds.unwrap().host,
+            MongoHost::One("example.com".to_string())
+        );
+        assert!(matches!(
+            MongoCredentials::load(Path::new("/nonexistent/flowgen_mongo_creds.json")).await,
+            Err(Error::CredentialsFileRead { .. })
+        ));
     }
 
     #[test]

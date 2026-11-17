@@ -62,6 +62,8 @@ pub enum Error {
     TargetGone { target: String },
     #[error("The change's files moved from target '{stored}' to '{current}'")]
     TargetChanged { stored: String, current: String },
+    #[error("A change from a template takes no other files")]
+    TemplateChange,
     #[error("Only a signed-in user can approve or reject changes")]
     UserRequired,
     #[error("Only the proposer can edit this change")]
@@ -88,6 +90,11 @@ pub enum Error {
     Serialize {
         #[source]
         source: serde_json::Error,
+    },
+    #[error("Failed to write flowgen.lock: {source}")]
+    Lock {
+        #[source]
+        source: serde_yaml::Error,
     },
     #[error("Failed to read the deployed '{path}': {source}")]
     Deployed {
@@ -150,7 +157,8 @@ impl IntoResponse for Error {
             | Error::Concurrent
             | Error::EditedSinceReview
             | Error::TargetGone { .. }
-            | Error::TargetChanged { .. } => (StatusCode::CONFLICT, None),
+            | Error::TargetChanged { .. }
+            | Error::TemplateChange => (StatusCode::CONFLICT, None),
             Error::UserRequired | Error::NotApprover { .. } | Error::NotProposer => {
                 (StatusCode::FORBIDDEN, None)
             }
@@ -169,9 +177,8 @@ impl IntoResponse for Error {
             Error::CommitTimeout { .. }
             | Error::CommitAborted { .. }
             | Error::Call(_)
-            | Error::Serialize { .. } => {
-                (StatusCode::INTERNAL_SERVER_ERROR, Some("Committing failed"))
-            }
+            | Error::Serialize { .. }
+            | Error::Lock { .. } => (StatusCode::INTERNAL_SERVER_ERROR, Some("Committing failed")),
             Error::Encode { .. } => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Some("Failed to encode the change"),
@@ -455,7 +462,8 @@ fn index_committed<'a>(changes: impl IntoIterator<Item = &'a api::Change>) -> Co
     committed
 }
 
-async fn committed_versions(state: &WebState) -> Result<Committed, Error> {
+/// Every stored change that can be read.
+async fn stored_changes(state: &WebState) -> Result<Vec<api::Change>, Error> {
     let keys = state
         .session_cache
         .list_keys(CHANGE_KEY_PREFIX)
@@ -463,11 +471,16 @@ async fn committed_versions(state: &WebState) -> Result<Committed, Error> {
         .map_err(|source| Error::Store { source })?;
     let mut changes = Vec::with_capacity(keys.len());
     for key in keys {
-        if let Ok((change, _)) = load(state, key.trim_start_matches(CHANGE_KEY_PREFIX)).await {
-            changes.push(change);
+        match load(state, key.trim_start_matches(CHANGE_KEY_PREFIX)).await {
+            Ok((change, _)) => changes.push(change),
+            Err(error) => warn!(key = %key, error = %error, "Skipping unreadable change"),
         }
     }
-    Ok(index_committed(&changes))
+    Ok(changes)
+}
+
+async fn committed_versions(state: &WebState) -> Result<Committed, Error> {
+    Ok(index_committed(&stored_changes(state).await?))
 }
 
 /// Applies the committed versions of a file to what runs: from the newest
@@ -517,9 +530,10 @@ async fn base_content(
 /// released commit: `releases.<commit>`.
 pub(crate) const RELEASES_PREFIX: &str = "releases";
 
-/// Where a committed change stands against what this instance runs; `None`
-/// for other changes, for targets without `track_deployment`, and when the
-/// running content cannot be read.
+/// Where a committed change stands against what this instance runs, leaving
+/// out credentials, which no flowgen flow deploys; `None` for other changes,
+/// for targets without `track_deployment`, and when the running content
+/// cannot be read.
 async fn deployment(
     state: &WebState,
     change: &api::Change,
@@ -537,6 +551,7 @@ async fn deployment(
     }
     for file in &change.files {
         let location = match locate(&file.path) {
+            Ok(Location::Credential { .. }) => continue,
             Ok(location) => location,
             Err(_) => return None,
         };
@@ -944,18 +959,7 @@ pub(crate) async fn stream_deployments(
 /// `GET /api/changes`.
 pub(crate) async fn list_changes(State(state): State<Arc<WebState>>) -> Result<Response, Error> {
     require_authoring(&state)?;
-    let keys = state
-        .session_cache
-        .list_keys(CHANGE_KEY_PREFIX)
-        .await
-        .map_err(|source| Error::Store { source })?;
-    let mut loaded = Vec::with_capacity(keys.len());
-    for key in keys {
-        match load(&state, key.trim_start_matches(CHANGE_KEY_PREFIX)).await {
-            Ok((change, _)) => loaded.push(change),
-            Err(error) => warn!(key = %key, error = %error, "Skipping unreadable change"),
-        }
-    }
+    let loaded = stored_changes(&state).await?;
     let committed = index_committed(&loaded);
     let mut changes = Vec::with_capacity(loaded.len());
     for change in loaded {
@@ -969,6 +973,7 @@ pub(crate) async fn list_changes(State(state): State<Arc<WebState>>) -> Result<R
             proposed_by: change.proposed_by,
             created_at: change.created_at,
             updated_at: change.updated_at,
+            decided_at: change.decided_at,
             file_count: change.files.len() as i64,
         });
     }
@@ -1027,6 +1032,7 @@ pub(crate) async fn propose_change(
         error: None,
         deployment: None,
         stalled: None,
+        template: proposal.template,
     };
     store(&state, &change).await?;
     Ok((StatusCode::CREATED, Json(with_diffs(change).await?)).into_response())
@@ -1117,6 +1123,9 @@ pub(crate) async fn add_change_files(
     let authoring = require_authoring(&state)?;
     let caller = caller.map(|Extension(caller)| caller);
     let (mut change, revision) = load_editable(&state, caller.as_ref(), &id).await?;
+    if change.template.is_some() {
+        return Err(Error::TemplateChange);
+    }
     let locations = check_paths(&body.files)?;
     let target = target_for(
         authoring,
@@ -1348,6 +1357,30 @@ async fn run_commit_flow(
             path: &list_path,
             content: after.as_deref(),
             previous: None,
+        });
+    }
+    let deployed_lock = match (&change.template, state.flows_cache.as_deref()) {
+        (Some(_), Some(cache)) => Some(crate::lock::deployed(cache).await),
+        _ => None,
+    };
+    let base = match &deployed_lock {
+        Some(Some(content)) => Some(content.as_str()),
+        _ => None,
+    };
+    let lock = match &change.template {
+        Some(_) => Some(
+            crate::lock::Lock::parse(base)
+                .with(change)
+                .render()
+                .map_err(|source| Error::Lock { source })?,
+        ),
+        None => None,
+    };
+    if let Some(lock) = &lock {
+        files.push(CommitFile {
+            path: crate::lock::LOCK_FILE,
+            content: Some(lock),
+            previous: deployed_lock.as_ref().map(Option::as_deref),
         });
     }
     let commit = Commit {
@@ -1605,6 +1638,7 @@ mod tests {
             error: None,
             deployment: None,
             stalled: None,
+            template: None,
         };
         let timeout = Some(std::time::Duration::from_secs(60));
         assert!(can_commit(
@@ -1725,6 +1759,51 @@ mod tests {
         assert!(matches!(target_for(&authoring, []), Err(Error::NoFiles)));
     }
 
+    #[tokio::test]
+    async fn a_committed_change_of_credentials_is_deployed() {
+        let mut state = crate::web::tests::test_state();
+        state.authoring = Some(crate::config::AuthoringOptions {
+            enabled: true,
+            targets: vec![crate::config::AuthoringTarget {
+                name: "workspace".to_string(),
+                paths: vec!["credentials/".to_string()],
+                commit_flow: "system/commit_workspace".to_string(),
+                approver_groups: Vec::new(),
+                track_deployment: true,
+            }],
+            groups_claim: "groups".to_string(),
+        });
+        let change = api::Change {
+            id: "a".to_string(),
+            target: "workspace".to_string(),
+            title: "t".to_string(),
+            description: None,
+            status: api::ChangeStatus::Committed,
+            proposed_by: "p".to_string(),
+            created_at: 0,
+            updated_at: None,
+            decided_by: None,
+            decided_at: None,
+            files: vec![api::ChangeFile {
+                path: "credentials/a.yaml".to_string(),
+                content: Some("sealed".to_string()),
+                previous: None,
+                diff: String::new(),
+            }],
+            issues: Vec::new(),
+            result: Default::default(),
+            error: None,
+            deployment: None,
+            stalled: None,
+            template: None,
+        };
+
+        assert_eq!(
+            deployment(&state, &change, &Committed::new()).await,
+            Some(api::ChangeDeployment::Deployed)
+        );
+    }
+
     #[test]
     fn a_stored_change_is_decided_only_under_the_target_that_owns_its_files_now() {
         let target = |name: &str, paths: &[&str]| crate::config::AuthoringTarget {
@@ -1764,6 +1843,7 @@ mod tests {
             error: None,
             deployment: None,
             stalled: None,
+            template: None,
         };
 
         assert_eq!(

@@ -7,7 +7,7 @@ flow:
   tasks:
     - mcp_tool:
         name: propose_change
-        description: "Propose files to add, change, or delete (content null) for review. Returns the change id."
+        description: "Propose files to add, change, or delete (content null) for review; call validate_files first until it returns no issues. Returns the change id."
         input_schema:
           type: object
           properties:

@@ -15,7 +15,7 @@ Git tasks authenticate via a JSON credentials file referenced by `credentials_pa
 }
 ```
 
-The token is presented to the server through a gix credential helper that responds to the server's `WWW-Authenticate` challenge — the token never appears in the repository URL, in `.git/config`, or in logs.
+The token is presented to the server through a gix credential helper that responds to the server's `WWW-Authenticate` challenge — the token never appears in the repository URL, in `.git/config`, or in logs. A repository URL that holds a username or password, such as `https://user:token@host/repo.git`, is rejected.
 
 `username` is optional and defaults to `x-access-token`, which is accepted by GitHub (PATs and App installation tokens), GitLab personal/deploy tokens, and Bitbucket app passwords. Override it when the host expects a specific literal username:
 

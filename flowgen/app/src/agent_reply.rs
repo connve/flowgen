@@ -428,7 +428,8 @@ enum Edit<T> {
 }
 
 /// Applies `change` to the session stored at `key` and writes it back,
-/// starting over when another writer changed it in the meantime.
+/// starting over when another writer changed it in the meantime. The revision
+/// is read before the value, so a write between the two reads fails ours.
 async fn edit<T>(
     state: &WebState,
     key: &str,
@@ -436,12 +437,16 @@ async fn edit<T>(
 ) -> Result<T, Error> {
     let cache = &state.session_cache;
     loop {
+        let latest = match cache.get_revision(key).await {
+            Ok(latest) => latest,
+            Err(source) => return Err(Error::Store { source }),
+        };
         let (stored, revision) = match cache.get_with_revision(key).await {
             Ok(Some((bytes, revision))) => match serde_json::from_slice(&bytes) {
                 Ok(session) => (Some(session), Some(revision)),
                 Err(source) => return Err(Error::Corrupt { source }),
             },
-            Ok(None) => (None, None),
+            Ok(None) => (None, latest),
             Err(source) => return Err(Error::Store { source }),
         };
         let (session, value) = match change(stored)? {
@@ -455,11 +460,7 @@ async fn edit<T>(
         let ttl = session_ttl(state);
         let written = match revision {
             Some(revision) => cache.update(key, bytes, revision, ttl).await,
-            None => match cache.get_revision(key).await {
-                Ok(Some(deleted)) => cache.update(key, bytes, deleted, ttl).await,
-                Ok(None) => cache.create(key, bytes, ttl).await,
-                Err(source) => Err(source),
-            },
+            None => cache.create(key, bytes, ttl).await,
         };
         match written {
             Ok(_) => return Ok(value),
@@ -1323,5 +1324,32 @@ mod tests {
     async fn a_followed_reply_stays_read_and_an_unwatched_one_turns_unread() {
         assert!(!unread_after_save(true).await);
         assert!(unread_after_save(false).await);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_first_edits_of_a_session_all_land() {
+        for _ in 0..300 {
+            let store = store_with(None).await;
+
+            let edits: Vec<_> = (0..10)
+                .map(|_| {
+                    let state = Arc::clone(&store.state);
+                    let key = store.key.clone();
+                    tokio::spawn(async move {
+                        edit(&state, &key, |stored| {
+                            let mut current = stored.unwrap_or_else(|| session(Vec::new(), 1));
+                            current.messages.push(message());
+                            Ok(Edit::Write(current, ()))
+                        })
+                        .await
+                    })
+                })
+                .collect();
+            for edit in edits {
+                edit.await.unwrap().unwrap();
+            }
+
+            assert_eq!(stored(&store).await.unwrap().messages.len(), 10);
+        }
     }
 }

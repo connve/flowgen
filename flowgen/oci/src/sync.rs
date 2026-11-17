@@ -155,6 +155,8 @@ pub enum Error {
     Layout(#[from] crate::layout::Error),
     #[error("No artifact is tagged '{reference}' yet")]
     Untagged { reference: String },
+    #[error("Artifact '{reference}' holds no files")]
+    Empty { reference: String },
     #[error("The manifest of '{reference}' is not an OCI image manifest: {source}")]
     InvalidManifest {
         reference: String,
@@ -554,6 +556,7 @@ impl flowgen_core::task::runner::Handler for EventHandler {
             Error::Layout(source) => !source.is_permanent(),
             Error::InvalidManifest { .. } => false,
             Error::InvalidReference { .. }
+            | Error::Empty { .. }
             | Error::InvalidLayerEncoding { .. }
             | Error::FileTooLarge { .. }
             | Error::ArtifactTooLarge { .. } => false,
@@ -709,6 +712,11 @@ impl flowgen_core::task::runner::Handler for EventHandler {
             }
 
             file_events.extend(docker_state.into_values());
+            if file_events.is_empty() {
+                return Err(Error::Empty {
+                    reference: self.config.artifact.clone(),
+                });
+            }
 
             let files = file_events
                 .into_iter()
@@ -812,13 +820,9 @@ impl flowgen_core::task::runner::Runner for Processor {
     type EventHandler = EventHandler;
 
     async fn init(&self) -> Result<EventHandler, Error> {
-        // Render the config at init time so operator-controlled fields such
-        // as `artifact` can reference environment variables via
-        // `{{env.VAR_NAME}}`. Event data is intentionally not in scope here —
-        // the artifact reference is static for the lifetime of the task.
         let config: OciSync = self
             .config
-            .render(&serde_json::json!({}))
+            .render(&serde_json::Map::new())
             .map_err(|source| Error::RenderConfig { source })?;
 
         let source = match crate::layout::artifact(&config.artifact) {
@@ -1476,7 +1480,7 @@ mod tests {
     async fn sync_layout(
         artifact: &str,
         context: Arc<flowgen_core::task::context::TaskContext>,
-    ) -> Vec<(String, String)> {
+    ) -> Result<Vec<(String, String)>, Error> {
         use flowgen_core::task::runner::{Handler, Runner};
         let (_, rx) = tokio::sync::mpsc::channel(1);
         let (tx, mut out) = tokio::sync::mpsc::channel(64);
@@ -1501,7 +1505,11 @@ mod tests {
             .task_type("generate")
             .build()
             .unwrap();
-        handler.handle(tick).await.unwrap();
+        let handled = handler.handle(tick).await;
+        if let Err(error) = handled {
+            assert!(!handler.is_retryable(&error), "{error}");
+            return Err(error);
+        }
         drop(handler);
         let mut files = Vec::new();
         while let Ok(event) = out.try_recv() {
@@ -1514,7 +1522,33 @@ mod tests {
             }
         }
         files.sort();
-        files
+        Ok(files)
+    }
+
+    #[tokio::test]
+    async fn an_artifact_without_files_is_a_permanent_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = crate::layout::Layout::new(dir.path().join("releases"));
+        let manifest =
+            serde_json::to_vec(&oci_client::manifest::OciImageManifest::default()).unwrap();
+        layout
+            .tag(
+                &manifest,
+                oci_client::manifest::OCI_IMAGE_MEDIA_TYPE,
+                &["latest".to_string()],
+            )
+            .unwrap();
+        let artifact = format!(
+            "{}{}:latest",
+            crate::layout::SCHEME,
+            dir.path().join("releases").display()
+        );
+
+        let error = sync_layout(&artifact, test_task_context())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, Error::Empty { .. }), "{error}");
     }
 
     #[tokio::test]
@@ -1531,6 +1565,7 @@ mod tests {
         assert!(
             sync_layout(&artifact, Arc::clone(&context))
                 .await
+                .unwrap()
                 .is_empty(),
             "Nothing released yet"
         );
@@ -1553,7 +1588,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            sync_layout(&artifact, Arc::clone(&context)).await,
+            sync_layout(&artifact, Arc::clone(&context)).await.unwrap(),
             vec![
                 ("flows/a.yaml".to_string(), "a".to_string()),
                 ("resources/b.txt".to_string(), "b".to_string())
@@ -1562,6 +1597,7 @@ mod tests {
         assert!(
             sync_layout(&artifact, Arc::clone(&context))
                 .await
+                .unwrap()
                 .is_empty(),
             "Same digest, no files"
         );
@@ -1570,7 +1606,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            sync_layout(&artifact, context).await,
+            sync_layout(&artifact, context).await.unwrap(),
             vec![("flows/a.yaml".to_string(), "a2".to_string())]
         );
     }

@@ -175,14 +175,6 @@
 					<Icon icon="tabler:user-check" class="h-6 w-6" />
 				</a>
 			</div>
-		{:else}
-			<div
-				class="tooltip tooltip-bottom flex h-8 w-8 items-center justify-center rounded-full bg-base-200 text-base-content/70"
-				data-tip={m.user_signed_in()}
-				aria-label={m.user_signed_in()}
-			>
-				<Icon icon="tabler:user" class="h-6 w-6" />
-			</div>
 		{/if}
 	{/if}
 {/snippet}

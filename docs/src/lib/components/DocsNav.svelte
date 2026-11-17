@@ -53,9 +53,16 @@
 
 	let root = $state<HTMLElement | null>(null);
 
-	// Scrolls the list's `[data-nav-scroll]` container so the current page shows.
+	function scrollerOf(element: HTMLElement | null): HTMLElement | null {
+		for (let parent = element?.parentElement; parent; parent = parent.parentElement) {
+			if (getComputedStyle(parent).overflowY === 'auto') return parent;
+		}
+		return null;
+	}
+
+	// Scrolls the list's container so the current page shows.
 	function reveal() {
-		const scroller = root?.closest<HTMLElement>('[data-nav-scroll]');
+		const scroller = scrollerOf(root);
 		const link = root?.querySelector<HTMLElement>('[aria-current="page"]');
 		if (!scroller || !link) return;
 		const top = link.getBoundingClientRect().top - scroller.getBoundingClientRect().top;

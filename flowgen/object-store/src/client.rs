@@ -1,15 +1,17 @@
+use crate::config::S3Options;
 use object_store::aws::AmazonS3Builder;
 use object_store::{parse_url_opts, path::Path, ObjectStore};
-use std::{collections::HashMap, path::PathBuf};
+use std::path::PathBuf;
 use url::Url;
 
-/// Known credential keys extracted from an AWS credentials JSON file.
-const AWS_CREDENTIAL_KEYS: &[&str] = &[
-    "aws_access_key_id",
-    "aws_secret_access_key",
-    "aws_session_token",
-    "aws_region",
-];
+/// An AWS credentials file for `s3` URLs.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AwsCredentials {
+    aws_access_key_id: String,
+    aws_secret_access_key: String,
+    aws_session_token: Option<String>,
+}
 
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
@@ -65,8 +67,8 @@ pub struct Client {
     path: PathBuf,
     /// Optional path to credentials file (GCP service account JSON or AWS credentials JSON).
     credentials_path: Option<PathBuf>,
-    /// Additional connection options for the object store.
-    options: Option<HashMap<String, String>>,
+    /// Options of `s3://` paths.
+    s3: S3Options,
     /// Initialized object store context after connection.
     pub context: Option<Context>,
 }
@@ -76,52 +78,51 @@ impl Client {
     async fn create_context(&self) -> Result<Context, Error> {
         let path = self.path.to_str().ok_or(Error::EmptyPath)?;
         let url = Url::parse(path).map_err(|source| Error::ParseUrl { source })?;
-        let mut parse_opts = self.options.clone().unwrap_or_default();
-
-        if let Some(credentials_path) = &self.credentials_path {
-            match url.scheme() {
-                "gs" => {
-                    let content = flowgen_core::credentials::read_async(credentials_path)
-                        .await
-                        .map_err(|source| Error::Credentials { source })?;
-                    parse_opts.insert("google_service_account_key".to_string(), content);
-                }
-                "s3" | "s3a" => {
-                    Self::load_aws_credentials(credentials_path, &mut parse_opts).await?;
-                }
-                _ => {}
-            }
-        }
-
-        match url.scheme() {
-            "s3" | "s3a" => self.create_s3_context(&url, parse_opts),
-            _ => {
-                let (object_store, path) = parse_url_opts(&url, parse_opts)
-                    .map_err(|e| Error::ObjectStore { source: e })?;
-                Ok(Context { object_store, path })
-            }
-        }
+        let options = match (url.scheme(), &self.credentials_path) {
+            ("s3" | "s3a", _) => return self.create_s3_context(&url).await,
+            ("gs", Some(credentials_path)) => vec![(
+                "google_service_account_key",
+                flowgen_core::credentials::read_async(credentials_path)
+                    .await
+                    .map_err(|source| Error::Credentials { source })?,
+            )],
+            _ => Vec::new(),
+        };
+        let (object_store, path) =
+            parse_url_opts(&url, options).map_err(|e| Error::ObjectStore { source: e })?;
+        Ok(Context { object_store, path })
     }
 
     /// Creates an S3 context using `from_env()` to pick up IRSA, EKS Pod Identity,
     /// instance profiles, and env var credentials automatically.
-    fn create_s3_context(
-        &self,
-        url: &Url,
-        opts: HashMap<String, String>,
-    ) -> Result<Context, Error> {
+    async fn create_s3_context(&self, url: &Url) -> Result<Context, Error> {
         let path =
             Path::from_url_path(url.path()).map_err(|e| Error::ObjectStore { source: e.into() })?;
 
-        let builder = opts.into_iter().fold(
-            AmazonS3Builder::from_env()
-                .with_url(url.to_string())
-                .with_virtual_hosted_style_request(true),
-            |builder, (key, value)| match key.to_ascii_lowercase().parse() {
-                Ok(k) => builder.with_config(k, value),
-                Err(_) => builder,
-            },
-        );
+        let mut builder = AmazonS3Builder::from_env()
+            .with_url(url.to_string())
+            .with_virtual_hosted_style_request(virtual_hosted_style_request(&self.s3));
+        if let Some(region) = &self.s3.region {
+            builder = builder.with_region(region);
+        }
+        if let Some(endpoint) = &self.s3.endpoint {
+            builder = builder.with_endpoint(endpoint);
+        }
+        if let Some(allow_http) = self.s3.allow_http {
+            builder = builder.with_allow_http(allow_http);
+        }
+        if let Some(credentials_path) = &self.credentials_path {
+            let content = flowgen_core::credentials::read_async(credentials_path)
+                .await
+                .map_err(|source| Error::Credentials { source })?;
+            let credentials: AwsCredentials = serde_json::from_str(&content).map_err(Error::s3)?;
+            builder = builder
+                .with_access_key_id(credentials.aws_access_key_id)
+                .with_secret_access_key(credentials.aws_secret_access_key);
+            if let Some(token) = credentials.aws_session_token {
+                builder = builder.with_token(token);
+            }
+        }
 
         let object_store = builder
             .build()
@@ -131,27 +132,6 @@ impl Client {
             object_store: Box::new(object_store),
             path,
         })
-    }
-
-    /// Reads an AWS credentials JSON file and inserts known keys into the options map.
-    /// Keys already present in the map (e.g. from client_options) are not overwritten.
-    async fn load_aws_credentials(
-        path: &std::path::Path,
-        opts: &mut HashMap<String, String>,
-    ) -> Result<(), Error> {
-        let content = flowgen_core::credentials::read_async(path)
-            .await
-            .map_err(|source| Error::Credentials { source })?;
-        let creds: serde_json::Value = serde_json::from_str(&content).map_err(Error::s3)?;
-
-        for &key in AWS_CREDENTIAL_KEYS {
-            if let Some(value) = creds.get(key).and_then(|v| v.as_str()) {
-                opts.entry(key.to_string())
-                    .or_insert_with(|| value.to_string());
-            }
-        }
-
-        Ok(())
     }
 
     /// Reconnects to the object store, refreshing credentials.
@@ -171,6 +151,15 @@ impl Client {
     }
 }
 
+/// `virtual_hosted_style_request` if set, else `true` without an `endpoint` and `false` with one.
+fn virtual_hosted_style_request(s3: &S3Options) -> bool {
+    match (s3.virtual_hosted_style_request, &s3.endpoint) {
+        (Some(virtual_hosted), _) => virtual_hosted,
+        (None, Some(_)) => false,
+        (None, None) => true,
+    }
+}
+
 impl flowgen_core::client::Client for Client {
     type Error = Error;
 
@@ -187,8 +176,8 @@ pub struct ClientBuilder {
     path: Option<PathBuf>,
     /// Optional path to credentials file (GCP service account JSON or AWS credentials JSON).
     credentials_path: Option<PathBuf>,
-    /// Additional connection options for the object store.
-    pub options: Option<HashMap<String, String>>,
+    /// Options of `s3://` paths.
+    s3: S3Options,
 }
 
 impl ClientBuilder {
@@ -210,11 +199,12 @@ impl ClientBuilder {
         self
     }
 
-    /// Sets additional connection options.
-    pub fn options(mut self, options: HashMap<String, String>) -> Self {
-        self.options = Some(options);
+    /// Sets the options of `s3://` paths.
+    pub fn s3(mut self, s3: S3Options) -> Self {
+        self.s3 = s3;
         self
     }
+
     /// Builds the Client instance, validating required fields.
     pub fn build(self) -> Result<Client, Error> {
         Ok(Client {
@@ -222,8 +212,31 @@ impl ClientBuilder {
                 .path
                 .ok_or_else(|| Error::MissingBuilderAttribute("path".to_string()))?,
             credentials_path: self.credentials_path,
-            options: self.options,
+            s3: self.s3,
             context: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_endpoint_puts_the_bucket_in_the_path_unless_set_otherwise() {
+        let endpoint = Some("http://localhost:9000".to_string());
+        let options = |endpoint: Option<String>, virtual_hosted: Option<bool>| S3Options {
+            endpoint,
+            virtual_hosted_style_request: virtual_hosted,
+            ..S3Options::default()
+        };
+
+        assert!(virtual_hosted_style_request(&options(None, None)));
+        assert!(!virtual_hosted_style_request(&options(
+            endpoint.clone(),
+            None
+        )));
+        assert!(virtual_hosted_style_request(&options(endpoint, Some(true))));
+        assert!(!virtual_hosted_style_request(&options(None, Some(false))));
     }
 }

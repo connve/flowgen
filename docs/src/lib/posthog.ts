@@ -1,4 +1,4 @@
-import { browser } from '$app/environment';
+import { browser, dev } from '$app/environment';
 import posthog from 'posthog-js';
 import {
 	PUBLIC_POSTHOG_KEY,
@@ -6,11 +6,17 @@ import {
 	PUBLIC_POSTHOG_UI_HOST
 } from '$env/static/public';
 
+const LOCAL_HOSTS = ['localhost', '127.0.0.1', '[::1]'];
+
 let initialized = false;
 
+/** Whether analytics runs: a published build with a key, never in dev or on this machine. */
+function enabled(): boolean {
+	return browser && !dev && !!PUBLIC_POSTHOG_KEY && !LOCAL_HOSTS.includes(location.hostname);
+}
+
 export function initPosthog(): typeof posthog | null {
-	if (!browser) return null;
-	if (!PUBLIC_POSTHOG_KEY) return null;
+	if (!enabled()) return null;
 	if (initialized) return posthog;
 
 	posthog.init(PUBLIC_POSTHOG_KEY, {
@@ -24,18 +30,11 @@ export function initPosthog(): typeof posthog | null {
 }
 
 export function identify(email: string, properties?: Record<string, unknown>): void {
-	if (!browser) return;
-	if (!PUBLIC_POSTHOG_KEY) return;
-	initPosthog();
+	if (!initPosthog()) return;
 	posthog.identify(email, { email, ...properties });
 }
 
 export function capture(event: string, properties?: Record<string, unknown>): void {
-	if (!browser) return;
-	if (!PUBLIC_POSTHOG_KEY) {
-		console.info('[posthog] capture (no key):', event, properties);
-		return;
-	}
-	initPosthog();
+	if (!initPosthog()) return;
 	posthog.capture(event, properties);
 }

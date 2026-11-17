@@ -2,7 +2,7 @@
 
 import type { Client, ClientMeta, Options as Options2, RequestResult, ServerSentEventsResult, TDataShape } from './client';
 import { client } from './client.gen';
-import type { AddChangeFilesData, AddChangeFilesErrors, AddChangeFilesResponses, AgentsModelsData, AgentsModelsErrors, AgentsModelsResponses, ApproveChangeData, ApproveChangeErrors, ApproveChangeResponses, AuthCallbackData, AuthCallbackErrors, AuthLoginData, AuthLoginErrors, AuthLogoutData, AuthLogoutErrors, AuthMeData, AuthMeErrors, AuthMeResponses, DeleteSessionData, DeleteSessionErrors, DeleteSessionResponses, EditChangeData, EditChangeErrors, EditChangeResponses, EncryptCredentialData, EncryptCredentialErrors, EncryptCredentialResponses, FollowReplyData, FollowReplyErrors, FollowReplyResponse, FollowReplyResponses, GetChangeData, GetChangeErrors, GetChangeResponses, GetClusterStatusData, GetClusterStatusResponses, GetConfigData, GetConfigResponses, GetConnectionData, GetConnectionErrors, GetConnectionResponses, GetConnectorIconData, GetConnectorIconErrors, GetConnectorIconResponses, GetFlowData, GetFlowErrors, GetFlowResponses, GetResourceData, GetResourceErrors, GetResourceResponses, GetSessionData, GetSessionErrors, GetSessionResponses, GetVersionData, GetVersionResponses, GetWorkspaceFileData, GetWorkspaceFileErrors, GetWorkspaceFileResponses, HealthzData, HealthzResponses, ListAgentToolsData, ListAgentToolsErrors, ListAgentToolsResponses, ListChangesData, ListChangesErrors, ListChangesResponses, ListConnectionsData, ListConnectionsResponses, ListConnectorsData, ListConnectorsResponses, ListFlowsData, ListFlowsResponses, ListHubsData, ListHubsResponses, ListHubTemplatesData, ListHubTemplatesErrors, ListHubTemplatesResponses, ListLogsData, ListLogsResponses, ListResourcesData, ListResourcesResponses, ListSessionsData, ListSessionsErrors, ListSessionsResponses, LivezData, LivezResponses, MarkSessionReadData, MarkSessionReadErrors, MarkSessionReadResponses, MarkSessionUnreadData, MarkSessionUnreadErrors, MarkSessionUnreadResponses, ProposeChangeData, ProposeChangeErrors, ProposeChangeResponses, PutSessionData, PutSessionErrors, PutSessionResponses, ReadyzData, ReadyzErrors, ReadyzResponses, RegenerateClusterTokenData, RegenerateClusterTokenErrors, RegenerateClusterTokenResponses, RejectChangeData, RejectChangeErrors, RejectChangeResponses, StartReplyData, StartReplyErrors, StartReplyResponses, StopReplyData, StopReplyErrors, StopReplyResponses, StreamDeploymentsData, StreamDeploymentsResponse, StreamDeploymentsResponses, StreamFlowsData, StreamFlowsResponse, StreamFlowsResponses, StreamLogsData, StreamLogsResponse, StreamLogsResponses, StreamSessionsData, StreamSessionsErrors, StreamSessionsResponse, StreamSessionsResponses, TestScriptData, TestScriptErrors, TestScriptResponses, UpdateSessionData, UpdateSessionErrors, UpdateSessionResponses, ValidateWorkspaceFilesData, ValidateWorkspaceFilesErrors, ValidateWorkspaceFilesResponses } from './types.gen';
+import type { AddChangeFilesData, AddChangeFilesErrors, AddChangeFilesResponses, AgentsModelsData, AgentsModelsErrors, AgentsModelsResponses, ApproveChangeData, ApproveChangeErrors, ApproveChangeResponses, AuthCallbackData, AuthCallbackErrors, AuthLoginData, AuthLoginErrors, AuthLogoutData, AuthLogoutErrors, AuthMeData, AuthMeErrors, AuthMeResponses, DeleteSessionData, DeleteSessionErrors, DeleteSessionResponses, EditChangeData, EditChangeErrors, EditChangeResponses, EncryptCredentialData, EncryptCredentialErrors, EncryptCredentialResponses, FollowReplyData, FollowReplyErrors, FollowReplyResponse, FollowReplyResponses, GetChangeData, GetChangeErrors, GetChangeResponses, GetClusterStatusData, GetClusterStatusResponses, GetConfigData, GetConfigResponses, GetConnectionData, GetConnectionErrors, GetConnectionResponses, GetConnectorIconData, GetConnectorIconErrors, GetConnectorIconResponses, GetFlowData, GetFlowErrors, GetFlowResponses, GetResourceData, GetResourceErrors, GetResourceResponses, GetSessionData, GetSessionErrors, GetSessionResponses, GetVersionData, GetVersionResponses, GetWorkspaceFileData, GetWorkspaceFileErrors, GetWorkspaceFileResponses, HealthzData, HealthzResponses, ListAgentToolsData, ListAgentToolsErrors, ListAgentToolsResponses, ListChangesData, ListChangesErrors, ListChangesResponses, ListConnectionsData, ListConnectionsResponses, ListConnectorsData, ListConnectorsResponses, ListDocsData, ListDocsResponses, ListFlowsData, ListFlowsResponses, ListHubsData, ListHubsResponses, ListHubTemplatesData, ListHubTemplatesErrors, ListHubTemplatesResponses, ListLogsData, ListLogsResponses, ListResourcesData, ListResourcesResponses, ListSessionsData, ListSessionsErrors, ListSessionsResponses, LivezData, LivezResponses, MarkSessionReadData, MarkSessionReadErrors, MarkSessionReadResponses, MarkSessionUnreadData, MarkSessionUnreadErrors, MarkSessionUnreadResponses, ProposeChangeData, ProposeChangeErrors, ProposeChangeResponses, PutSessionData, PutSessionErrors, PutSessionResponses, ReadDocData, ReadDocErrors, ReadDocResponses, ReadyzData, ReadyzErrors, ReadyzResponses, RegenerateClusterTokenData, RegenerateClusterTokenErrors, RegenerateClusterTokenResponses, RejectChangeData, RejectChangeErrors, RejectChangeResponses, StartReplyData, StartReplyErrors, StartReplyResponses, StopReplyData, StopReplyErrors, StopReplyResponses, StreamDeploymentsData, StreamDeploymentsResponse, StreamDeploymentsResponses, StreamFlowsData, StreamFlowsResponse, StreamFlowsResponses, StreamLogsData, StreamLogsResponse, StreamLogsResponses, StreamSessionsData, StreamSessionsErrors, StreamSessionsResponse, StreamSessionsResponses, TestScriptData, TestScriptErrors, TestScriptResponses, UpdateSessionData, UpdateSessionErrors, UpdateSessionResponses, ValidateWorkspaceFilesData, ValidateWorkspaceFilesErrors, ValidateWorkspaceFilesResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -343,6 +343,22 @@ export const testScript = <ThrowOnError extends boolean = true>(options: Options
 });
 
 /**
+ * The docs pages of this version.
+ *
+ * Embedded in the binary, so they describe the tasks it runs; the same
+ * pages as the docs site's `llms.txt`.
+ *
+ */
+export const listDocs = <ThrowOnError extends boolean = true>(options?: Options<ListDocsData, ThrowOnError>): RequestResult<ListDocsResponses, unknown, ThrowOnError> => (options?.client ?? client).get<ListDocsResponses, unknown, ThrowOnError>({ url: '/api/docs', ...options });
+
+/**
+ * One docs page as Markdown.
+ *
+ * The `{page}` path parameter is greedy and matches slashes.
+ */
+export const readDoc = <ThrowOnError extends boolean = true>(options: Options<ReadDocData, ThrowOnError>): RequestResult<ReadDocResponses, ReadDocErrors, ThrowOnError> => (options.client ?? client).get<ReadDocResponses, ReadDocErrors, ThrowOnError>({ url: '/api/docs/{page}', ...options });
+
+/**
  * The hubs new flows and resources can start from.
  *
  * One per flow `system/<hub>_hub` running on this instance, named by its
@@ -398,9 +414,9 @@ export const proposeChange = <ThrowOnError extends boolean = true>(options: Opti
  * Releases and deployments as they happen.
  *
  * Server-Sent Events: a `deployment` event each time a commit is
- * released or a flow or resource that flowgen loads from the cache
- * changes, after which the `deployment` of committed changes may have
- * moved on.
+ * released, a flow starts or stops, or a resource that flowgen loads
+ * from the cache changes, after which the `deployment` of committed
+ * changes may have moved on.
  *
  */
 export const streamDeployments = <ThrowOnError extends boolean = true>(options?: Options<StreamDeploymentsData, ThrowOnError, StreamDeploymentsResponse>): Promise<ServerSentEventsResult<StreamDeploymentsResponses>> => (options?.client ?? client).sse.get<StreamDeploymentsResponses, unknown, ThrowOnError>({ url: '/api/changes/stream', ...options });

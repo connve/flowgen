@@ -6,7 +6,9 @@
 //! that integrate with the flowgen event system.
 
 use flowgen_core::task::context::TaskContext;
-use flowgen_core::task::meta::{Connection, Connector, CredentialsField, CredentialsForm, Icon};
+use flowgen_core::task::meta::{
+    parses, Connection, Connector, CredentialsField, CredentialsForm, Icon,
+};
 use flowgen_core::task::runner::Runner;
 use flowgen_core::task::{Task, TaskError, TaskIo, TaskMeta};
 use std::sync::Arc;
@@ -40,6 +42,7 @@ pub const CONNECTOR: Connector = Connector {
     credentials: &[CredentialsForm {
         label: "NKey",
         fields: &[CredentialsField::secret("nkey.seed", "NKey seed")],
+        check: parses::<client::Credentials>,
     }],
 };
 

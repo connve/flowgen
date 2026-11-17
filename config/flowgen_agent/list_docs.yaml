@@ -1,0 +1,18 @@
+# Flowgen Agent tool: lists the docs pages of this version.
+flow:
+  labels:
+    display_name: "List Docs"
+    description: "Lists the flowgen docs pages for Flowgen Agent."
+    tags: ["mcp", "agent", "flowgen"]
+  tasks:
+    - mcp_tool:
+        name: list_docs
+        description: "List the flowgen docs pages of this version: path, title and first sentence. Read a page with read_doc."
+        input_schema:
+          type: object
+          properties: {}
+
+    - http_request:
+        name: fetch
+        endpoint: "{{env.FLOWGEN_URL}}/api/docs"
+        method: GET

@@ -45,6 +45,7 @@ export const navigation: NavSection[] = [
 			{ title: 'Why Flowgen', href: '/getting-started/why-flowgen' },
 			{ title: 'Installation', href: '/getting-started/installation' },
 			{ title: 'Quick Start', href: '/getting-started/quickstart' },
+			{ title: 'Agent setup', href: '/getting-started/agent-setup' },
 			{ title: 'WireGuard Gateway', href: '/getting-started/wireguard-gateway' }
 		]
 	},

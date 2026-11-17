@@ -35,8 +35,7 @@ impl Error {
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Credentials {
-    /// Registry username. For GHCR with a Personal Access Token, this is
-    /// the GitHub username; with a GitHub Actions token, it's the actor.
+    /// Registry username.
     pub username: String,
     /// Registry password or token.
     pub password: String,
@@ -134,6 +133,17 @@ fn decode_basic_auth(b64: &str) -> Option<(String, String)> {
     let s = String::from_utf8(decoded).ok()?;
     let (user, pass) = s.split_once(':')?;
     Some((user.to_string(), pass.to_string()))
+}
+
+/// Whether `content` is a Docker `config.json` with at least one registry, as [`load_auth`] reads it.
+pub(crate) fn check_docker_config(content: &str) -> Result<(), String> {
+    match serde_json::from_str::<DockerConfig>(content) {
+        Ok(config) if config.auths.is_empty() => {
+            Err("It lists no registry under `auths`".to_string())
+        }
+        Ok(_) => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 /// Docker `config.json`.

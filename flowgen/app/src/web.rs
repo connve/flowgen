@@ -17,7 +17,7 @@ use flowgen_client::types as api;
 use futures::stream::Stream;
 use futures_util::StreamExt;
 use rust_embed::RustEmbed;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tracing::{info, warn};
@@ -179,6 +179,8 @@ fn key_may_call(api_prefix: &str, method: &axum::http::Method, path: &str) -> bo
             "/changes",
             "/version",
             "/workspace/file",
+            "/docs",
+            "/hubs",
         ]
         .iter()
         .any(|base| under(base)),
@@ -370,6 +372,11 @@ fn router(path: &str, mut state: WebState) -> Router {
             &format!("{api_prefix}/workspace/test"),
             post(crate::authoring::test_script),
         )
+        .route(&format!("{api_prefix}/docs"), get(crate::docs::list_docs))
+        .route(
+            &format!("{api_prefix}/docs/{{*page}}"),
+            get(crate::docs::read_doc),
+        )
         .route(&format!("{api_prefix}/hubs"), get(crate::hubs::list_hubs))
         .route(
             &format!("{api_prefix}/hubs/{{hub}}/templates"),
@@ -422,8 +429,58 @@ fn router(path: &str, mut state: WebState) -> Router {
         .merge(auth_routes)
         .merge(api)
         .fallback(serve_embedded)
+        .layer(axum::middleware::from_fn(cross_origin_guard))
         .layer(axum::middleware::map_response(security_headers))
         .with_state(state)
+}
+
+/// Refuses a state-changing request a browser sent from another origin, as
+/// Go's `http.CrossOriginProtection` does. Workspaces can share a site with
+/// pages other tenants control, so `SameSite=Lax` alone doesn't stop them.
+async fn cross_origin_guard(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let safe = matches!(
+        *request.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
+    );
+    match safe || same_origin(&request) {
+        true => next.run(request).await,
+        false => {
+            warn!(method = %request.method(), path = %request.uri().path(), "Refused cross-origin request");
+            (StatusCode::FORBIDDEN, "Cross-origin request refused").into_response()
+        }
+    }
+}
+
+/// Whether a request came from this origin: `Sec-Fetch-Site` decides when the
+/// browser sends it, otherwise `Origin` must name the host, from `Host` or,
+/// over HTTP/2, the URI's authority. A request with neither header comes from
+/// a client that isn't a browser.
+fn same_origin(request: &axum::extract::Request) -> bool {
+    let headers = request.headers();
+    match (
+        headers.get("sec-fetch-site"),
+        headers.get(axum::http::header::ORIGIN),
+    ) {
+        (Some(site), _) => matches!(site.as_bytes(), b"same-origin" | b"none"),
+        (None, None) => true,
+        (None, Some(origin)) => {
+            let origin_host = match origin.to_str() {
+                Ok(origin) => origin.split_once("://").map(|(_, host)| host),
+                Err(_) => None,
+            };
+            let host = match headers.get(axum::http::header::HOST) {
+                Some(host) => host.to_str().ok(),
+                None => request
+                    .uri()
+                    .authority()
+                    .map(|authority| authority.as_str()),
+            };
+            matches!((origin_host, host), (Some(origin_host), Some(host)) if origin_host == host)
+        }
+    }
 }
 
 async fn security_headers(mut response: axum::response::Response) -> axum::response::Response {
@@ -495,14 +552,28 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 // *is* the session, encrypted with `WebState::cookie_key` so it can't be
 // read or forged client-side. Two cookies, both `HttpOnly; Secure;
 // SameSite=Lax`:
-//   - `SSO_STATE_COOKIE`: the PKCE verifier/state/nonce, alive only for the
+//   - `state_cookie`: the PKCE verifier/state/nonce, alive only for the
 //     few seconds between `/auth/login` and `/auth/callback`.
-//   - `SSO_SESSION_COOKIE`: the IdP's tokens, alive for the session.
+//   - `session_cookie`: the IdP's tokens, alive for the session.
 
-const SSO_STATE_COOKIE: &str = "flowgen_auth_state";
-const SSO_SESSION_COOKIE: &str = "flowgen_auth_session";
+/// The name of the login state cookie. Once `Secure`, the `__Host-` prefix
+/// stops other hosts of the site from setting a cookie that shadows it.
+fn state_cookie(secure: bool) -> &'static str {
+    match secure {
+        true => "__Host-flowgen_auth_state",
+        false => "flowgen_auth_state",
+    }
+}
 
-/// What's encrypted into `SSO_SESSION_COOKIE`. Not a session record in any
+/// The name of the session cookie, prefixed as [`state_cookie`].
+fn session_cookie(secure: bool) -> &'static str {
+    match secure {
+        true => "__Host-flowgen_auth_session",
+        false => "flowgen_auth_session",
+    }
+}
+
+/// What's encrypted into the session cookie. Not a session record in any
 /// store — this struct only ever exists serialized inside the cookie.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct AuthSession {
@@ -547,7 +618,7 @@ fn removal_cookie(
     cookie
 }
 
-/// What's encrypted into `SSO_STATE_COOKIE` between `/auth/login` and `/auth/callback`.
+/// What's encrypted into the state cookie between `/auth/login` and `/auth/callback`.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct PendingLogin {
     #[serde(flatten)]
@@ -614,7 +685,7 @@ async fn auth_login(
         return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to start login").into_response();
     };
     let jar = jar.add(auth_cookie(
-        SSO_STATE_COOKIE,
+        state_cookie(state.cookie_secure),
         encoded,
         Some(time::Duration::minutes(10)),
         state.cookie_secure,
@@ -666,7 +737,7 @@ async fn auth_callback(
         return login_failed(&state, "failed");
     };
 
-    let stashed = match jar.get(SSO_STATE_COOKIE) {
+    let stashed = match jar.get(state_cookie(state.cookie_secure)) {
         Some(stashed) => serde_json::from_str::<PendingLogin>(stashed.value()).ok(),
         None => None,
     };
@@ -702,9 +773,12 @@ async fn auth_callback(
     };
 
     let jar = jar
-        .remove(removal_cookie(SSO_STATE_COOKIE, state.cookie_secure))
+        .remove(removal_cookie(
+            state_cookie(state.cookie_secure),
+            state.cookie_secure,
+        ))
         .add(auth_cookie(
-            SSO_SESSION_COOKIE,
+            session_cookie(state.cookie_secure),
             encoded,
             None,
             state.cookie_secure,
@@ -740,13 +814,15 @@ async fn auth_logout(State(state): State<Arc<WebState>>, jar: AuthJar) -> impl I
         return (StatusCode::NOT_FOUND, "OIDC login is not configured").into_response();
     };
 
-    let redirect_to =
-        match read_session(&jar).and_then(|session| login_client.signout_url(&session.id_token)) {
-            Some(url) => url,
-            None => ui_url(&state.prefix),
-        };
+    let redirect_to = match read_session(&state, &jar)
+        .and_then(|session| login_client.signout_url(&session.id_token))
+    {
+        Some(url) => url,
+        None => ui_url(&state.prefix),
+    };
 
-    let cookie = removal_cookie(SSO_SESSION_COOKIE, state.cookie_secure).to_string();
+    let cookie =
+        removal_cookie(session_cookie(state.cookie_secure), state.cookie_secure).to_string();
     match axum::http::HeaderValue::from_str(&cookie) {
         Ok(value) => {
             let mut response = Redirect::to(&redirect_to).into_response();
@@ -785,8 +861,8 @@ async fn auth_me(State(state): State<Arc<WebState>>, jar: AuthJar) -> impl IntoR
     response
 }
 
-fn read_session(jar: &AuthJar) -> Option<AuthSession> {
-    let cookie = jar.get(SSO_SESSION_COOKIE)?;
+fn read_session(state: &WebState, jar: &AuthJar) -> Option<AuthSession> {
+    let cookie = jar.get(session_cookie(state.cookie_secure))?;
     serde_json::from_str(cookie.value()).ok()
 }
 
@@ -805,7 +881,7 @@ struct ResolvedSession {
 /// every subsequent call on the latter.
 async fn resolve_session(state: &WebState, jar: &AuthJar) -> Option<ResolvedSession> {
     let login_client = state.login_client.as_ref()?;
-    let session = read_session(jar)?;
+    let session = read_session(state, jar)?;
 
     if login_client
         .validate_id_token(&session.id_token)
@@ -846,7 +922,7 @@ async fn resolve_session(state: &WebState, jar: &AuthJar) -> Option<ResolvedSess
     };
     Some(ResolvedSession {
         refreshed: Some(jar.clone().add(auth_cookie(
-            SSO_SESSION_COOKIE,
+            session_cookie(state.cookie_secure),
             encoded,
             None,
             state.cookie_secure,
@@ -1244,43 +1320,68 @@ fn kv_to_wire((k, v): (String, String)) -> api::KeyValue {
     api::KeyValue { key: k, value: v }
 }
 
-/// Returns the list of resources discoverable from the filesystem loader.
-/// Cache-backed loaders are not walked today (no listing API on the cache
-/// abstraction); those installations get an empty list until we add one.
-/// Symlinks are followed and dot entries skipped, so a mounted ConfigMap lists
-/// each file once, under its clean name.
+/// The resources of the filesystem, the cache and the system, a file winning
+/// over a cached copy with the same key and both over a system resource. Symlinks are followed and dot entries skipped, so a
+/// mounted ConfigMap lists each file once, under its clean name.
 async fn list_resources(State(state): State<Arc<WebState>>) -> Json<Vec<api::ResourceSummary>> {
     let Some(loader) = &state.resource_loader else {
         return Json(Vec::new());
     };
-    let Some(base) = loader.base_path() else {
-        return Json(Vec::new());
+    let extension_of = |key: &str| {
+        std::path::Path::new(key)
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(str::to_string)
     };
 
-    let mut entries: Vec<api::ResourceSummary> = walkdir::WalkDir::new(base)
-        .follow_links(true)
-        .into_iter()
-        .filter_entry(|e| e.depth() == 0 || !e.file_name().to_string_lossy().starts_with('.'))
-        .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_file())
-        .filter_map(|e| {
-            let rel = e.path().strip_prefix(base).ok()?;
+    let mut entries: BTreeMap<String, api::ResourceSummary> = BTreeMap::new();
+    if let Some(base) = loader.base_path() {
+        for entry in walkdir::WalkDir::new(base)
+            .follow_links(true)
+            .into_iter()
+            .filter_entry(|e| e.depth() == 0 || !e.file_name().to_string_lossy().starts_with('.'))
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().is_file())
+        {
+            let Ok(rel) = entry.path().strip_prefix(base) else {
+                continue;
+            };
             let key = rel.to_string_lossy().replace('\\', "/");
-            let extension = e
-                .path()
-                .extension()
-                .and_then(|s| s.to_str())
-                .map(str::to_string);
-            let size = e.metadata().ok().map(|m| m.len() as i64);
-            Some(api::ResourceSummary {
-                key,
-                extension,
-                size,
-            })
-        })
-        .collect();
-    entries.sort_by(|a, b| a.key.cmp(&b.key));
-    Json(entries)
+            let size = entry.metadata().ok().map(|m| m.len() as i64);
+            entries.insert(
+                key.clone(),
+                api::ResourceSummary {
+                    extension: extension_of(&key),
+                    key,
+                    size,
+                },
+            );
+        }
+    }
+    match loader.cached_keys().await {
+        Ok(keys) => {
+            for key in keys {
+                entries
+                    .entry(key.clone())
+                    .or_insert_with(|| api::ResourceSummary {
+                        extension: extension_of(&key),
+                        key,
+                        size: None,
+                    });
+            }
+        }
+        Err(error) => warn!(error = %error, "Failed to list the cached resources"),
+    }
+    for (key, content) in loader.defaults() {
+        entries
+            .entry(key.clone())
+            .or_insert_with(|| api::ResourceSummary {
+                extension: extension_of(key),
+                key: key.clone(),
+                size: Some(content.len() as i64),
+            });
+    }
+    Json(entries.into_values().collect())
 }
 
 /// Returns the content of a single resource by key.
@@ -1802,6 +1903,12 @@ async fn session_summaries(
     Ok(summaries)
 }
 
+/// Body of `GET /api/agents/sessions`.
+#[derive(serde::Serialize)]
+struct SessionList {
+    sessions: Vec<api::SessionSummary>,
+}
+
 /// Lists the caller's own and the shared sessions (summaries only),
 /// newest first.
 async fn list_sessions(
@@ -1810,7 +1917,7 @@ async fn list_sessions(
 ) -> axum::response::Response {
     let owner = session_owner(user.as_ref());
     match session_summaries(&state, owner.as_deref()).await {
-        Ok(summaries) => Json(serde_json::json!({ "sessions": summaries })).into_response(),
+        Ok(sessions) => Json(SessionList { sessions }).into_response(),
         Err(source) => {
             warn!(error = %source, "Failed to list sessions from cache");
             (StatusCode::SERVICE_UNAVAILABLE, "Session store unavailable").into_response()
@@ -2524,17 +2631,24 @@ pub(crate) mod tests {
             .send()
             .await
             .unwrap();
-        let state_cookie = started
+        let set_cookie = started
             .headers()
             .get_all(reqwest::header::SET_COOKIE)
             .iter()
             .filter_map(|cookie| cookie.to_str().ok())
-            .find(|cookie| cookie.starts_with(SSO_STATE_COOKIE))
-            .and_then(|cookie| cookie.split(';').next())
+            .find(|cookie| cookie.starts_with(state_cookie(true)))
             .unwrap()
             .to_string();
+        for attribute in ["Secure", "HttpOnly", "Path=/"] {
+            assert!(
+                set_cookie.contains(attribute),
+                "{attribute} missing: {set_cookie}"
+            );
+        }
+        assert!(!set_cookie.contains("Domain"), "{set_cookie}");
+        let pending = set_cookie.split(';').next().unwrap().to_string();
         let forged = callback("?code=a&state=forged")
-            .header(reqwest::header::COOKIE, state_cookie)
+            .header(reqwest::header::COOKIE, pending)
             .send()
             .await
             .unwrap();
@@ -2571,6 +2685,8 @@ pub(crate) mod tests {
             (Method::GET, "/f/api/flows/a/b"),
             (Method::GET, "/f/api/changes/abc"),
             (Method::GET, "/f/api/workspace/file"),
+            (Method::GET, "/f/api/docs/ai/mcp"),
+            (Method::GET, "/f/api/hubs/connve/templates"),
             (Method::POST, "/f/api/changes"),
             (Method::POST, "/f/api/changes/abc/files"),
             (Method::PATCH, "/f/api/changes/abc"),
@@ -2638,6 +2754,7 @@ pub(crate) mod tests {
                 path: "flows/a.yaml".to_string(),
                 content: Some("flow:\n  tasks:\n    - log:\n        name: a\n".to_string()),
             }],
+            template: None,
         };
 
         for wrong in ["other", ""] {
@@ -2739,6 +2856,7 @@ pub(crate) mod tests {
                     path: "resources/s.rhai".to_string(),
                     content: Some("event".to_string()),
                 }],
+                template: None,
             })
             .send()
             .await
@@ -2786,6 +2904,7 @@ pub(crate) mod tests {
                     path: "resources/s.rhai".to_string(),
                     content: Some("event; 2".to_string()),
                 }],
+                template: None,
             })
             .send()
             .await
@@ -2843,6 +2962,112 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn a_change_from_a_template_takes_no_other_files_and_commits_its_lock_entry() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<flowgen_core::event::Event>(1);
+        let inproc = Arc::new(flowgen_core::task::inproc::registry::InprocRegistry::new());
+        inproc.register(
+            "system/commit_workspace".to_string(),
+            flowgen_core::task::inproc::registry::Registration {
+                tx,
+                task_name: "on_approve".to_string(),
+                task_id: 0,
+                task_type: "inproc_endpoint",
+                leaf_count: 1,
+                ack_timeout: None,
+                callers: vec!["system/".to_string()],
+                cancellation_token: tokio_util::sync::CancellationToken::new(),
+            },
+        );
+        let committed = tokio::spawn(async move {
+            let event = rx.recv().await.unwrap();
+            let data = event.data_as_json().unwrap();
+            event
+                .completion_tx
+                .as_ref()
+                .unwrap()
+                .signal_completion(Some(serde_json::json!({"commit": "abc"})));
+            data
+        });
+        let system: Arc<dyn flowgen_core::cache::Cache> =
+            Arc::new(flowgen_core::cache::MemoryCache::new());
+        system
+            .put(
+                crate::lock::LOCK_KEY,
+                "templates:\n  local/b:\n    digest: sha256:0\n    files: [flows/b.yaml]\n".into(),
+                None,
+            )
+            .await
+            .unwrap();
+        let mut state = test_state();
+        state.flows_cache = Some(Arc::clone(&system));
+        state.authoring = Some(crate::config::AuthoringOptions {
+            enabled: true,
+            targets: vec![authoring_target("workspace", &["flows/", "resources/"])],
+            groups_claim: "groups".to_string(),
+        });
+        state.inproc = inproc;
+        let base = serve(router("/flowgen", state)).await;
+        let client = reqwest::Client::new();
+
+        let proposed: api::Change = client
+            .post(format!("{base}/flowgen/api/changes"))
+            .json(&api::ChangeProposal {
+                title: "Add a".to_string(),
+                description: None,
+                files: vec![api::WorkspaceFile {
+                    path: "resources/a.rhai".to_string(),
+                    content: Some("event".to_string()),
+                }],
+                template: Some(api::TemplateSource {
+                    hub: "local".to_string(),
+                    slug: "a".to_string(),
+                    digest: "sha256:1".to_string(),
+                    removed: false,
+                }),
+            })
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let added = client
+            .post(format!("{base}/flowgen/api/changes/{}/files", proposed.id))
+            .json(&api::WorkspaceFiles {
+                files: vec![api::WorkspaceFile {
+                    path: "resources/mine.rhai".to_string(),
+                    content: Some("event".to_string()),
+                }],
+            })
+            .send()
+            .await
+            .unwrap();
+        client
+            .post(format!(
+                "{base}/flowgen/api/changes/{}/approve",
+                proposed.id
+            ))
+            .send()
+            .await
+            .unwrap();
+
+        let sent = committed.await.unwrap();
+        assert_eq!(added.status(), reqwest::StatusCode::CONFLICT);
+        let lock = &sent["files"][1];
+        assert_eq!(lock["path"], crate::lock::LOCK_FILE);
+        assert_eq!(
+            lock["previous"],
+            "templates:\n  local/b:\n    digest: sha256:0\n    files: [flows/b.yaml]\n"
+        );
+        let written: crate::lock::Lock =
+            serde_yaml::from_str(lock["content"].as_str().unwrap()).unwrap();
+        assert_eq!(written.templates["local/a"].digest, "sha256:1");
+        assert_eq!(written.templates["local/a"].files, ["resources/a.rhai"]);
+        assert_eq!(written.templates["local/b"].digest, "sha256:0");
+        assert_eq!(written.templates["local/b"].files, ["flows/b.yaml"]);
+    }
+
+    #[tokio::test]
     async fn approving_validates_the_files_again() {
         let mut state = test_state();
         state.authoring = Some(authoring_options(vec![authoring_target(
@@ -2861,6 +3086,7 @@ pub(crate) mod tests {
                     path: "flows/a.yaml".to_string(),
                     content: Some("flow:\n  tasks:\n    - log:\n        name: a\n".to_string()),
                 }],
+                template: None,
             })
             .send()
             .await
@@ -2908,6 +3134,7 @@ pub(crate) mod tests {
                 title: "Add a".to_string(),
                 description: None,
                 files: vec![file("resources/a.rhai", "1")],
+                template: None,
             })
             .send()
             .await
@@ -3005,6 +3232,7 @@ pub(crate) mod tests {
                         content: Some("event".to_string()),
                     })
                     .collect(),
+                template: None,
             })
             .send()
             .await
@@ -3069,6 +3297,7 @@ pub(crate) mod tests {
                     path: "flows/platform/a.yaml".to_string(),
                     content: Some("flow:\n  tasks:\n    - log:\n        name: a\n".to_string()),
                 }],
+                template: None,
             })
             .send()
             .await
@@ -3155,6 +3384,7 @@ pub(crate) mod tests {
                     path: "resources/s.rhai".to_string(),
                     content: Some("event".to_string()),
                 }],
+                template: None,
             })
             .send()
             .await
@@ -4192,6 +4422,52 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn cached_resources_are_listed_with_files_winning() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.txt"), "file").unwrap();
+        let cache: Arc<dyn flowgen_core::cache::Cache> =
+            Arc::new(flowgen_core::cache::MemoryCache::new());
+        cache
+            .put("resources.a.txt", "cached".into(), None)
+            .await
+            .unwrap();
+        cache
+            .put("resources.nested/b.txt", "cached".into(), None)
+            .await
+            .unwrap();
+        let mut state = test_state();
+        state.resource_loader = Some(
+            flowgen_core::resource::ResourceLoader::new(Some(root.path().to_path_buf()))
+                .with_cache(cache, "resources".to_string()),
+        );
+
+        let Json(resources) = list_resources(State(Arc::new(state))).await;
+
+        let listed: Vec<(&str, Option<i64>)> =
+            resources.iter().map(|r| (r.key.as_str(), r.size)).collect();
+        assert_eq!(listed, vec![("a.txt", Some(4)), ("nested/b.txt", None)]);
+    }
+
+    #[tokio::test]
+    async fn system_resources_are_listed_with_their_size() {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = test_state();
+        state.resource_loader = Some(
+            flowgen_core::resource::ResourceLoader::new(Some(root.path().to_path_buf()))
+                .with_defaults(BTreeMap::from([(
+                    "system/a.md".to_string(),
+                    "content".to_string(),
+                )])),
+        );
+
+        let Json(resources) = list_resources(State(Arc::new(state))).await;
+
+        let listed: Vec<(&str, Option<i64>)> =
+            resources.iter().map(|r| (r.key.as_str(), r.size)).collect();
+        assert_eq!(listed, vec![("system/a.md", Some(7))]);
+    }
+
+    #[tokio::test]
     async fn merged_watches_end_when_one_ends() {
         let ended = futures_util::stream::iter([1]).boxed();
         let open = futures_util::stream::pending().boxed();
@@ -4429,8 +4705,9 @@ pub(crate) mod tests {
 
     #[test]
     fn removal_cookie_matches_the_path_and_secure_flag_of_the_cookie_it_clears() {
-        let removal = removal_cookie(SSO_SESSION_COOKIE, true).to_string();
-        let original = auth_cookie(SSO_SESSION_COOKIE, "value".to_string(), None, true).to_string();
+        let removal = removal_cookie(session_cookie(true), true).to_string();
+        let original =
+            auth_cookie(session_cookie(true), "value".to_string(), None, true).to_string();
         assert!(original.contains("Path=/"), "{original}");
         assert!(removal.contains("Path=/"), "{removal}");
         assert!(original.contains("Secure"), "{original}");
@@ -4440,8 +4717,263 @@ pub(crate) mod tests {
 
     #[test]
     fn removal_cookie_omits_secure_when_cookie_secure_is_off() {
-        let removal = removal_cookie(SSO_SESSION_COOKIE, false).to_string();
+        let removal = removal_cookie(session_cookie(false), false).to_string();
         assert!(!removal.contains("Secure"), "{removal}");
+    }
+
+    #[test]
+    fn only_secure_login_cookies_carry_the_host_prefix() {
+        assert!(session_cookie(true).starts_with("__Host-"));
+        assert!(state_cookie(true).starts_with("__Host-"));
+        assert!(!session_cookie(false).starts_with("__Host-"));
+        assert!(!state_cookie(false).starts_with("__Host-"));
+    }
+
+    #[test]
+    fn same_origin_follows_fetch_metadata_then_origin_against_the_host() {
+        struct Case {
+            uri: &'static str,
+            host: Option<&'static str>,
+            site: Option<&'static str>,
+            origin: Option<&'static [u8]>,
+            same: bool,
+        }
+        let cases = [
+            Case {
+                uri: "/x",
+                host: Some("a.example"),
+                site: Some("same-origin"),
+                origin: Some(b"https://b.example"),
+                same: true,
+            },
+            Case {
+                uri: "/x",
+                host: Some("a.example"),
+                site: Some("none"),
+                origin: None,
+                same: true,
+            },
+            Case {
+                uri: "/x",
+                host: Some("a.example"),
+                site: Some("same-site"),
+                origin: None,
+                same: false,
+            },
+            Case {
+                uri: "/x",
+                host: Some("a.example"),
+                site: Some("cross-site"),
+                origin: Some(b"https://a.example"),
+                same: false,
+            },
+            Case {
+                uri: "/x",
+                host: Some("a.example"),
+                site: None,
+                origin: None,
+                same: true,
+            },
+            Case {
+                uri: "/x",
+                host: Some("a.example"),
+                site: None,
+                origin: Some(b"https://a.example"),
+                same: true,
+            },
+            Case {
+                uri: "/x",
+                host: Some("a.example:8080"),
+                site: None,
+                origin: Some(b"http://a.example:8080"),
+                same: true,
+            },
+            Case {
+                uri: "/x",
+                host: Some("a.example"),
+                site: None,
+                origin: Some(b"https://b.example"),
+                same: false,
+            },
+            Case {
+                uri: "/x",
+                host: Some("a.example"),
+                site: None,
+                origin: Some(b"https://a.example:8080"),
+                same: false,
+            },
+            Case {
+                uri: "/x",
+                host: Some("a.example"),
+                site: None,
+                origin: Some(b"null"),
+                same: false,
+            },
+            Case {
+                uri: "/x",
+                host: Some("a.example"),
+                site: None,
+                origin: Some(b"https://a.\xffexample"),
+                same: false,
+            },
+            Case {
+                uri: "https://a.example/x",
+                host: None,
+                site: None,
+                origin: Some(b"https://a.example"),
+                same: true,
+            },
+            Case {
+                uri: "https://a.example/x",
+                host: None,
+                site: None,
+                origin: Some(b"https://b.example"),
+                same: false,
+            },
+            Case {
+                uri: "https://b.example/x",
+                host: Some("a.example"),
+                site: None,
+                origin: Some(b"https://a.example"),
+                same: true,
+            },
+            Case {
+                uri: "/x",
+                host: None,
+                site: None,
+                origin: Some(b"https://a.example"),
+                same: false,
+            },
+        ];
+        for case in cases {
+            let mut request = axum::http::Request::builder()
+                .method(axum::http::Method::POST)
+                .uri(case.uri);
+            if let Some(host) = case.host {
+                request = request.header(axum::http::header::HOST, host);
+            }
+            if let Some(site) = case.site {
+                request = request.header("sec-fetch-site", site);
+            }
+            if let Some(origin) = case.origin {
+                request = request.header(
+                    axum::http::header::ORIGIN,
+                    axum::http::HeaderValue::from_bytes(origin).unwrap(),
+                );
+            }
+            let request = request.body(axum::body::Body::empty()).unwrap();
+            assert_eq!(
+                same_origin(&request),
+                case.same,
+                "uri {:?}, host {:?}, sec-fetch-site {:?}, origin {:?}",
+                case.uri,
+                case.host,
+                case.site,
+                case.origin.map(String::from_utf8_lossy),
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn every_state_changing_api_route_refuses_another_origin() {
+        let base = serve(router("/flowgen", test_state())).await;
+        let client = reqwest::Client::new();
+        let routes: Vec<(String, String)> = api_routes()
+            .into_iter()
+            .filter(|(method, _)| method != "GET")
+            .collect();
+        assert!(
+            routes.len() > 10,
+            "OpenAPI spec lists too few state-changing routes: {routes:?}"
+        );
+
+        let mut open = Vec::new();
+        for (method, route) in routes {
+            let status = client
+                .request(
+                    method.parse().unwrap(),
+                    format!("{base}/flowgen/api/{route}"),
+                )
+                .header("sec-fetch-site", "cross-site")
+                .send()
+                .await
+                .unwrap()
+                .status();
+            if status != StatusCode::FORBIDDEN {
+                open.push(format!("{method} {route}: {status}"));
+            }
+        }
+        assert!(open.is_empty(), "reachable from another origin: {open:?}");
+
+        for method in [reqwest::Method::HEAD, reqwest::Method::OPTIONS] {
+            let status = client
+                .request(method.clone(), format!("{base}/flowgen/api/version"))
+                .header("sec-fetch-site", "cross-site")
+                .send()
+                .await
+                .unwrap()
+                .status();
+            assert_ne!(status, StatusCode::FORBIDDEN, "{method}");
+        }
+    }
+
+    #[test]
+    fn a_secure_login_cookie_is_host_only_on_the_whole_path() {
+        for name in [session_cookie(true), state_cookie(true)] {
+            let cookie = auth_cookie(name, "value".to_string(), None, true).to_string();
+            assert!(cookie.starts_with("__Host-"), "{cookie}");
+            for attribute in ["Secure", "HttpOnly", "Path=/", "SameSite=Lax"] {
+                assert!(cookie.contains(attribute), "{attribute} missing: {cookie}");
+            }
+            assert!(!cookie.contains("Domain"), "{cookie}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_state_changing_request_from_another_origin_is_refused() {
+        let base = serve(router("/flowgen", test_state())).await;
+        let host = base.trim_start_matches("http://").to_string();
+        let client = reqwest::Client::new();
+        let approve = || client.post(format!("{base}/flowgen/api/changes/abc/approve"));
+
+        for (header, value) in [
+            ("sec-fetch-site", "cross-site"),
+            ("sec-fetch-site", "same-site"),
+            ("origin", "https://other.example"),
+            ("origin", "null"),
+        ] {
+            let status = approve()
+                .header(header, value)
+                .send()
+                .await
+                .unwrap()
+                .status();
+            assert_eq!(status, StatusCode::FORBIDDEN, "{header}: {value}");
+        }
+
+        for (header, value) in [
+            ("sec-fetch-site", "same-origin".to_string()),
+            ("origin", format!("http://{host}")),
+        ] {
+            let status = approve()
+                .header(header, &value)
+                .send()
+                .await
+                .unwrap()
+                .status();
+            assert_ne!(status, StatusCode::FORBIDDEN, "{header}: {value}");
+        }
+        let without_browser_headers = approve().send().await.unwrap().status();
+        assert_ne!(without_browser_headers, StatusCode::FORBIDDEN);
+
+        let read = client
+            .get(format!("{base}/flowgen/api/version"))
+            .header("sec-fetch-site", "cross-site")
+            .send()
+            .await
+            .unwrap()
+            .status();
+        assert_eq!(read, StatusCode::OK);
     }
 
     #[test]
@@ -4505,11 +5037,13 @@ pub(crate) mod tests {
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(
             axum::http::header::COOKIE,
-            axum::http::HeaderValue::from_static("flowgen_auth_session=not-encrypted-with-our-key"),
+            axum::http::HeaderValue::from_static(
+                "__Host-flowgen_auth_session=not-encrypted-with-our-key",
+            ),
         );
         let key = axum_extra::extract::cookie::Key::generate();
         let jar = axum_extra::extract::cookie::PrivateCookieJar::from_headers(&headers, key)
-            .remove(removal_cookie(SSO_SESSION_COOKIE, true));
+            .remove(removal_cookie(session_cookie(true), true));
 
         let response = (jar, StatusCode::NO_CONTENT).into_response();
         assert!(

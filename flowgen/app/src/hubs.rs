@@ -155,9 +155,33 @@ pub(crate) async fn list_templates(
         }
         None => Vec::new(),
     };
-    Ok(Json(api::HubTemplates {
-        templates: templates(files),
-    }))
+    let lock = match state.flows_cache.as_deref() {
+        Some(cache) => crate::lock::Lock::parse(crate::lock::deployed(cache).await.as_deref()),
+        None => crate::lock::Lock::default(),
+    };
+    let templates = installed(templates(files), &lock, &hub);
+    Ok(Json(api::HubTemplates { templates }))
+}
+
+/// `templates` of `hub` with the digest and files `lock` holds for those installed.
+fn installed(
+    templates: Vec<api::HubTemplate>,
+    lock: &crate::lock::Lock,
+    hub: &str,
+) -> Vec<api::HubTemplate> {
+    templates
+        .into_iter()
+        .map(
+            |template| match lock.templates.get(&crate::lock::key(hub, &template.slug)) {
+                Some(locked) => api::HubTemplate {
+                    installed_digest: Some(locked.digest.clone()),
+                    installed_files: locked.files.clone(),
+                    ..template
+                },
+                None => template,
+            },
+        )
+        .collect()
 }
 
 /// The templates among a catalog's `files`: each top folder holding a valid
@@ -201,6 +225,9 @@ fn templates(files: Vec<ReturnedFile>) -> Vec<api::HubTemplate> {
                 category: manifest.category,
                 tags: manifest.tags,
                 readme,
+                digest: crate::lock::digest(&files),
+                installed_digest: None,
+                installed_files: Vec::new(),
                 files,
             })
         })
@@ -256,5 +283,29 @@ mod tests {
         assert_eq!(b.readme.as_deref(), Some("# B"));
         let paths: Vec<&str> = b.files.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(paths, vec!["flows/b/sync.yaml", "resources/b.sql"]);
+    }
+
+    #[test]
+    fn an_installed_template_carries_the_digest_and_files_of_the_lock() {
+        let catalog = templates(vec![
+            file("a/template.yaml", "name: A\n"),
+            file("a/flows/a.yaml", "flow: {}"),
+            file("b/template.yaml", "name: B\n"),
+            file("b/flows/b.yaml", "flow: {}"),
+        ]);
+        let lock: crate::lock::Lock = serde_yaml::from_str(
+            "templates:\n  local/a:\n    digest: sha256:1\n    files: [flows/a.yaml, resources/old.md]\n",
+        )
+        .unwrap();
+
+        let listed = installed(catalog, &lock, "local");
+
+        assert_eq!(listed[0].installed_digest.as_deref(), Some("sha256:1"));
+        assert_eq!(
+            listed[0].installed_files,
+            ["flows/a.yaml", "resources/old.md"]
+        );
+        assert_eq!(listed[1].installed_digest, None);
+        assert!(listed[1].installed_files.is_empty());
     }
 }

@@ -92,7 +92,7 @@ impl InprocRegistry {
     }
 
     /// The flows callable here directly inside `folder`, such as
-    /// `system/hubs/connve` for `system/hubs`, in name order.
+    /// `system/connve_hub` for `system`, in name order.
     pub fn flows_within(&self, folder: &str) -> Vec<String> {
         let prefix = format!("{}/", folder.trim_end_matches('/'));
         let mut flows: Vec<String> = self

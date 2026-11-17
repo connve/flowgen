@@ -138,9 +138,9 @@ Tasks that receive calls, such as `http_endpoint` and `mcp_tool`, are not listed
 
 ## Encrypted credentials in the workspace
 
-Credentials in the folder `FLOWGEN_CREDENTIALS` names are named by their file: a flow with `credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/orders-api.json"` uses the credentials `orders-api`. They are added once, and every flow that names them uses them; which credentials a flow uses is part of the change that is reviewed before it runs.
+Credentials are named by their file in the `FLOWGEN_CREDENTIALS` folder: `{{env.FLOWGEN_CREDENTIALS}}/orders-api.json` is `orders-api`.
 
-In the Connections tab, a connection whose file flowgen does not find shows **No credentials**. For a file in the credentials folder, its details offer **Add credentials**, or **Replace credentials** once they are there, with a form for that connector: its fields, such as an API key or a host and password, or a file to upload, such as a service account file. **Other format (JSON)** takes the file as written.
+In the Connections tab, a connection whose file flowgen does not find shows **No credentials**. For a file in the credentials folder, its details offer **Add credentials**, or **Replace credentials** once they are there, with a form for that connector: its fields, such as an API key or a host and password, or a file to upload, such as a service account file. The file is checked the way the connector's tasks read it before it is saved. A connector without a form takes the file as JSON.
 
 flowgen encrypts the credentials with [SOPS](https://github.com/getsops/sops) and age and proposes `credentials/<name>.yaml`, a Kubernetes Secret holding the one file `<name>.json`. It is committed like any [change](/docs/flowgen/concepts/authoring) once approved. The plaintext is never stored or shown again, and it never passes through a flow, an event, a log or a change.
 
@@ -148,17 +148,18 @@ A task reads its credentials in this order:
 
 1. the file at `credentials_path`;
 2. the encrypted Secret `<name>.yaml` beside it;
-3. the system keychain.
+3. the system keychain, in a run without `--config`.
 
-Anything SOPS-encrypted is decrypted in memory, with the age key `identity_path` names, or `SOPS_AGE_KEY_FILE` without one. A path in another folder, or one that reads the event, such as `{{event.data.account}}.json`, has no credentials to add in the web UI.
+Anything SOPS-encrypted is decrypted in memory, with the age key `credentials.identity_path` names, or `SOPS_AGE_KEY_FILE` without one. A path in another folder, or one that reads the event, such as `{{event.data.account}}.json`, has no credentials to add in the web UI.
 
 A change under `credentials/` is checked before it can be approved. Each file must be a Secret named after the file, encrypted with SOPS, with every value encrypted and exactly one file, `<name>.json`. A change that adds or removes credentials also rewrites `credentials/flowgen-credentials.yaml`, a ConfigMap listing them.
 
 ```yaml
+# Encrypt for one age key and decrypt with it here.
 credentials:
-  recipients: ["age1…"]     # who can decrypt, such as the key Flux decrypts with
-  identity_path: .flowgen/age.key   # decrypt here, with this key; omit where Flux decrypts
-  path: credentials          # the folder FLOWGEN_CREDENTIALS names
+  recipients: ["age1…"]
+  identity_path: .flowgen/age.key
+  path: credentials
 ```
 
 | Field | Default | Description |

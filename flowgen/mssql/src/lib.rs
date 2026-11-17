@@ -5,7 +5,8 @@
 
 use flowgen_core::task::context::TaskContext;
 use flowgen_core::task::meta::{
-    read_credentials, Connection, Connector, CredentialsField, CredentialsForm, FieldKind, Icon,
+    parses, read_credentials, Connection, Connector, CredentialsField, CredentialsForm, FieldKind,
+    Icon,
 };
 use flowgen_core::task::runner::Runner;
 use flowgen_core::task::{Task, TaskError, TaskIo, TaskMeta};
@@ -40,6 +41,7 @@ pub const CONNECTOR: Connector = Connector {
             CredentialsField::text("trust_server_certificate", "Trust the server certificate")
                 .of(FieldKind::Boolean(false)),
         ],
+        check: parses::<config::Credentials>,
     }],
 };
 

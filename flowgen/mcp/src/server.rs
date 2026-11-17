@@ -295,6 +295,8 @@ pub struct McpExtras {
     /// Long-lived SSE sessions keyed by `Mcp-Session-Id`. Populated by
     /// the GET endpoint; drained by lazy cleanup when a broadcast fails.
     pub sessions: Arc<dashmap::DashMap<String, tokio::sync::mpsc::Sender<String>>>,
+    /// Loads each toolset's [`INSTRUCTIONS_FILE`] for `initialize`.
+    pub resource_loader: Option<flowgen_core::resource::ResourceLoader>,
 }
 
 /// Dispatcher for MCP traffic.
@@ -321,12 +323,14 @@ impl Dispatcher for McpDispatcher {
 }
 
 /// Constructs an MCP server with default extras (empty response registry,
-/// optional global credentials, optional auth provider).
+/// optional global credentials, optional auth provider) and the loader of
+/// the toolsets' instructions.
 pub fn new_mcp_server(
     path: String,
     credentials: Option<super::config::Credentials>,
     auth_provider: Option<Arc<dyn flowgen_core::auth::AuthProvider>>,
     resource_uri_scheme: String,
+    resource_loader: Option<flowgen_core::resource::ResourceLoader>,
 ) -> McpServer {
     let extras = McpExtras {
         response_registry: Arc::new(ResponseRegistry::new()),
@@ -336,6 +340,7 @@ pub fn new_mcp_server(
         resource_templates: Arc::new(dashmap::DashMap::new()),
         prompts: Arc::new(dashmap::DashMap::new()),
         sessions: Arc::new(dashmap::DashMap::new()),
+        resource_loader,
     };
     McpServer::new_with_extras(path, extras).with_auth_provider(auth_provider)
 }
@@ -586,6 +591,9 @@ struct InitializeResult {
     capabilities: ServerCapabilities,
     #[serde(rename = "serverInfo")]
     server_info: ServerInfo,
+    /// How to use the toolset, which clients may add to the model's system prompt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instructions: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -829,18 +837,6 @@ async fn handle_mcp_sse(
         Some(session_id) => session_id.to_string(),
         None => uuid::Uuid::now_v7().to_string(),
     };
-    let open = state
-        .extras
-        .sessions
-        .get(&session_id)
-        .is_some_and(|sender| !sender.is_closed());
-    if open {
-        return (
-            StatusCode::CONFLICT,
-            "The session already has an open stream",
-        )
-            .into_response();
-    }
     let session_header = match axum::http::HeaderValue::from_str(&session_id) {
         Ok(value) => value,
         Err(source) => {
@@ -854,7 +850,21 @@ async fn handle_mcp_sse(
     };
 
     let (tx, rx) = tokio::sync::mpsc::channel::<String>(SESSION_CHANNEL_CAPACITY);
-    state.extras.sessions.insert(session_id, tx);
+    match state.extras.sessions.entry(session_id) {
+        dashmap::mapref::entry::Entry::Occupied(open) if !open.get().is_closed() => {
+            return (
+                StatusCode::CONFLICT,
+                "The session already has an open stream",
+            )
+                .into_response();
+        }
+        dashmap::mapref::entry::Entry::Occupied(mut closed) => {
+            closed.insert(tx);
+        }
+        dashmap::mapref::entry::Entry::Vacant(vacant) => {
+            vacant.insert(tx);
+        }
+    }
 
     let stream = ReceiverStream::new(rx).map(Ok::<_, std::convert::Infallible>);
     let body = Body::from_stream(stream);
@@ -915,7 +925,7 @@ async fn dispatch(
     }
 
     match request.method.as_str() {
-        "initialize" => handle_initialize(request),
+        "initialize" => handle_initialize(state, request, toolset).await,
         "tools/list" => handle_tools_list(state, headers, request, toolset),
         "tools/call" => handle_tools_call(state, headers, request, toolset).await,
         "resources/list" => handle_resources_list(state, headers, request, toolset),
@@ -936,7 +946,36 @@ async fn dispatch(
     }
 }
 
-fn handle_initialize(request: JsonRpcRequest) -> Response {
+/// The resource of a folder holding how to use its toolset: `<folder>/instructions.md`.
+pub const INSTRUCTIONS_FILE: &str = "instructions.md";
+
+/// The [`INSTRUCTIONS_FILE`] resource of the toolset's folder; none for the endpoint of every flow.
+async fn instructions(
+    state: &DispatchState<ToolRegistration, McpExtras>,
+    toolset: &Toolset,
+) -> Option<String> {
+    let (Some(loader), Some(folder)) = (&state.extras.resource_loader, &toolset.0) else {
+        return None;
+    };
+    let key = format!("{folder}/{INSTRUCTIONS_FILE}");
+    match loader.load(&key).await {
+        Ok(text) => Some(text.trim().to_string()),
+        Err(
+            flowgen_core::resource::Error::ResourceNotFound { .. }
+            | flowgen_core::resource::Error::InvalidKey { .. },
+        ) => None,
+        Err(error) => {
+            warn!(error = %error, key = %key, "Failed to load the toolset's instructions");
+            None
+        }
+    }
+}
+
+async fn handle_initialize(
+    state: &DispatchState<ToolRegistration, McpExtras>,
+    request: JsonRpcRequest,
+    toolset: &Toolset,
+) -> Response {
     let result = InitializeResult {
         protocol_version: MCP_PROTOCOL_VERSION,
         capabilities: ServerCapabilities {
@@ -952,6 +991,7 @@ fn handle_initialize(request: JsonRpcRequest) -> Response {
             name: "flowgen",
             version: env!("CARGO_PKG_VERSION"),
         },
+        instructions: instructions(state, toolset).await,
     };
     let mut response = json_rpc_response(request.id, result);
     if let Ok(session_id) = axum::http::HeaderValue::from_str(&uuid::Uuid::now_v7().to_string()) {
@@ -2004,6 +2044,7 @@ mod tests {
             None,
             None,
             "flowgen".to_string(),
+            None,
         )
     }
 
@@ -2153,6 +2194,46 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("Unknown tool"));
+    }
+
+    #[tokio::test]
+    async fn a_toolset_initializes_with_the_instructions_of_its_folder() {
+        let loader = flowgen_core::resource::ResourceLoader::new(None).with_defaults(
+            [
+                ("b/instructions.md".to_string(), "Use b.\n".to_string()),
+                ("b/c/instructions.md".to_string(), "Use c.".to_string()),
+            ]
+            .into(),
+        );
+        let server = new_mcp_server(
+            DEFAULT_MCP_PATH.to_string(),
+            None,
+            None,
+            "flowgen".to_string(),
+            Some(loader),
+        );
+        let table = Arc::new(DashMap::new());
+        for (flow, name) in [
+            ("a/flow", "one"),
+            ("b/c/flow", "two"),
+            ("b/d/flow", "three"),
+        ] {
+            table.insert(name.to_string(), test_tool_registration(flow, name));
+        }
+        let state = build_test_state(&server, table);
+        let instructions = |folder: &'static str| {
+            let state = state.clone();
+            async move {
+                let body = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"});
+                send_to_toolset(state, folder, body).await["result"]["instructions"].clone()
+            }
+        };
+
+        assert_eq!(instructions("/b/c").await, "Use c.");
+        assert_eq!(instructions("/b").await, "Use b.");
+        assert_eq!(instructions("").await, serde_json::Value::Null);
+        assert_eq!(instructions("/a").await, serde_json::Value::Null);
+        assert_eq!(instructions("/b/..").await, serde_json::Value::Null);
     }
 
     #[test]
@@ -2695,6 +2776,7 @@ mod tests {
             Some(creds),
             None,
             "flowgen".to_string(),
+            None,
         );
         let table = Arc::new(DashMap::new());
         let reg = test_tool_registration("flow_a", "A tool");
@@ -2722,6 +2804,7 @@ mod tests {
             Some(creds),
             None,
             "flowgen".to_string(),
+            None,
         );
         let table = Arc::new(DashMap::new());
         let state = build_test_state(&server, table);
@@ -2846,14 +2929,15 @@ mod tests {
         assert!(stopped.contains("notifications/tools/list_changed"));
     }
 
-    #[test]
-    fn initialize_returns_a_session_id() {
+    #[tokio::test]
+    async fn initialize_returns_a_session_id() {
         let request: JsonRpcRequest = serde_json::from_value(serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": "initialize"
         }))
         .unwrap();
+        let state = build_test_state(&test_server(), Arc::new(DashMap::new()));
 
-        let response = handle_initialize(request);
+        let response = handle_initialize(&state, request, &Toolset(None)).await;
 
         assert!(response.headers().get(MCP_SESSION_ID_HEADER).is_some());
     }

@@ -57,6 +57,6 @@ tar -tzf /tmp/configs/blobs/sha256/*   # or /tmp/configs/*/layer.tar on older Do
 1. A script routes each file of the pull by its top-level directory. `flows/*` are keyed by the path with the `flows/` prefix and the file extension stripped, so `flows/orders/sync.yaml` becomes `orders/sync`, matching the flow's path-based identity. `resources/*` are keyed by the path with the `resources/` prefix stripped. Any other file is dropped.
 2. Two [`kv_store`](/docs/flowgen/kv-store/kv-store) entry puts with `prune: true` write new and changed keys and delete the keys the artifact no longer holds.
 
-`oci_sync` emits every file of an artifact in one event, and the flows put leaves `allow_empty` off, so an empty pull deletes no flows.
+`oci_sync` emits every file of an artifact in one event, and the flows put leaves `allow_empty` off, so an empty pull deletes no flows. An artifact with no files fails the sync and deletes nothing.
 
 When the manifest digest has not changed, `oci_sync` skips the layer fetch, so a tick without changes costs one manifest `HEAD`. See [Resources](/docs/flowgen/concepts/resources) for how the runtime reads back from `resources.*`.

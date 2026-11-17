@@ -470,6 +470,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_empty_files_list_is_rejected_before_any_push_as_permanent() {
+        let error = handle(json(r#"{"files": []}"#)).await;
+        assert!(
+            matches!(error, Error::Push(super::client::Error::NoFiles)),
+            "{error}"
+        );
+        assert!(error.is_permanent());
+    }
+
+    #[tokio::test]
     async fn files_that_are_not_path_and_content_pairs_are_rejected_as_permanent() {
         let error = handle(json(r#"{"files": [{"path": "a.txt"}]}"#)).await;
         assert!(matches!(error, Error::Input { .. }), "{error}");

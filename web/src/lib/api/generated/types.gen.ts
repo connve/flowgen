@@ -89,9 +89,9 @@ export type CredentialsField = {
     key: string;
     label: string;
     /**
-     * `secret` is masked; `list` takes one value per line.
+     * `url` is an `http` or `https` URL; `secret` is masked; `list` takes one value per line.
      */
-    kind: 'text' | 'secret' | 'number' | 'boolean' | 'choice' | 'list';
+    kind: 'text' | 'url' | 'secret' | 'number' | 'boolean' | 'choice' | 'list';
     /**
      * The values a `choice` takes.
      */
@@ -407,13 +407,21 @@ export type WorkspaceFile = {
 
 export type CredentialInput = {
     /**
-     * Letters, digits, `.`, `_` and `-`; flows read the file as `<name>.json`.
+     * Lowercase letters, digits and `-`; flows read the file as `<name>.json`.
      */
     name: string;
     /**
-     * The credentials file, usually JSON.
+     * The credentials file, as JSON.
      */
     content: string;
+    /**
+     * The connector the credentials are for, such as `http`.
+     */
+    connector: string;
+    /**
+     * Which of the connector's credentials forms made the file; required when it has any.
+     */
+    form?: number;
 };
 
 export type WorkspaceFiles = {
@@ -446,6 +454,55 @@ export type HubTemplate = {
      * Its `flows/` and `resources/` files, by their path in the workspace.
      */
     files: Array<WorkspaceFile>;
+    /**
+     * The SHA-256 of its files, as `sha256:<hex>`; it changes when the template does.
+     */
+    digest: string;
+    /**
+     * The digest `flowgen.lock` holds for it; absent when it was not installed from the hub.
+     */
+    installedDigest?: string;
+    /**
+     * The paths of the files `flowgen.lock` holds for it, which an update deletes when the template no longer has them and an uninstall deletes.
+     */
+    installedFiles?: Array<string>;
+};
+
+/**
+ * The hub template a change installs, updates or removes, recorded in `flowgen.lock` when it is committed.
+ */
+export type TemplateSource = {
+    hub: string;
+    slug: string;
+    digest: string;
+    /**
+     * The change uninstalls the template, so flowgen.lock drops it.
+     */
+    removed?: boolean;
+};
+
+export type DocPage = {
+    /**
+     * The page's path, such as `object-store/object-store`.
+     */
+    page: string;
+    title: string;
+    /**
+     * The first sentence of the page.
+     */
+    summary: string;
+};
+
+export type DocPages = {
+    pages: Array<DocPage>;
+};
+
+export type DocContent = {
+    page: string;
+    /**
+     * The page as Markdown.
+     */
+    content: string;
 };
 
 export type HubTemplates = {
@@ -508,6 +565,7 @@ export type ChangeProposal = {
      * The files to change, each path at most once.
      */
     files: Array<WorkspaceFile>;
+    template?: TemplateSource;
 };
 
 export type ChangeEdit = {
@@ -590,6 +648,7 @@ export type Change = {
      * Committing ran past the `ack_timeout` of the commit flow's `inproc_endpoint`, so approving the change again retries it.
      */
     stalled?: boolean;
+    template?: TemplateSource;
 };
 
 export type ChangeSummary = {
@@ -604,6 +663,10 @@ export type ChangeSummary = {
     proposedBy: string;
     createdAt: number;
     updatedAt?: number;
+    /**
+     * When the change was approved or rejected.
+     */
+    decidedAt?: number;
     fileCount: number;
     deployment?: ChangeDeployment;
 };
@@ -885,7 +948,7 @@ export type ListResourcesData = {
 
 export type ListResourcesResponses = {
     /**
-     * One entry per resource (filesystem + cache combined).
+     * One entry per resource (filesystem, cache and system resources combined).
      */
     200: Array<ResourceSummary>;
 };
@@ -1596,7 +1659,7 @@ export type EncryptCredentialData = {
 
 export type EncryptCredentialErrors = {
     /**
-     * The name is not a valid file name.
+     * The name, content or form is invalid.
      */
     400: unknown;
     /**
@@ -1663,6 +1726,50 @@ export type TestScriptResponses = {
 };
 
 export type TestScriptResponse = TestScriptResponses[keyof TestScriptResponses];
+
+export type ListDocsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/docs';
+};
+
+export type ListDocsResponses = {
+    /**
+     * The pages, by path.
+     */
+    200: DocPages;
+};
+
+export type ListDocsResponse = ListDocsResponses[keyof ListDocsResponses];
+
+export type ReadDocData = {
+    body?: never;
+    path: {
+        /**
+         * The page's path, such as `object-store/object-store`.
+         */
+        page: string;
+    };
+    query?: never;
+    url: '/api/docs/{page}';
+};
+
+export type ReadDocErrors = {
+    /**
+     * No page at that path.
+     */
+    404: unknown;
+};
+
+export type ReadDocResponses = {
+    /**
+     * The page.
+     */
+    200: DocContent;
+};
+
+export type ReadDocResponse = ReadDocResponses[keyof ReadDocResponses];
 
 export type ListHubsData = {
     body?: never;

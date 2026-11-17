@@ -576,7 +576,8 @@ async fn connect(
     credentials: &Credentials,
     replication: bool,
 ) -> Result<tokio_postgres::Client, Error> {
-    let (mut connection_config, tls) = connection_config(credentials, config.connection_timeout)?;
+    let (mut connection_config, tls) =
+        connection_config(credentials, config.connection_timeout).await?;
     if replication {
         connection_config.replication_mode(ReplicationMode::Logical);
     }

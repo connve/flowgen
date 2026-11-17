@@ -807,11 +807,11 @@ impl crate::task::runner::Runner for Processor {
         // Route Rhai print() and debug() through tracing so output inherits
         // the current span context (flow, task, task_id, task_type).
         engine.on_print(|msg| {
-            tracing::info!(target: "rhai::script", "{msg}");
+            tracing::info!("{msg}");
         });
         engine.on_debug(|msg, source, pos| {
             let src = source.unwrap_or("script");
-            tracing::debug!(target: "rhai::script", source = src, line = pos.line().unwrap_or(0), "{msg}");
+            tracing::debug!(source = src, line = pos.line().unwrap_or(0), "{msg}");
         });
 
         register_helpers(&mut engine);

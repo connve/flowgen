@@ -171,8 +171,8 @@
 
 	afterNavigate(() => {
 		leaving = false;
+		nameEdited = false;
 	});
-
 
 	onDestroy(() => {
 		releaseFlowSubscription();
@@ -414,9 +414,6 @@
 	>
 		<div class="w-full max-w-sm space-y-4 rounded-xl bg-base-100 p-5 shadow-2xl">
 			<h2 class="text-[0.9375rem] font-semibold">{m.editor_discard_title()}</h2>
-			<p class="text-sm text-base-content/70">
-				{m.editor_discard_message({ path })}
-			</p>
 			<div class="flex justify-end gap-2">
 				<button
 					type="button"

@@ -1,6 +1,6 @@
 # A hub whose catalog publish_catalog.yaml publishes to a local OCI Image
 # Layout. As flows/system/local_hub.yaml, its templates are listed in the
-# editor of a new flow or resource, under Templates.
+# editor of a new flow, under Templates.
 flow:
   labels:
     display_name: "Local Hub"

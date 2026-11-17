@@ -31,12 +31,12 @@ Use meta for:
 - Correlation — `event.meta.correlation_id` is auto-generated (UUIDv7) for every event chain.
 - User context — `event.meta.auth` contains resolved user identity for authenticated webhooks.
 
-Set meta in scripts:
+Set meta in scripts through `ctx.meta`:
 
 ```rhai
-event.meta.source = "crm";
-event.meta.batch_id = uuid();
-event
+ctx.meta.source = "crm";
+ctx.meta.batch_id = uuid();
+event.data
 ```
 
 Access meta in templates:

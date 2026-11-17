@@ -65,7 +65,9 @@ Inside tar and tar+gzip layers, directories, symlinks, and hardlinks are skipped
 This means both push paths work:
 
 - `oras push {{env.OCI_ARTIFACT}} a.yaml:application/yaml`: one raw layer per file, path from the `:mediaType` annotation.
-- `docker push {{env.OCI_ARTIFACT}}`: layers are merged into a single overlay-fs snapshot, and every surviving file is emitted. Every file in the image is emitted, so build the final stage `FROM scratch`.
+- `docker push {{env.OCI_ARTIFACT}}`: layers are merged into a single overlay-fs snapshot. Every surviving file is emitted, so build the final stage `FROM scratch`.
+
+An artifact with no files fails the sync.
 
 ## Change detection
 

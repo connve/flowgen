@@ -22,13 +22,13 @@ pub fn gitignore() -> String {
 /// Failure to create the workspace.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("Failed to create the workspace folder {path}: {source}")]
+    #[error("Failed to read or write {path}: {source}")]
     Folder {
         path: String,
         #[source]
         source: std::io::Error,
     },
-    #[error("Failed to create the workspace repository: {source}")]
+    #[error("Failed to read or commit the workspace repository: {source}")]
     Repository {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
@@ -83,7 +83,12 @@ pub fn init(root: &Path, files: &[(String, &str)]) -> Result<bool, Error> {
         });
     }
     local_commit(root)
-        .commit_blocking(changes, None, MESSAGE)
+        .commit_blocking(
+            changes,
+            None,
+            MESSAGE,
+            &std::sync::atomic::AtomicBool::new(false),
+        )
         .map_err(repository)?;
     Ok(true)
 }

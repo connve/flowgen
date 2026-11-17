@@ -16,6 +16,7 @@ telemetry:         # OpenTelemetry export (optional).
 shutdown_timeout:  # How long a stopping flow lets its events finish (optional).
 host:              # The address every server listens on (optional).
 ai_budget:         # Token and amount limits of every ai_completion (optional).
+credentials:       # Folder and age key of encrypted credentials (optional).
 ```
 
 Only `flows` is required. Every other section has working defaults. A key no setting knows fails the start with an error naming it.
@@ -293,7 +294,7 @@ A pod stops its flows on shutdown, so Kubernetes' `terminationGracePeriodSeconds
 
 ## `host`
 
-The address the web UI, HTTP server, MCP server, AI gateway, health server and cluster listener listen on, `0.0.0.0` by default. With `127.0.0.1` only the same machine reaches them, and the web UI, HTTP server, MCP server and AI gateway answer `403` to a request whose `Host` or `Origin` names another machine, as a web page using DNS rebinding or a cross-site request sends. On Kubernetes keep the default: Services and probes connect to the pod's address.
+The address the web UI, HTTP server, MCP server, AI gateway, health server and cluster listener listen on, `0.0.0.0` by default. With `127.0.0.1` only the same machine reaches them, and the web UI, HTTP server, MCP server and AI gateway answer `403` to a request whose `Host` or `Origin` names another machine, which blocks DNS rebinding and cross-site requests. On Kubernetes keep the default: Services and probes connect to the pod's address.
 
 ## `ai_budget`
 
@@ -349,7 +350,9 @@ flowgen --config /etc/flowgen/config.yaml
 
 Flowgen validates the config at startup. Any field with a typo, missing required value, or invalid type produces an error before any flow runs.
 
-Without `--config`, flowgen runs on a workspace folder: `flowgen <folder>`, or `FLOWGEN_HOME`, or `~/flowgen`. A new folder becomes a git repository with one commit holding `flows/system/commit_workspace.yaml`, `release_workspace.yaml` and `deploy_workspace.yaml`; a folder inside a git repository becomes a workspace of that repository instead, so one repository can hold a folder per environment, each committed and released on its own. Each run starts those three flows from the last commit: an approved change is committed, each commit is released to `.flowgen/releases`, and the latest release is deployed to the cache in `.flowgen/state.redb`, from which every other flow loads and reloads. A workspace without them stops the run. `flowgen bootstrap [<folder>]` commits the system flows of the running version, in `flows/system/`, where they are missing or differ, so a workspace an earlier version made runs flows that match its tasks; a run on a workspace whose system flows differ says so. It lists them in `.system-flows` at the root of the workspace, and deletes a system flow an earlier bootstrap listed that the running version no longer has; a flow of your own in `flows/system/`, such as a hub, is never on the list and stays. The config is `host: 127.0.0.1` with the web UI, HTTP server, MCP server, AI gateway and telemetry on. `APP_` environment variables change it.
+Without `--config`, flowgen runs on a workspace folder: `flowgen <folder>`, or `FLOWGEN_HOME`, or `~/flowgen`. A new folder becomes a git repository with one commit holding the system flows in `flows/system/`, `.system-flows` and `.sops.yaml`; a folder inside a git repository becomes a workspace of that repository, so one repository can hold a folder per environment. Each run starts the [lifecycle flows](/docs/flowgen/concepts/authoring#lifecycle-flows) from the last commit, and every other flow loads from the cache in `.flowgen/state.redb`. The config is `host: 127.0.0.1` with the web UI, HTTP server, MCP server, AI gateway and telemetry on. `APP_` environment variables change it.
+
+A run on a workspace whose system flows differ from the running version says so. `flowgen bootstrap [<folder>]` commits the system flows of the running version that are missing or differ, lists them in `.system-flows`, and deletes a system flow an earlier bootstrap listed that the running version lacks. A flow you added to `flows/system/`, such as a hub, is not on the list and stays.
 
 ## Testing a script
 

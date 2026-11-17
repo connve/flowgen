@@ -51,7 +51,6 @@ fn app_config_with_cache(url: String) -> AppConfig {
             credentials_path: None,
             url,
             path: std::path::PathBuf::from(".flowgen/state.redb"),
-            db_name: None,
             runtime: BucketOptions::default(),
             system: SystemBucketOptions::default(),
             history: Some(64),
@@ -155,4 +154,52 @@ async fn an_ai_budget_count_deleted_by_hand_counts_from_zero() {
     assert!(under.is_ok(), "{under:?}");
     assert!(matches!(spent, Ok(Ok(()))), "{spent:?}");
     assert!(over.is_err());
+}
+
+fn executor(cache: &Arc<dyn Cache>, holder: &str) -> flowgen_core::executor::Executor {
+    flowgen_core::executor::Executor::new(
+        Arc::clone(cache),
+        flowgen_core::executor::LeaseConfig {
+            holder_identity: holder.to_string(),
+            ..Default::default()
+        },
+    )
+    .expect("valid lease config")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
+async fn one_pod_takes_a_deleted_lease_when_several_race_for_it() {
+    use flowgen_core::executor::LeaseResult;
+    let (_nats, url) = start_nats().await;
+    let cache = App::init_cache(&app_config_with_cache(url), Some("flowgen_system"))
+        .await
+        .expect("system cache init");
+
+    for round in 0..30 {
+        let lease = format!("lease.race{round}");
+        executor(&cache, "first")
+            .acquire_lease(&lease)
+            .await
+            .expect("first lease");
+        cache.delete(&lease).await.expect("delete lease");
+
+        let attempts: Vec<_> = (0..10)
+            .map(|pod| {
+                let executor = executor(&cache, &format!("pod-{pod}"));
+                let lease = lease.clone();
+                tokio::spawn(async move { executor.acquire_lease(&lease).await })
+            })
+            .collect();
+        let mut holders = 0;
+        for attempt in attempts {
+            if let Ok(LeaseResult::Acquired { .. } | LeaseResult::TakenOver { .. }) =
+                attempt.await.expect("attempt task")
+            {
+                holders += 1;
+            }
+        }
+
+        assert_eq!(holders, 1, "round {round}");
+    }
 }

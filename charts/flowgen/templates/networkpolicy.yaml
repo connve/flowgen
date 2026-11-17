@@ -18,7 +18,7 @@ spec:
         matchLabels:
           {{- include "flowgen.selectorLabels" . | nindent 10 }}
     ports:
-    - port: {{ default 8082 $worker.cluster.port }}
+    - port: {{ dig "telemetry" "backend" "port" 8082 (include "flowgen.settings" . | fromYaml) }}
       protocol: TCP
   - ports:
     {{- range $key, $server := include "flowgen.servers" . | fromYaml }}

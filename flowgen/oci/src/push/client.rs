@@ -26,6 +26,8 @@ pub const ARTIFACT_TYPE: &str = "application/vnd.connve.flowgen.files.v1";
 pub enum Error {
     #[error("At least one tag is required")]
     NoTags,
+    #[error("At least one file is required")]
+    NoFiles,
     #[error("Invalid OCI reference '{reference}': {source}")]
     InvalidReference {
         reference: String,
@@ -70,6 +72,7 @@ impl Error {
             Error::Registry(source) => source.is_permanent(),
             Error::Layout(source) => source.is_permanent(),
             Error::NoTags
+            | Error::NoFiles
             | Error::InvalidReference { .. }
             | Error::InvalidPath { .. }
             | Error::DuplicatePath { .. }
@@ -246,8 +249,8 @@ struct Artifact {
     manifest: Bytes,
 }
 
-/// Files keyed by normalized path, rejecting paths that cannot be extracted
-/// safely and paths that name the same file twice.
+/// Files keyed by normalized path, rejecting no files, paths that cannot be
+/// extracted safely and paths that name the same file twice.
 fn prepare(files: Vec<ArtifactFile>) -> Result<BTreeMap<String, Vec<u8>>, Error> {
     let mut prepared = BTreeMap::new();
     for ArtifactFile { path, content } in files {
@@ -257,7 +260,10 @@ fn prepare(files: Vec<ArtifactFile>) -> Result<BTreeMap<String, Vec<u8>>, Error>
         }
         prepared.insert(path, content);
     }
-    Ok(prepared)
+    match prepared.is_empty() {
+        true => Err(Error::NoFiles),
+        false => Ok(prepared),
+    }
 }
 
 /// `path` with empty and `.` segments dropped, the form the tar entry gets.

@@ -1,5 +1,6 @@
-# Deploys the latest release from FLOWGEN_RELEASES: mirrors its flows and
-# resources into the system cache, deleting what the release no longer holds.
+# Deploys the latest release from FLOWGEN_RELEASES: mirrors its flows,
+# resources and flowgen.lock into the system cache, deleting what the release
+# no longer holds.
 # flowgen loads them from the cache and reloads them when they change.
 flow:
   labels:
@@ -35,6 +36,7 @@ flow:
         code: |
           let flows = [];
           let resources = [];
+          let workspace = [];
           for file in event.data.files {
               if file.content == () { throw `${file.path} is not text`; }
               if file.path.starts_with("flows/") {
@@ -42,16 +44,18 @@ flow:
                   flows.push(#{ key: key, value: file.content });
               } else if file.path.starts_with("resources/") {
                   resources.push(#{ key: file.path.sub_string(10), value: file.content });
+              } else if file.path == "flowgen.lock" {
+                  workspace.push(#{ key: "lock", value: file.content });
               }
           }
-          #{ flows: flows, resources: resources }
+          #{ flows: flows, resources: resources, workspace: workspace }
 
     - script:
         name: flow_entries
         code: |
           #{ entries: event.data.flows }
 
-    # A release always holds the system flows, so an empty list deletes nothing.
+    # allow_empty is off, so an empty release deletes no flows.
     - kv_store:
         name: apply_flows
         url: "{{env.FLOWGEN_CACHE_URL}}"
@@ -78,3 +82,21 @@ flow:
         prune: true
         allow_empty: true
         depends_on: [resource_entries]
+
+    - script:
+        name: workspace_entries
+        code: |
+          #{ entries: event.data.workspace }
+        depends_on: [to_entries]
+
+    # flowgen.lock, read by the web UI; a workspace without one prunes it.
+    - kv_store:
+        name: apply_workspace
+        url: "{{env.FLOWGEN_CACHE_URL}}"
+        credentials_path: "{{env.FLOWGEN_CACHE_CREDENTIALS}}"
+        bucket: "{{env.FLOWGEN_SYSTEM_BUCKET}}"
+        operation: put
+        key_prefix: "workspace."
+        prune: true
+        allow_empty: true
+        depends_on: [workspace_entries]

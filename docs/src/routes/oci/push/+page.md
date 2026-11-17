@@ -2,7 +2,7 @@
 
 Packs the files of an event into a single-layer OCI artifact and pushes it to a registry under one or more tags. The layer is a tar+gzip of the files at their paths, which is the layout [OCI Sync](/docs/flowgen/oci/sync) reads back.
 
-The input event carries `files`, each `{path, content}`; the output of [Git Push](/docs/flowgen/git/push) fits as it is. Paths must be relative, without `..`, and unique. The manifest uses the OCI empty config and the artifact type `application/vnd.connve.flowgen.files.v1`. Pushes from one task run one at a time.
+The input event carries `files`, each `{path, content}`; the output of [Git Push](/docs/flowgen/git/push) fits as it is. `files` must hold at least one file. Paths must be relative, without `..`, and unique. The manifest uses the OCI empty config and the artifact type `application/vnd.connve.flowgen.files.v1`. Pushes from one task run one at a time.
 
 ## Configuration
 

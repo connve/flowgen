@@ -40,7 +40,7 @@
 			}
 			confirming = false;
 		} catch (err) {
-			failure = errorMessage(err, m.file_delete_failed());
+			failure = errorMessage(err, m.file_delete_failed({ name }));
 		} finally {
 			deleting = false;
 		}
@@ -101,7 +101,6 @@
 	>
 		<div class="w-full max-w-sm space-y-4 rounded-xl bg-base-100 p-5 shadow-2xl">
 			<h2 class="text-[0.9375rem] font-semibold">{m.file_delete_title({ name })}</h2>
-			<p class="text-sm text-base-content/70">{m.file_delete_message()}</p>
 			{#if failure}
 				<p class="text-sm text-error">{failure}</p>
 			{/if}

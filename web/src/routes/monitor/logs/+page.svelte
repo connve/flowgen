@@ -424,9 +424,9 @@
 		{#if filtered.length === 0 && loadError}
 			<StateMessage tone="oops" title={m.logs_load_failed_title()} message={loadError} />
 		{:else if filtered.length === 0 && filtering}
-			<StateMessage tone="notice" title={m.logs_no_match_title()} message={m.logs_no_match_message()} />
+			<StateMessage tone="notice" title={m.logs_no_match_title()} />
 		{:else if filtered.length === 0}
-			<StateMessage tone="notice" title={m.logs_empty_title()} message={m.logs_empty_message()} />
+			<StateMessage tone="notice" title={m.logs_empty_title()} />
 		{:else}
 			<div
 				class="@container flex min-h-0 flex-1 flex-col overflow-hidden bg-base-100"

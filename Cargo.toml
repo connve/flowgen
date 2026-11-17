@@ -22,7 +22,7 @@ debug = "line-tables-only"
 allow_attributes = "deny"
 
 [workspace.package]
-version = "0.154.0"
+version = "0.155.0"
 authors = ["CONNVE"]
 license = "MPL-2.0"
 edition = "2021"
@@ -35,6 +35,7 @@ google-cloud-bigquery = { package = "gcloud-bigquery", git = "https://github.com
 gcloud-auth = { git = "https://github.com/connve/google-cloud-rust" }
 gcloud-gax = { git = "https://github.com/connve/google-cloud-rust" }
 gcloud-googleapis = { git = "https://github.com/connve/google-cloud-rust" }
+google-cloud-auth = { version = "1.9" }
 google-cloud-gax = { version = "0.21" }
 object_store = { version = "0.14", default-features = false, features = [
     "aws",
@@ -161,7 +162,9 @@ redb = { version = "4.5" }
 keyring-core = { version = "1" }
 apple-native-keyring-store = { version = "1", features = ["keychain"] }
 windows-native-keyring-store = { version = "1" }
-zbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust"] }
+zbus-secret-service-keyring-store = { version = "1", features = [
+    "crypto-rust",
+] }
 tower = { version = "0.5", features = ["util"] }
 native-tls = { version = "0.2.18" }
 opentelemetry = { version = "0.27" }

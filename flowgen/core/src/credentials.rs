@@ -597,6 +597,17 @@ pub async fn load_credentials<T: serde::de::DeserializeOwned>(path: &Path) -> Re
     })
 }
 
+/// Whether `content` is a service account key, with `client_email` and `private_key`.
+pub fn check_service_account(content: &str) -> Result<(), String> {
+    match serde_json::from_str::<serde_json::Value>(content) {
+        Ok(key) => match (key.get("client_email"), key.get("private_key")) {
+            (Some(serde_json::Value::String(_)), Some(serde_json::Value::String(_))) => Ok(()),
+            _ => Err("A service account key needs `client_email` and `private_key`".to_string()),
+        },
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

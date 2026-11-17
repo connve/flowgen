@@ -1,6 +1,6 @@
 # MCP
 
-Expose flows and curated content to [Model Context Protocol](https://modelcontextprotocol.io) clients — Claude Desktop, Cursor, and other MCP-aware LLM applications. Flowgen ships four MCP task types built on a shared server:
+Expose flows and curated content to [Model Context Protocol](https://modelcontextprotocol.io) clients such as coding agents and chat apps. Flowgen ships four MCP task types built on a shared server:
 
 | Task | Client sees | Purpose |
 |---|---|---|
@@ -49,6 +49,12 @@ mcp_servers:
   - url: "http://localhost:3001/mcp/v1/shared"
     allowed_tools: [web_search]
 ```
+
+## Instructions
+
+A toolset tells agents how to use it with the resource `instructions.md` in its folder: `resources/sales/instructions.md` for `/mcp/v1/sales`. The `initialize` response carries it as `instructions`, which a client that supports them adds to the model's context; `path` itself carries none. A client reads them when it connects, so a change reaches it on its next connection.
+
+Every client that connects gets them, so keep them short: the order of work and the rules the tools' descriptions can't say. An `ai_completion` adds the instructions of its `mcp_servers` after its `system_prompt`.
 
 ## `mcp_tool`
 

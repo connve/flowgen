@@ -10,16 +10,12 @@
 	const ERRORS: Record<string, () => string> = {
 		access_denied: m.login_error_access_denied,
 		provider: m.login_error_provider,
-		expired: m.login_error_expired,
-		failed: m.login_error_failed
+		expired: m.login_error_expired
 	};
 
 	let error = $derived(page.url.searchParams.get('error'));
-	let errorMessage = $derived(
-		error == null
-			? null
-			: (Object.hasOwn(ERRORS, error) ? ERRORS[error] : m.login_error_failed)()
-	);
+	let failed = $derived(error !== null);
+	let errorMessage = $derived(error !== null && Object.hasOwn(ERRORS, error) ? ERRORS[error]() : undefined);
 </script>
 
 <svelte:head>
@@ -28,10 +24,10 @@
 
 <div class="flex min-h-screen flex-col bg-base-100 text-base-content">
 	<StateMessage
-		tone={errorMessage ? 'oops' : 'notice'}
-		title={errorMessage ? m.login_failed_title() : m.login_title()}
-		message={errorMessage ?? m.login_message()}
-		icon={errorMessage ? 'tabler:lock-x' : 'tabler:lock'}
+		tone={failed ? 'oops' : 'notice'}
+		title={failed ? m.login_failed_title() : m.login_title()}
+		message={errorMessage}
+		icon={failed ? 'tabler:lock-x' : 'tabler:lock'}
 	>
 		<a href={loginUrl()} data-sveltekit-reload class="btn btn-primary btn-sm gap-1.5">
 			<Icon icon="tabler:login-2" class="h-4 w-4" />

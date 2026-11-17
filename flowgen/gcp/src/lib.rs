@@ -90,6 +90,17 @@ mod tests {
     }
 
     #[test]
+    fn the_credentials_form_takes_a_service_account_key_only() {
+        let check = CONNECTOR.credentials[0].check;
+
+        assert!(check(r#"{"type": "x"}"#).is_err());
+        assert!(check(
+            r#"{"type": "service_account", "client_email": "a@p.iam.gserviceaccount.com", "private_key": "k"}"#
+        )
+        .is_ok());
+    }
+
+    #[test]
     fn credentials_are_described_by_their_service_account_only() {
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(
@@ -126,6 +137,7 @@ pub const CONNECTOR: Connector = Connector {
     credentials: &[CredentialsForm {
         label: "Service account file",
         fields: &[],
+        check: flowgen_core::credentials::check_service_account,
     }],
 };
 
