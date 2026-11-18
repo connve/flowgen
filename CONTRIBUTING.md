@@ -277,15 +277,23 @@ Use a circuit breaker only to detect permanent errors (bad credentials,
 broken config) during initialization; once initialized, reconnect
 automatically on any event-loop failure.
 
-**Everything else** (publishers, processors, webhooks, HTTP requests) uses
-the circuit-breaker pattern with `max_attempts` (default 10) and fails fast
-once exhausted. A publisher that fails init just leaves the message unacked
-for a later retry; a webhook init failure usually means a permanent config
-error.
+**Everything else** (publishers, processors, webhooks, HTTP requests)
+retries each event with the circuit-breaker pattern, up to `max_attempts`
+(default 10), then forwards it as failed.
+
+Init retries until it succeeds for every task, ignoring `max_attempts`,
+since a task that never starts would leave its flow without it. Return a
+permanent error (`RetryError::permanent`) for a failure retrying can't fix,
+such as a broken config, so the task fails at once.
 
 Rules that apply to both:
 - Never hand-roll exponential backoff — use the global `RetryConfig`,
   applied automatically at the handler level in `run()`.
+- Retry init with `flowgen_core::task::runner::init`. It gives up once the
+  flow stops reading, since a task still starting holds no events, so a
+  task that can't connect doesn't hold up a stop or a reload. A subscriber
+  with its own reconnect loop selects on `task_context.stop_reading` around
+  init the same way.
 - Polling for async job completion isn't a retry scenario; use a plain
   fixed interval instead.
 - Durations are human-readable strings (`"1s"`, `"500ms"`), never raw
@@ -525,33 +533,42 @@ impl Runner for Processor {
         Ok(event_handler)
     }
 
-    async fn run(mut self) -> Result<(), Error> {
-        // Event loop with retry logic
-        let retry_config = RetryConfig::merge(
-            &self.task_context.retry,
-            &self.config.retry,
-        );
+    async fn run(self) -> Result<(), Error> {
+        let retry_config = RetryConfig::merge(&self.task_context.retry, &self.config.retry);
 
-        let event_handler = Retry::spawn(
-            retry_config.init_strategy(self.task_context.startup_delay),
+        // `None` means the flow stopped before init succeeded.
+        let event_handler = match flowgen_core::task::runner::init(
+            &self.task_context,
+            &retry_config,
             || async {
-                // ... init logic
+                self.init().await.map_err(|e| {
+                    error!(error = %e, "Failed to initialize the task");
+                    tokio_retry::RetryError::transient(e)
+                })
             },
-        ).await?;
+        )
+        .await?
+        {
+            Some(handler) => Arc::new(handler),
+            None => return Ok(()),
+        };
 
-        loop {
-            match self.rx.recv().await {
-                Some(event) => {
-                    tokio::spawn(async move {
-                        // Handle event with retry
-                    });
-                }
-                None => return Ok(()),
-            }
-        }
+        flowgen_core::task::runner::process_events(
+            self.rx,
+            event_handler,
+            &retry_config,
+            self.config.max_in_flight,
+            &self.task_context,
+        )
+        .await;
+        Ok(())
     }
 }
 ```
+
+`process_events` takes the next event when a slot frees up, retries a
+failed one, and forwards it as failed once retries run out; the
+`EventHandler` implements `flowgen_core::task::runner::Handler` for it.
 
 **ProcessorBuilder** is the builder for `Processor`:
 

@@ -5,7 +5,7 @@ info:
     HTTP API for flowgen. Two listeners: `web` (flow / resource /
     SSE endpoints under `web.path`) and `health` (Kubernetes probes
     on the root path).
-  version: 0.156.0
+  version: 0.157.0
   license:
     name: MPL-2.0
 servers:
@@ -821,6 +821,22 @@ paths:
           description: No hub with that id runs on this instance.
         "502":
           description: The hub's flow failed, such as when its catalog cannot be pulled.
+
+  /api/workspace/templates:
+    get:
+      operationId: listInstalledTemplates
+      summary: The templates the workspace installed.
+      description: |
+        Read from the deployed `flowgen.lock`, without calling a hub, so a
+        file's template is known at once.
+      tags: [workspace]
+      responses:
+        "200":
+          description: The installed templates, by hub and slug.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstalledTemplates"
 
   /api/workspace/file:
     get:
@@ -1776,6 +1792,34 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/Hub"
+
+    InstalledTemplates:
+      type: object
+      required: [templates]
+      properties:
+        templates:
+          type: array
+          items:
+            $ref: "#/components/schemas/InstalledTemplate"
+
+    InstalledTemplate:
+      type: object
+      required: [hub, slug, digest, files]
+      properties:
+        hub:
+          type: string
+          description: The id of the hub it came from.
+        slug:
+          type: string
+          description: Its folder in the hub's catalog.
+        digest:
+          type: string
+          description: The digest of its files when it was installed.
+        files:
+          type: array
+          items:
+            type: string
+          description: The paths of the files it installed.
 
     HubTemplate:
       type: object

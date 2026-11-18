@@ -213,6 +213,9 @@ spec:
         {{- end }}
         {{- end }}
         {{- end }}
+        {{- with $worker.extraVolumeMounts }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       volumes:
       # Ephemeral writable /tmp paired with the volumeMount above. Cleared
       # on pod restart, which doubles as a guarantee that git_sync re-clones
@@ -294,6 +297,9 @@ spec:
           name: {{ $volume.configMapName }}
       {{- end }}
       {{- end }}
+      {{- end }}
+      {{- with $worker.extraVolumes }}
+      {{- toYaml . | nindent 6 }}
       {{- end }}
       {{- with $worker.nodeSelector }}
       nodeSelector:

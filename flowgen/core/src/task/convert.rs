@@ -445,9 +445,8 @@ impl crate::task::runner::Runner for Processor {
         let retry_config =
             crate::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
 
-        let event_handler = match tokio_retry::Retry::spawn(
-            retry_config.init_strategy(self.task_context.startup_delay),
-            || async {
+        let event_handler =
+            match crate::task::runner::init(&self.task_context, &retry_config, || async {
                 match self.init().await {
                     Ok(handler) => Ok(handler),
                     Err(e) => {
@@ -455,15 +454,12 @@ impl crate::task::runner::Runner for Processor {
                         Err(tokio_retry::RetryError::transient(e))
                     }
                 }
-            },
-        )
-        .await
-        {
-            Ok(handler) => Arc::new(handler),
-            Err(e) => {
-                return Err(e);
-            }
-        };
+            })
+            .await?
+            {
+                Some(handler) => Arc::new(handler),
+                None => return Ok(()),
+            };
 
         crate::task::runner::process_events(
             self.rx,

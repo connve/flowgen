@@ -1358,6 +1358,34 @@ flow:
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_flow_whose_task_cannot_start_stops_without_waiting_for_the_stop_timeout() {
+        let ctx = test_context();
+        let yaml = r#"
+flow:
+  tasks:
+    - generate:
+        name: tick
+        interval: 1h
+    - http_request:
+        name: call
+        endpoint: "http://127.0.0.1:1/"
+        method: GET
+        credentials_path: "/nonexistent/credentials.json"
+"#;
+
+        reconcile_put("flows.unstartable", bytes::Bytes::from(yaml), &ctx).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let stopped = std::time::Instant::now();
+        stop("unstartable", &ctx).await;
+
+        assert!(
+            stopped.elapsed() < Duration::from_secs(2),
+            "a flow whose task cannot start took {:?} to stop",
+            stopped.elapsed()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_restarted_webhook_flow_registers_its_route_again() {
         let mut ctx = with_fast_retry(test_context());
         let server = Arc::new(flowgen_http::server::EndpointServer::new(

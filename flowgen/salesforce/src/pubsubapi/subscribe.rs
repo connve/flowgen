@@ -822,7 +822,7 @@ impl flowgen_core::task::runner::Runner for Processor {
             );
 
             let event_handler = tokio::select! {
-                _ = cancellation_token.cancelled() => return Ok(()),
+                _ = self.task_context.stop_reading.cancelled() => return Ok(()),
                 result = init_future => match result {
                     Ok(handler) => {
                         if lost_connectivity {
@@ -835,7 +835,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                         error!(error = %e, delay_ms = %delay.as_millis(), "Subscriber initialization exhausted retry attempts, will retry after backoff");
                         tokio::select! {
                             _ = tokio::time::sleep(delay) => {}
-                            _ = cancellation_token.cancelled() => return Ok(()),
+                            _ = self.task_context.stop_reading.cancelled() => return Ok(()),
                         }
                         continue;
                     }

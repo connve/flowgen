@@ -8,7 +8,7 @@ const SITE_ORIGIN = 'https://connve.com';
 const BASE_PATH = '/docs/flowgen';
 const SITE_TITLE = 'Flowgen Docs';
 const DEFAULT_DESCRIPTION =
-	'Flowgen is an open-source agentic data activation platform with human-in-the-loop. Flows in YAML, agents propose changes, people approve them.';
+	'Flowgen is an open-source composable data activation platform. Turn your data into the next best action!';
 
 // Tab titles like the web UI's: most specific first, then the subsection and
 // section, then the site, e.g. `REST API · Guides · Salesforce · Flowgen Docs`.

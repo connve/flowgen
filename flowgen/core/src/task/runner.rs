@@ -74,6 +74,23 @@ pub fn max_in_flight(cpu_intensive: bool) -> NonZeroUsize {
     }
 }
 
+/// Runs `init` after each delay of `retry`'s init strategy until it succeeds,
+/// or returns `None` once the flow stops reading: a task still starting holds
+/// no events, so it stops without waiting out the backoff. An init that
+/// succeeds at once wins over the stop, so the task drains what reaches it.
+pub async fn init<A: tokio_retry::Action>(
+    task_context: &crate::task::context::TaskContext,
+    retry: &crate::retry::RetryConfig,
+    init: A,
+) -> Result<Option<A::Item>, A::Error> {
+    let init = tokio_retry::Retry::spawn(retry.init_strategy(task_context.startup_delay), init);
+    tokio::select! {
+        biased;
+        result = init => result.map(Some),
+        _ = task_context.stop_reading.cancelled() => Ok(None),
+    }
+}
+
 /// Runs `handler` on events from `rx`, at most `max_in_flight` at a time
 /// (the task's default when unset), until the channel closes or the task is
 /// cancelled.
@@ -278,6 +295,22 @@ mod tests {
         .expect("handler started");
     }
 
+    fn context(
+        cancellation: &tokio_util::sync::CancellationToken,
+    ) -> crate::task::context::TaskContext {
+        crate::task::context::TaskContextBuilder::new()
+            .flow_name("a".to_string())
+            .task_manager(Arc::new(
+                crate::task::manager::TaskManagerBuilder::new()
+                    .build()
+                    .unwrap(),
+            ))
+            .cache(Arc::new(crate::cache::memory::MemoryCache::new()))
+            .cancellation_token(cancellation.clone())
+            .build()
+            .unwrap()
+    }
+
     fn run(
         rx: Receiver<Event>,
         handler: &Arc<Gated>,
@@ -297,17 +330,7 @@ mod tests {
         handles_failed: bool,
     ) -> tokio::task::JoinHandle<()> {
         let handler = Arc::clone(handler);
-        let mut task_context = crate::task::context::TaskContextBuilder::new()
-            .flow_name("a".to_string())
-            .task_manager(Arc::new(
-                crate::task::manager::TaskManagerBuilder::new()
-                    .build()
-                    .unwrap(),
-            ))
-            .cache(Arc::new(crate::cache::memory::MemoryCache::new()))
-            .cancellation_token(cancellation.clone())
-            .build()
-            .unwrap();
+        let mut task_context = context(cancellation);
         task_context.handles_failed = handles_failed;
         tokio::spawn(async move {
             process_events(
@@ -319,6 +342,33 @@ mod tests {
             )
             .await
         })
+    }
+
+    #[tokio::test]
+    async fn a_task_still_starting_stops_once_the_flow_stops_reading() {
+        let task_context = context(&tokio_util::sync::CancellationToken::new());
+        let retry = crate::retry::RetryConfig {
+            initial_backoff: std::time::Duration::from_secs(3600),
+            ..Default::default()
+        };
+        let attempts = AtomicUsize::new(0);
+        let starting = init(&task_context, &retry, || async {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            Err::<(), _>(tokio_retry::RetryError::transient("unreachable"))
+        });
+        let stop = async {
+            while attempts.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+            task_context.stop_reading.cancel();
+        };
+
+        let (started, ()) = tokio::time::timeout(WAIT, async { tokio::join!(starting, stop) })
+            .await
+            .expect("stops without waiting out the backoff");
+
+        assert_eq!(started, Ok(None));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
 
     #[test]

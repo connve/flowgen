@@ -360,9 +360,8 @@ impl Runner for ListProcessor {
         let retry_config =
             flowgen_core::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
 
-        let event_handler = match tokio_retry::Retry::spawn(
-            retry_config.init_strategy(self.task_context.startup_delay),
-            || async {
+        let event_handler =
+            match flowgen_core::task::runner::init(&self.task_context, &retry_config, || async {
                 match self.init().await {
                     Ok(handler) => Ok(handler),
                     Err(e) => {
@@ -370,15 +369,12 @@ impl Runner for ListProcessor {
                         Err(tokio_retry::RetryError::transient(e))
                     }
                 }
-            },
-        )
-        .await
-        {
-            Ok(handler) => Arc::new(handler),
-            Err(e) => {
-                return Err(e);
-            }
-        };
+            })
+            .await?
+            {
+                Some(handler) => Arc::new(handler),
+                None => return Ok(()),
+            };
 
         flowgen_core::task::runner::process_events(
             self.rx,

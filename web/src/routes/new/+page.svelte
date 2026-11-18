@@ -184,7 +184,7 @@
 									: ''}"
 								onclick={() => select(hub.id)}
 							>
-								<Icon icon="tabler:building-store" class="h-4 w-4 opacity-60" />
+								<Icon icon="tabler:template" class="h-4 w-4 opacity-60" />
 								<span class="truncate">{hub.name}</span>
 							</button>
 						</li>

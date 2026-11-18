@@ -580,17 +580,18 @@ impl flowgen_core::task::runner::Runner for Processor {
         let retry_config =
             flowgen_core::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
 
-        let handler = tokio_retry::Retry::spawn(
-            retry_config.init_strategy(self.task_context.startup_delay),
-            || async {
+        let handler =
+            match flowgen_core::task::runner::init(&self.task_context, &retry_config, || async {
                 self.init().await.map_err(|e| {
                     error!(error = %e, "Failed to initialize git push processor");
                     tokio_retry::RetryError::transient(e)
                 })
-            },
-        )
-        .await
-        .map(Arc::new)?;
+            })
+            .await?
+            {
+                Some(handler) => Arc::new(handler),
+                None => return Ok(()),
+            };
 
         flowgen_core::task::runner::process_events(
             self.rx,

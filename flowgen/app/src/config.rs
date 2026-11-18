@@ -1008,7 +1008,7 @@ fn default_web_port() -> u16 {
 
 /// Default web UI path prefix.
 fn default_web_path() -> String {
-    "/".to_string()
+    crate::web::DEFAULT_WEB_PATH.to_string()
 }
 
 /// Web UI configuration options.
@@ -1023,7 +1023,7 @@ pub struct WebOptions {
     /// Port for the web server. Defaults to 8080.
     #[serde(default = "default_web_port")]
     pub port: u16,
-    /// Path prefix for the web UI. Defaults to "/".
+    /// Path prefix for the web UI. Defaults to "/flowgen".
     #[serde(default = "default_web_path")]
     pub path: String,
     /// Base URL of the AI gateway the Agents tab replies through, e.g.
@@ -1084,7 +1084,7 @@ pub struct UpdateCheckOptions {
     /// The newest release, as a releases API `latest` response with `tag_name`.
     #[serde(default = "default_update_check_url")]
     pub url: String,
-    /// How often to check. Defaults to 24 hours.
+    /// How often to check. Defaults to an hour.
     #[serde(default = "default_update_check_interval", with = "humantime_serde")]
     pub interval: Duration,
 }
@@ -1108,7 +1108,7 @@ fn default_update_check_url() -> String {
 }
 
 fn default_update_check_interval() -> Duration {
-    Duration::from_secs(24 * 60 * 60)
+    Duration::from_secs(60 * 60)
 }
 
 impl Default for WebOptions {

@@ -8,13 +8,14 @@ use crate::config::{
 };
 use crate::hubs::SYSTEM_FOLDER;
 use flowgen_core::cache::{Cache, RedbCache};
-use flowgen_core::workspace::{CACHE_FILE, CREDENTIALS_DIR, FLOWS_DIR, STATE_DIR};
+use flowgen_core::workspace::{CACHE_FILE, CREDENTIALS_DIR, FLOWS_DIR, RESOURCES_DIR, STATE_DIR};
 use rust_embed::RustEmbed;
 use std::path::{Path, PathBuf};
 
-/// The system flows: every file in `config/` but its `resources/`, which a new workspace starts
-/// with in [`SYSTEM_FOLDER`] and [`update_system_flows`] brings an older one
-/// up to, as they depend on how the tasks of this version behave.
+/// The system flows and, under `resources/`, the system resources: every file
+/// in `config/`, which a new workspace starts with in [`SYSTEM_FOLDER`] and
+/// [`update_system_flows`] brings an older one up to, as they depend on how the
+/// tasks of this version behave.
 #[derive(RustEmbed)]
 #[folder = "../../config/"]
 struct SystemFlows;
@@ -37,8 +38,8 @@ fn system_path(file: &str) -> String {
 const SYSTEM_RESOURCES: &str = "resources/";
 
 /// The system resources, the files in `config/resources/`, by their key in
-/// [`SYSTEM_FOLDER`]; every resource loader falls back to them, so a workspace
-/// file with the same key takes their place.
+/// [`SYSTEM_FOLDER`]; a run with `flows.system` reads them from here, as it
+/// reads the system flows.
 pub fn system_resources() -> std::collections::BTreeMap<String, String> {
     SystemFlows::iter()
         .filter_map(|file| {
@@ -52,14 +53,19 @@ pub fn system_resources() -> std::collections::BTreeMap<String, String> {
         .collect()
 }
 
-/// The files a new workspace starts with, by their path in the workspace.
+/// The files a new workspace starts with, by their path in the workspace: the
+/// system flows in `flows/system/` and the system resources in
+/// `resources/system/`.
 pub fn starter_files() -> Vec<(String, String)> {
     SystemFlows::iter()
-        .filter(|file| !file.starts_with(SYSTEM_RESOURCES))
         .filter_map(|file| {
             let content = SystemFlows::get(&file)?;
             let content = String::from_utf8_lossy(&content.data).into_owned();
-            Some((system_path(&file), content))
+            let path = match file.strip_prefix(SYSTEM_RESOURCES) {
+                Some(key) => format!("{RESOURCES_DIR}/{SYSTEM_FOLDER}/{key}"),
+                None => system_path(&file),
+            };
+            Some((path, content))
         })
         .collect()
 }
@@ -70,6 +76,7 @@ pub fn system_flows() -> Vec<crate::config::FlowConfig> {
     let folder = format!("{FLOWS_DIR}/");
     starter_files()
         .into_iter()
+        .filter(|(path, _)| path.starts_with(&folder))
         .filter_map(|(path, content)| {
             let identity = crate::validation::flow_identity(path.trim_start_matches(&folder));
             let loaded = match crate::config::FlowConfigRaw::parse(&path, &content) {
@@ -409,7 +416,6 @@ pub fn defaults(root: &Path) -> AppConfig {
         }),
         web: Some(WebOptions {
             enabled: true,
-            path: crate::web::BUILT_BASE_PATH.to_string(),
             agents: Some(AgentsOptions {
                 enabled: true,
                 ..AgentsOptions::default()
@@ -719,7 +725,10 @@ mod tests {
     #[test]
     fn every_resource_a_system_flow_references_is_a_system_resource() {
         let resources = system_resources();
-        for (path, content) in starter_files() {
+        let flows = starter_files()
+            .into_iter()
+            .filter(|(path, _)| path.starts_with(&format!("{FLOWS_DIR}/")));
+        for (path, content) in flows {
             for key in content
                 .lines()
                 .filter_map(|line| line.trim().strip_prefix("resource: "))
@@ -744,7 +753,16 @@ mod tests {
                 file.to_string_lossy().replace('\\', "/")
             })
             .partition(|file| file.starts_with(SYSTEM_RESOURCES));
-        let mut in_config: Vec<String> = flows.iter().map(|file| system_path(file)).collect();
+        let mut in_config: Vec<String> = flows
+            .iter()
+            .map(|file| system_path(file))
+            .chain(resources.iter().map(|file| {
+                format!(
+                    "{RESOURCES_DIR}/{SYSTEM_FOLDER}/{}",
+                    &file[SYSTEM_RESOURCES.len()..]
+                )
+            }))
+            .collect();
         in_config.sort();
         let mut system_keys: Vec<String> = resources
             .iter()
@@ -764,7 +782,7 @@ mod tests {
             .all(|file| starter.contains(&system_path(file))));
 
         let system = format!("{FLOWS_DIR}/");
-        for (path, content) in &files {
+        for (path, content) in files.iter().filter(|(path, _)| path.starts_with(&system)) {
             let identity = path.trim_start_matches(&system);
             let issues = crate::validation::validate_flow(identity, content);
             assert!(issues.is_empty(), "{path}: {issues:?}");
@@ -795,6 +813,7 @@ mod tests {
         let folder = format!("{FLOWS_DIR}/");
         let mut expected: Vec<String> = starter_files()
             .iter()
+            .filter(|(path, _)| path.starts_with(&folder))
             .map(|(path, _)| {
                 crate::validation::flow_identity(path.trim_start_matches(&folder)).to_string()
             })

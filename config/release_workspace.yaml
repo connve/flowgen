@@ -31,7 +31,8 @@ flow:
         path: "{{env.FLOWGEN_WORKSPACE_PATH}}"
         credentials_path: "{{env.FLOWGEN_GIT_CREDENTIALS}}"
 
-    # Keeps the flows, resources and flowgen.lock, the files a release deploys.
+    # Keeps the flows, resources and flowgen.lock, the files a release deploys;
+    # a workspace with none of them has nothing to release yet.
     - script:
         name: to_release
         code: |
@@ -41,6 +42,7 @@ flow:
                   files.push(file);
               }
           }
+          if files.is_empty() { return (); }
           #{ commit: event.data.commit, files: files }
 
     - oci_push:

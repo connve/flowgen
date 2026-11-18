@@ -440,6 +440,29 @@ export type Hubs = {
     hubs: Array<Hub>;
 };
 
+export type InstalledTemplates = {
+    templates: Array<InstalledTemplate>;
+};
+
+export type InstalledTemplate = {
+    /**
+     * The id of the hub it came from.
+     */
+    hub: string;
+    /**
+     * Its folder in the hub's catalog.
+     */
+    slug: string;
+    /**
+     * The digest of its files when it was installed.
+     */
+    digest: string;
+    /**
+     * The paths of the files it installed.
+     */
+    files: Array<string>;
+};
+
 export type HubTemplate = {
     /**
      * The template's folder in the catalog.
@@ -1815,6 +1838,22 @@ export type ListHubTemplatesResponses = {
 };
 
 export type ListHubTemplatesResponse = ListHubTemplatesResponses[keyof ListHubTemplatesResponses];
+
+export type ListInstalledTemplatesData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/workspace/templates';
+};
+
+export type ListInstalledTemplatesResponses = {
+    /**
+     * The installed templates, by hub and slug.
+     */
+    200: InstalledTemplates;
+};
+
+export type ListInstalledTemplatesResponse = ListInstalledTemplatesResponses[keyof ListInstalledTemplatesResponses];
 
 export type GetWorkspaceFileData = {
     body?: never;

@@ -1,0 +1,12 @@
+config:
+  cluster:
+    enabled: true
+    replicas: 3
+  jetstream:
+    enabled: true
+    fileStore:
+      enabled: true
+      dir: /data
+
+natsBox:
+  enabled: true

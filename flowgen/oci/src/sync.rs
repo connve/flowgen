@@ -6,6 +6,8 @@ use base64::Engine;
 use flowgen_core::config::ConfigExt;
 use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
 use flowgen_core::task::TaskConfig;
+use futures_util::{StreamExt, TryStreamExt};
+use oci_client::manifest::OciDescriptor;
 use oci_client::secrets::RegistryAuth;
 use oci_client::{Client, Reference};
 use serde::{Deserialize, Serialize};
@@ -13,6 +15,31 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{debug, error};
+
+/// Bytes of an artifact's layers downloaded at once: an artifact of many
+/// small files takes about one round trip, and a large layer downloads alone.
+const DOWNLOAD_BUDGET: u64 = 64 * 1024 * 1024;
+
+/// `layers` in order, in groups whose sizes add up to at most `budget`; a
+/// layer larger than `budget` is a group of its own.
+fn download_groups(layers: &[OciDescriptor], budget: u64) -> Vec<&[OciDescriptor]> {
+    let mut groups = Vec::new();
+    let mut start = 0;
+    let mut size: u64 = 0;
+    for (index, layer) in layers.iter().enumerate() {
+        let layer_size: u64 = u64::try_from(layer.size).unwrap_or_default();
+        if index > start && size.saturating_add(layer_size) > budget {
+            groups.push(&layers[start..index]);
+            start = index;
+            size = 0;
+        }
+        size = size.saturating_add(layer_size);
+    }
+    if start < layers.len() {
+        groups.push(&layers[start..]);
+    }
+    groups
+}
 
 /// OCI artifact sync processor configuration.
 ///
@@ -243,6 +270,24 @@ enum LayerFormat {
     Raw,
     Tar,
     TarGzip,
+}
+
+/// How to read a layer: an `oras push` file, titled with its path, is the
+/// file itself whatever its media type (oras types files as plain tar), and
+/// only a folder oras packed for unpacking is an archive; other layers go by
+/// their media type.
+fn layer_format(
+    media_type: &str,
+    annotations: Option<&std::collections::BTreeMap<String, String>>,
+) -> LayerFormat {
+    let annotation = |key: &str| annotations.and_then(|annotations| annotations.get(key));
+    match (
+        annotation("org.opencontainers.image.title"),
+        annotation("io.deis.oras.content.unpack").map(String::as_str),
+    ) {
+        (Some(_), Some("true")) | (None, _) => detect_layer_format(media_type),
+        (Some(_), _) => LayerFormat::Raw,
+    }
 }
 
 fn detect_layer_format(media_type: &str) -> LayerFormat {
@@ -639,6 +684,18 @@ impl flowgen_core::task::runner::Handler for EventHandler {
             let mut docker_state: std::collections::BTreeMap<String, PendingFileEvent> =
                 std::collections::BTreeMap::new();
             let mut total_uncompressed: u64 = 0;
+            let mut downloads = Vec::new();
+            for group in download_groups(&layers, DOWNLOAD_BUDGET) {
+                let mut group_downloads = Vec::with_capacity(group.len());
+                for layer in group {
+                    group_downloads.push(self.source.blob(&self.config.artifact, layer));
+                }
+                downloads.push(futures_util::future::try_join_all(group_downloads));
+            }
+            let mut blobs = futures_util::stream::iter(downloads)
+                .buffered(1)
+                .map_ok(|group| futures_util::stream::iter(group.into_iter().map(Ok::<_, Error>)))
+                .try_flatten();
             for (index, layer) in layers.iter().enumerate() {
                 let layer_title = layer
                     .annotations
@@ -646,9 +703,12 @@ impl flowgen_core::task::runner::Handler for EventHandler {
                     .and_then(|ann| ann.get("org.opencontainers.image.title"))
                     .cloned();
 
-                let buf = self.source.blob(&self.config.artifact, layer).await?;
+                let Some(buf) = blobs.next().await else {
+                    break;
+                };
+                let buf = buf?;
 
-                let format = detect_layer_format(&layer.media_type);
+                let format = layer_format(&layer.media_type, layer.annotations.as_ref());
                 let extracted = extract_layer_files(
                     buf,
                     format,
@@ -870,9 +930,8 @@ impl flowgen_core::task::runner::Runner for Processor {
         let retry_config =
             flowgen_core::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
 
-        let event_handler = match tokio_retry::Retry::spawn(
-            retry_config.init_strategy(self.task_context.startup_delay),
-            || async {
+        let event_handler =
+            match flowgen_core::task::runner::init(&self.task_context, &retry_config, || async {
                 match self.init().await {
                     Ok(handler) => Ok(handler),
                     Err(e) => {
@@ -880,13 +939,12 @@ impl flowgen_core::task::runner::Runner for Processor {
                         Err(tokio_retry::RetryError::transient(e))
                     }
                 }
-            },
-        )
-        .await
-        {
-            Ok(handler) => Arc::new(handler),
-            Err(e) => return Err(e),
-        };
+            })
+            .await?
+            {
+                Some(handler) => Arc::new(handler),
+                None => return Ok(()),
+            };
 
         flowgen_core::task::runner::process_events(
             self.rx,
@@ -1307,6 +1365,46 @@ mod tests {
             detect_layer_format("application/vnd.oci.image.layer.v1.tar"),
             LayerFormat::Tar
         ));
+    }
+
+    #[test]
+    fn layers_download_together_up_to_the_budget_and_a_large_one_alone() {
+        let layer = |size: i64| OciDescriptor {
+            size,
+            ..Default::default()
+        };
+        let layers = [layer(4), layer(4), layer(4), layer(20), layer(1)];
+
+        let groups: Vec<usize> = download_groups(&layers, 10)
+            .iter()
+            .map(|group| group.len())
+            .collect();
+
+        assert_eq!(groups, [2, 1, 1, 1]);
+        assert!(download_groups(&[], 10).is_empty());
+    }
+
+    #[test]
+    fn an_oras_file_is_read_as_is_and_only_a_packed_folder_is_unpacked() {
+        let tar = "application/vnd.oci.image.layer.v1.tar";
+        let annotations = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let file = annotations(&[("org.opencontainers.image.title", "gemini/README.md")]);
+        let folder = annotations(&[
+            ("org.opencontainers.image.title", "gemini"),
+            ("io.deis.oras.content.unpack", "true"),
+        ]);
+
+        assert!(matches!(layer_format(tar, Some(&file)), LayerFormat::Raw));
+        assert!(matches!(
+            layer_format("application/vnd.oci.image.layer.v1.tar+gzip", Some(&folder)),
+            LayerFormat::TarGzip
+        ));
+        assert!(matches!(layer_format(tar, None), LayerFormat::Tar));
     }
 
     #[test]

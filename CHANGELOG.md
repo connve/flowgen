@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.157.0
+
+### Added
+
+- The menu of a file a template installed has Uninstall, which proposes
+  removing all the template's files. `GET /api/workspace/templates` lists
+  the installed templates.
+- The chart's `extraVolumes` and `extraVolumeMounts` add volumes to the
+  flowgen pod as they are, such as a PersistentVolumeClaim.
+
+### Changed
+
+- A workspace started by `flowgen` keeps the system resources in
+  `resources/system/`, next to the system flows; `flowgen bootstrap` adds
+  them to an existing workspace. With `--config`, flowgen serves them with
+  `flows.system`.
+- `web.path` defaults to `/flowgen`, as in a workspace started by `flowgen`.
+- `oci_sync` downloads an artifact's layers together, up to 64 MB at a time.
+- The update check runs every hour, and the web UI checks again when it
+  comes back into view.
+- Compact logs are colored only on a terminal, and not with `NO_COLOR` set.
+- A NATS cache not reachable at start is retried with the `retry` settings.
+- The Agents page without models offers onboarding your coding agents next
+  to Add a model, and the offer can be dismissed.
+
+### Fixed
+
+- A flow whose task cannot start, such as one missing its credentials,
+  stops at once, so removing or reinstalling a template takes seconds.
+- `oci_sync` reads a catalog pushed with `oras push`: a file is read as it
+  is, and only a folder oras packed is unpacked.
+- The release flow skips a workspace with no flows or resources yet.
+- With a custom `web.path`, the web UI rewrites only the paths that start
+  with `/flowgen`, so the links to the docs keep theirs.
+- Markdown in the web UI uses the theme's colors in dark mode.
+
 ## 0.156.0
 
 ### Changed

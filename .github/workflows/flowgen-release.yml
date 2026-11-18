@@ -272,6 +272,19 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # Keeps the compiled dependencies of each target between releases; a
+      # changed Cargo.lock starts from the previous cache.
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: macos-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            macos-${{ matrix.target }}-
+
       - name: Install dependencies
         run: brew install protobuf
 

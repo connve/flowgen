@@ -250,7 +250,11 @@ impl Runner for Processor {
         // left behind is never read.
         let mut rx = std::mem::replace(&mut self.rx, tokio::sync::mpsc::channel(1).1);
 
-        let mut event_handler = self.init_retrying(&retry_config).await?;
+        let mut event_handler = tokio::select! {
+            biased;
+            _ = self.task_context.stop_reading.cancelled() => return Ok(()),
+            handler = self.init_retrying(&retry_config) => handler?,
+        };
 
         // Set by a publish that exhausted its retries. The gRPC channel is
         // established once at init and never repaired in place, so a dropped

@@ -28,7 +28,7 @@ Then run `flowgen`.
 | `flowgen --config <file>` | Runs with an app config file, as in a cluster. `CONFIG_PATH` sets it too. |
 | `flowgen validate [<folder>] [--json]` | [Checks the flows and resources](/docs/flowgen/concepts/configuration#validating-a-workspace) of a workspace without running them. Exits with 1 when there are issues. |
 | `flowgen test <script> --data <samples>` | [Runs a Rhai script](/docs/flowgen/concepts/configuration#testing-a-script) on sample events and prints the events it emits. |
-| `flowgen bootstrap [<folder>]` | Commits the system flows of this version to a workspace, after an upgrade. |
+| `flowgen bootstrap [<folder>]` | Commits the system flows and resources of this version to a workspace, after an upgrade. |
 | `flowgen --version` | Prints the version. |
 | `flowgen --help` | Lists the commands and options. |
 

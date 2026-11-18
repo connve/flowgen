@@ -84,7 +84,7 @@
 
 	onMount(() => theme.start());
 
-	onMount(async () => {
+	async function loadVersion() {
 		if (data.login) return;
 		try {
 			const { data } = await getVersion();
@@ -93,7 +93,14 @@
 		} catch {
 			// version is optional
 		}
-	});
+	}
+
+	onMount(loadVersion);
+
+	// A tab left open sees a release that came out meanwhile when it's back in view.
+	function onVisibilityChange() {
+		if (document.visibilityState === 'visible') loadVersion();
+	}
 
 	// Providers vary in which of these they issue, and `user_id` is whatever
 	// claim `web.auth.user_id_claim` names — an opaque id for the default `sub`.
@@ -193,3 +200,4 @@
 {/if}
 
 <svelte:window onkeydown={onWindowKeydown} />
+<svelte:document onvisibilitychange={onVisibilityChange} />

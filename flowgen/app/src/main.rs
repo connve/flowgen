@@ -18,7 +18,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 #[command(
     name = "flowgen",
     version,
-    about = "Data activation with a blast 💥",
+    about = "Composable data activation platform",
     subcommand_negates_reqs = true
 )]
 struct Cli {
@@ -287,6 +287,16 @@ fn determine_log_format() -> LogFormat {
     }
 }
 
+/// Whether compact logs are colored: only on a terminal, and not when
+/// `NO_COLOR` is set.
+fn colored_logs() -> bool {
+    let no_color = match env::var_os("NO_COLOR") {
+        Some(value) => !value.is_empty(),
+        None => false,
+    };
+    std::io::stdout().is_terminal() && !no_color
+}
+
 fn init_tracing(metrics_store: Arc<dyn MetricsStore>, logs_writer: Option<MemoryLogsStoreWriter>) {
     let format = determine_log_format();
 
@@ -302,7 +312,9 @@ fn init_tracing(metrics_store: Arc<dyn MetricsStore>, logs_writer: Option<Memory
 
     match format {
         LogFormat::Compact => {
-            let fmt_layer = tracing_subscriber::fmt::layer().compact();
+            let fmt_layer = tracing_subscriber::fmt::layer()
+                .compact()
+                .with_ansi(colored_logs());
             tracing_subscriber::registry()
                 .with(env_filter)
                 .with(activity_layer)
@@ -435,7 +447,24 @@ async fn run(mode: Mode) {
         process::exit(1);
     }
 
-    let cache = match App::init_cache(&app_config, None).await {
+    // A NATS cache not reachable yet, as when it starts together with
+    // flowgen, is retried; a local file cache fails at once.
+    let cache_delays = match app_config.cache_options().cache_type {
+        flowgen::config::CacheType::Nats => {
+            flowgen_core::retry::RetryConfig::merge(&app_config.retry, &None).strategy()
+        }
+        flowgen::config::CacheType::Redb => Box::new(std::iter::empty()),
+    };
+    let connecting = tokio_retry::Retry::spawn_notify(
+        cache_delays,
+        || async {
+            App::init_cache(&app_config, None)
+                .await
+                .map_err(tokio_retry::RetryError::transient)
+        },
+        |error, delay| eprintln!("Failed to build cache, retrying in {delay:?}: {error}"),
+    );
+    let cache = match connecting.await {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Failed to build cache: {}", e);
