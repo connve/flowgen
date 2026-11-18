@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.156.0
+
+### Changed
+
+- The Connve hub flow reads the hub's `latest` catalog, so a flowgen release
+  needs no hub release with the same number. `flowgen bootstrap` updates the
+  flow in an existing workspace.
+
+### Fixed
+
+- A workspace started by `flowgen` releases and deploys its flows at start,
+  rather than a minute later on the release flow's first tick.
+- The Agents page without models spans the page again, with the link to
+  Agent setup under Add a model.
+- On touch screens the web UI and docs show no tooltips, and fields use 16px
+  text, so iOS doesn't zoom in.
+
 ## 0.155.0
 
 ### Breaking

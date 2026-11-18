@@ -13,11 +13,12 @@ flow:
         name: on_request
         ack_timeout: 60s
 
-    # Returns the hub's flowgen catalog for this version of flowgen. One
-    # attempt, so the web UI shows why a hub is unavailable instead of waiting.
+    # Returns the hub's latest flowgen catalog; a template that needs a newer
+    # flowgen fails validation before it can be approved. One attempt, so the
+    # web UI shows why a hub is unavailable instead of waiting.
     - oci_sync:
         name: read_hub
-        artifact: "ghcr.io/connve/hub/flowgen:{{env.FLOWGEN_VERSION}}"
+        artifact: "ghcr.io/connve/hub/flowgen:latest"
         force_pull: true
         retry:
           max_attempts: 1

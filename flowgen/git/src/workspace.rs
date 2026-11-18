@@ -183,6 +183,16 @@ pub fn committed(root: &Path, paths: &[String]) -> Result<Vec<Option<String>>, E
     Ok(contents)
 }
 
+/// The commit checked out in the repository at `root`, or `None` before the first.
+pub fn head(root: &Path) -> Result<Option<String>, Error> {
+    let repo = gix::open(root).map_err(repository)?;
+    match repo.head_id() {
+        Ok(id) => Ok(Some(id.to_string())),
+        Err(gix::reference::head_id::Error::PeelToId(_)) => Ok(None),
+        Err(source) => Err(repository(source)),
+    }
+}
+
 /// Commits each of `files` (path within the workspace and content) that the
 /// last commit lacks onto the checked-out branch, as the git user of this
 /// machine, and returns the paths it added. Files the commit holds are kept.
