@@ -31,7 +31,7 @@
 		"vite": "^7.3.1"
 	},
 	"dependencies": {
-		"@connve/ui": "^0.3.0",
+		"@connve/ui": "^0.3.1",
 		"@iconify/svelte": "^5.2.4",
 		"github-slugger": "^2.0.0",
 		"lucide-svelte": "^1.0.1",
