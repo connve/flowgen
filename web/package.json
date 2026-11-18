@@ -3,7 +3,7 @@
 	"version": "0.155.0",
 	"private": true,
 	"scripts": {
-		"gen-api": "openapi-ts",
+		"gen-api": "svelte-kit sync && openapi-ts",
 		"predev": "npm run gen-api",
 		"prebuild": "npm run gen-api",
 		"dev": "vite dev",

@@ -102,6 +102,16 @@ jobs:
       run: |
         sudo apt update -qq
         sudo apt-get -qq install pkg-config libssl-dev protobuf-compiler git
+    # The SOPS test decrypts with the sops binary what flowgen wrote.
+    - name: Install sops
+      env:
+        SOPS_VERSION: v3.13.3
+      run: |
+        base="https://github.com/getsops/sops/releases/download/${SOPS_VERSION}"
+        curl -fsSLO "${base}/sops-${SOPS_VERSION}.linux.amd64"
+        curl -fsSLO "${base}/sops-${SOPS_VERSION}.checksums.txt"
+        grep " sops-${SOPS_VERSION}.linux.amd64$" "sops-${SOPS_VERSION}.checksums.txt" | sha256sum -c -
+        sudo install -m 0755 "sops-${SOPS_VERSION}.linux.amd64" /usr/local/bin/sops
     - name: Run integration tests
       env:
         FLOWGEN_SKIP_WEB_BUILD: "1"
