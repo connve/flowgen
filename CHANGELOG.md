@@ -287,6 +287,7 @@
 - Without `RUST_LOG`, flowgen logs its own messages from `info` and only
   warnings and errors from libraries.
 - Resources lists the size of system resources.
+- A workspace commits on a machine without a git user, as `flowgen`.
 - A credentials form doesn't repeat the chosen way as the label of its only
   field.
 

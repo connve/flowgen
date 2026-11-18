@@ -293,7 +293,6 @@ pub(crate) fn machine_user(repo: &gix::Repository) -> (String, String) {
         _ => (FALLBACK_NAME.to_string(), FALLBACK_EMAIL.to_string()),
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

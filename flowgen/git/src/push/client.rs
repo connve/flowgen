@@ -148,6 +148,23 @@ fn write_error(source: impl std::error::Error + Send + Sync + 'static) -> Error 
     }
 }
 
+/// Gives `repo`, in memory only, `author` as its user when the machine has
+/// none, since moving a branch writes the user into the reflog.
+pub(crate) fn ensure_committer(repo: &mut gix::Repository, author: &Author) -> Result<(), Error> {
+    if let Some(Ok(_)) = repo.committer() {
+        return Ok(());
+    }
+    let mut config = repo.config_snapshot_mut();
+    config
+        .set_value(&gix::config::tree::User::NAME, author.name.as_str())
+        .map_err(write_error)?;
+    config
+        .set_value(&gix::config::tree::User::EMAIL, author.email.as_str())
+        .map_err(write_error)?;
+    config.commit().map_err(write_error)?;
+    Ok(())
+}
+
 /// What a file must contain on the branch for a change to apply.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expected {
@@ -553,10 +570,11 @@ impl Commit {
         prefix: &str,
         interrupt: &AtomicBool,
     ) -> Result<Pushed, Error> {
-        let repo = gix::open(&self.repository_path).map_err(|source| Error::OpenRepository {
-            path: self.repository_path.display().to_string(),
-            source: Box::new(source),
-        })?;
+        let mut repo =
+            gix::open(&self.repository_path).map_err(|source| Error::OpenRepository {
+                path: self.repository_path.display().to_string(),
+                source: Box::new(source),
+            })?;
         let author = match author {
             Some(author) => author.clone(),
             None => {
@@ -564,6 +582,7 @@ impl Commit {
                 Author { name, email }
             }
         };
+        ensure_committer(&mut repo, &author)?;
         let checked_out = repo.head_name().map_err(read_error)?;
         let branch = match (&self.branch, checked_out) {
             (Some(branch), Some(head)) if head.shorten() == branch.as_str() => branch.clone(),
@@ -1727,7 +1746,15 @@ mod tests {
     #[tokio::test]
     async fn without_a_branch_the_commit_lands_on_the_checked_out_one() {
         let (_dir, root) = workspace(&[]);
-        let repo = gix::open(&root).unwrap();
+        let mut repo = gix::open(&root).unwrap();
+        ensure_committer(
+            &mut repo,
+            &Author {
+                name: "a".to_string(),
+                email: "a@example.com".to_string(),
+            },
+        )
+        .unwrap();
         let first = repo.head_id().unwrap().detach();
         repo.reference(
             "refs/heads/master",

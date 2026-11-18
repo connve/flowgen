@@ -1000,7 +1000,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("w");
         crate::workspace::init(&root, &[("flows/a.yaml".to_string(), "a")]).unwrap();
-        let repo = gix::open(&root).unwrap();
+        let mut repo = gix::open(&root).unwrap();
+        crate::push::client::ensure_committer(
+            &mut repo,
+            &crate::push::client::Author {
+                name: "a".to_string(),
+                email: "a@example.com".to_string(),
+            },
+        )
+        .unwrap();
         let head = repo.head_id().unwrap().detach();
         repo.reference(
             "refs/heads/master",
