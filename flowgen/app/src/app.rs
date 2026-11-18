@@ -867,8 +867,10 @@ impl App {
             ),
             None => (None, false),
         };
-        let mut loader = flowgen_core::resource::ResourceLoader::new(path)
-            .with_defaults(crate::local::system_resources());
+        let mut loader = flowgen_core::resource::ResourceLoader::new(path);
+        if app_config.flows.system {
+            loader = loader.with_defaults(crate::local::system_resources());
+        }
         if cached {
             let bucket = app_config.cache_options().system.db_name;
             match system.open_sibling(&app_config, &bucket).await {

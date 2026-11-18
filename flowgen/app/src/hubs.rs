@@ -163,6 +163,30 @@ pub(crate) async fn list_templates(
     Ok(Json(api::HubTemplates { templates }))
 }
 
+/// `GET /api/workspace/templates`: the templates the deployed `flowgen.lock` holds.
+pub(crate) async fn list_installed(
+    State(state): State<Arc<WebState>>,
+) -> Json<api::InstalledTemplates> {
+    let lock = match state.flows_cache.as_deref() {
+        Some(cache) => crate::lock::Lock::parse(crate::lock::deployed(cache).await.as_deref()),
+        None => crate::lock::Lock::default(),
+    };
+    let templates = lock
+        .templates
+        .into_iter()
+        .filter_map(|(key, locked)| {
+            let (hub, slug) = key.split_once('/')?;
+            Some(api::InstalledTemplate {
+                hub: hub.to_string(),
+                slug: slug.to_string(),
+                digest: locked.digest,
+                files: locked.files,
+            })
+        })
+        .collect();
+    Json(api::InstalledTemplates { templates })
+}
+
 /// `templates` of `hub` with the digest and files `lock` holds for those installed.
 fn installed(
     templates: Vec<api::HubTemplate>,

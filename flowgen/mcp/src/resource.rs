@@ -188,9 +188,8 @@ impl Runner for Processor {
         let retry_config =
             flowgen_core::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
 
-        let event_handler = tokio_retry::Retry::spawn(
-            retry_config.init_strategy(self.task_context.startup_delay),
-            || async {
+        let event_handler =
+            match flowgen_core::task::runner::init(&self.task_context, &retry_config, || async {
                 match self.init().await {
                     Ok(handler) => Ok(handler),
                     Err(e) => {
@@ -198,9 +197,12 @@ impl Runner for Processor {
                         Err(tokio_retry::RetryError::transient(e))
                     }
                 }
-            },
-        )
-        .await?;
+            })
+            .await?
+            {
+                Some(handler) => handler,
+                None => return Ok(()),
+            };
 
         let cfg = &event_handler.config;
         let flow_name = self.task_context.flow.identity();

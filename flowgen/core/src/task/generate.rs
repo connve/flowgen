@@ -574,11 +574,8 @@ impl crate::task::runner::Runner for Subscriber {
             crate::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
         let cancellation_token = self.task_context.cancellation_token.clone();
 
-        // Initialise with retry. Cancellation during init returns early so the
-        // task tears down without waiting for the retry strategy to exhaust.
-        let init_future = tokio_retry::Retry::spawn(
-            retry_config.init_strategy(self.task_context.startup_delay),
-            || async {
+        let event_handler =
+            match crate::task::runner::init(&self.task_context, &retry_config, || async {
                 match self.init().await {
                     Ok(handler) => Ok(handler),
                     // A bad config cannot fix itself, so fail fast instead of retrying.
@@ -591,16 +588,12 @@ impl crate::task::runner::Runner for Subscriber {
                         Err(tokio_retry::RetryError::transient(e))
                     }
                 }
-            },
-        );
-
-        let event_handler = tokio::select! {
-            _ = cancellation_token.cancelled() => return Ok(()),
-            result = init_future => match result {
-                Ok(handler) => handler,
-                Err(e) => return Err(e),
-            },
-        };
+            })
+            .await?
+            {
+                Some(handler) => handler,
+                None => return Ok(()),
+            };
 
         // Scheduled tasks are long-lived and retry forever like other
         // subscribers; run-once gives up after the configured attempts.

@@ -195,7 +195,7 @@ Embedded web dashboard and JSON API.
 |---|---|---|---|
 | `enabled` | bool | required | Set `true` to start the server. |
 | `port` | int | `8080` | Listening port. |
-| `path` | string | `/` | Path prefix for both the UI and the API. |
+| `path` | string | `/flowgen` | Path prefix for both the UI and the API. |
 | `headers` | map of string to string | `{}` | HTTP headers sent with every request the web server makes to the AI gateway for the Agents tab, such as a key the gateway requires. |
 | `agents.enabled` | bool | required | Shows the Agents tab and enables `/api/agents`. Omit `agents` to hide the tab. |
 | `agents.session_history_ttl` | duration | `30d` | How long a session is kept after its last message; `0` keeps it indefinitely. |
@@ -208,7 +208,7 @@ Embedded web dashboard and JSON API.
 | `frame_ancestors` | list of string | `["'self'"]` | Who may show the web UI in a frame, as Content-Security-Policy `frame-ancestors` sources, e.g. `https://console.example.com`. |
 | `update_check.enabled` | bool | `true` | Checks for a newer flowgen release and shows it next to the version in the web UI. |
 | `update_check.url` | string | `https://api.github.com/repos/connve/flowgen/releases/latest` | Where the newest release is read from, as a GitHub releases API `latest` response. Point it at a mirror when the server has no internet access. |
-| `update_check.interval` | duration | `24h` | How often to check. |
+| `update_check.interval` | duration | `1h` | How often to check. |
 | `authoring.enabled` | bool | required | Enables change proposals. See [Authoring](/docs/flowgen/concepts/authoring). |
 | `authoring.targets` | list | one `workspace` target over `flows/` and `resources/` | Where changes can be proposed. See [Targets](/docs/flowgen/concepts/authoring#targets). |
 | `authoring.targets[].name` | string | required | Name shown on the target's changes. |
@@ -352,7 +352,7 @@ Flowgen validates the config at startup. Any field with a typo, missing required
 
 Without `--config`, flowgen runs on a workspace folder: `flowgen <folder>`, or `FLOWGEN_HOME`, or `~/flowgen`. A new folder becomes a git repository with one commit holding the system flows in `flows/system/`, `.system-flows` and `.sops.yaml`; a folder inside a git repository becomes a workspace of that repository, so one repository can hold a folder per environment. Each run starts the [lifecycle flows](/docs/flowgen/concepts/authoring#lifecycle-flows) from the last commit, and every other flow loads from the cache in `.flowgen/state.redb`. The config is `host: 127.0.0.1` with the web UI, HTTP server, MCP server, AI gateway and telemetry on. `APP_` environment variables change it.
 
-A run on a workspace whose system flows differ from the running version says so. `flowgen bootstrap [<folder>]` commits the system flows of the running version that are missing or differ, lists them in `.system-flows`, and deletes a system flow an earlier bootstrap listed that the running version lacks. A flow you added to `flows/system/`, such as a hub, is not on the list and stays.
+A run on a workspace whose system flows differ from the running version says so. `flowgen bootstrap [<folder>]` commits the system flows of the running version, and their resources in `resources/system/`, that are missing or differ, lists them in `.system-flows`, and deletes a file an earlier bootstrap listed that the running version lacks. A flow you added to `flows/system/`, such as a hub, is not on the list and stays.
 
 ## Testing a script
 

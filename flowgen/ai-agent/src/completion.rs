@@ -2311,9 +2311,8 @@ impl flowgen_core::task::runner::Runner for Processor {
         let retry_config =
             flowgen_core::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
 
-        let event_handler = match tokio_retry::Retry::spawn(
-            retry_config.init_strategy(self.task_context.startup_delay),
-            || async {
+        let event_handler =
+            match flowgen_core::task::runner::init(&self.task_context, &retry_config, || async {
                 match self.init().await {
                     Ok(handler) => Ok(handler),
                     Err(e) => {
@@ -2326,15 +2325,12 @@ impl flowgen_core::task::runner::Runner for Processor {
                         }
                     }
                 }
-            },
-        )
-        .await
-        {
-            Ok(handler) => Arc::new(handler),
-            Err(e) => {
-                return Err(e);
-            }
-        };
+            })
+            .await?
+            {
+                Some(handler) => Arc::new(handler),
+                None => return Ok(()),
+            };
 
         let sweeper = user_mcp_server(&self.config).map(|_| {
             let event_handler = Arc::clone(&event_handler);

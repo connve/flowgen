@@ -27,7 +27,7 @@ flowgen reads a resource from the first place that has it:
 
 1. A file under `resources.path`.
 2. The cache, if `resources.cache.enabled` is on. It's the same cache your flows use: a local redb file, or NATS.
-3. flowgen's own resources, under `system/`.
+3. With `flows.system`, the resources of this version's system flows, under `system/`. A workspace started by `flowgen` keeps them in `resources/system/`, next to its system flows.
 
 `flowgen` turns the cache on for you. With `--config`, set `resources.path`, `resources.cache` or both.
 

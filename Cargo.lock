@@ -2627,7 +2627,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen"
-version = "0.156.0"
+version = "0.157.0"
 dependencies = [
  "age",
  "arrow",
@@ -2695,7 +2695,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen-chart-tests"
-version = "0.156.0"
+version = "0.157.0"
 dependencies = [
  "config",
  "flowgen",
@@ -2705,7 +2705,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_ai_agent"
-version = "0.156.0"
+version = "0.157.0"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
@@ -2744,7 +2744,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_braze"
-version = "0.156.0"
+version = "0.157.0"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
@@ -2761,7 +2761,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_client"
-version = "0.156.0"
+version = "0.157.0"
 dependencies = [
  "bytes",
  "chrono",
@@ -2778,7 +2778,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_core"
-version = "0.156.0"
+version = "0.157.0"
 dependencies = [
  "aes-gcm",
  "age",
@@ -2837,7 +2837,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_gcp"
-version = "0.156.0"
+version = "0.157.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -2867,7 +2867,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_git"
-version = "0.156.0"
+version = "0.157.0"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
@@ -2891,7 +2891,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_html"
-version = "0.156.0"
+version = "0.157.0"
 dependencies = [
  "async-trait",
  "flowgen_core",
@@ -2906,7 +2906,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_http"
-version = "0.156.0"
+version = "0.157.0"
 dependencies = [
  "arrow-json",
  "async-trait",
@@ -2933,7 +2933,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_kafka"
-version = "0.156.0"
+version = "0.157.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -2961,7 +2961,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_klaviyo"
-version = "0.156.0"
+version = "0.157.0"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
@@ -2978,7 +2978,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_kv_store"
-version = "0.156.0"
+version = "0.157.0"
 dependencies = [
  "async-nats",
  "async-trait",
@@ -3000,7 +3000,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_macros"
-version = "0.156.0"
+version = "0.157.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3009,7 +3009,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_mcp"
-version = "0.156.0"
+version = "0.157.0"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
@@ -3039,7 +3039,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_mongodb"
-version = "0.156.0"
+version = "0.157.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -3070,7 +3070,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_mssql"
-version = "0.156.0"
+version = "0.157.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -3095,7 +3095,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_nats"
-version = "0.156.0"
+version = "0.157.0"
 dependencies = [
  "arrow",
  "async-nats",
@@ -3125,7 +3125,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_object_store"
-version = "0.156.0"
+version = "0.157.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -3150,13 +3150,14 @@ dependencies = [
 
 [[package]]
 name = "flowgen_oci"
-version = "0.156.0"
+version = "0.157.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
  "bytes",
  "flate2",
  "flowgen_core",
+ "futures-util",
  "http",
  "humantime-serde",
  "oci-client",
@@ -3174,7 +3175,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_postgres"
-version = "0.156.0"
+version = "0.157.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -3205,7 +3206,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_salesforce"
-version = "0.156.0"
+version = "0.157.0"
 dependencies = [
  "apache-avro",
  "arrow",

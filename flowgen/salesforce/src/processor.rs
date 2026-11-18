@@ -813,16 +813,18 @@ impl<C: Operation> flowgen_core::task::runner::Runner for Processor<C> {
             &self.config.retry().cloned(),
         );
 
-        let handler = tokio_retry::Retry::spawn(
-            retry_config.init_strategy(self.task_context.startup_delay),
-            || async {
+        let handler =
+            match flowgen_core::task::runner::init(&self.task_context, &retry_config, || async {
                 self.init().await.map_err(|e| {
                     error!(error = %e, "Failed to initialize the Salesforce task");
                     tokio_retry::RetryError::transient(e)
                 })
-            },
-        )
-        .await?;
+            })
+            .await?
+            {
+                Some(handler) => handler,
+                None => return Ok(()),
+            };
 
         flowgen_core::task::runner::process_events(
             self.rx,

@@ -306,6 +306,19 @@ flowgen:
     #   secretName: "my-gcp-secret"
     #   mountPath: /etc/gcp
 
+  # Volumes and mounts added to the pod as they are, for what `volumes`
+  # doesn't cover, such as a PersistentVolumeClaim.
+  # Example:
+  #   extraVolumes:
+  #     - name: workspace
+  #       persistentVolumeClaim:
+  #         claimName: flowgen-workspace
+  #   extraVolumeMounts:
+  #     - name: workspace
+  #       mountPath: /workspace
+  extraVolumes: []
+  extraVolumeMounts: []
+
   resources: {}
     # limits:
     #   cpu: 500m

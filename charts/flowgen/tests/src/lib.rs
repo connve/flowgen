@@ -275,6 +275,30 @@ fn listed_credentials_are_mounted_together_read_only() {
 }
 
 #[test]
+fn extra_volumes_are_added_to_the_pod_as_they_are() {
+    let manifests = render(
+        "flowgen:\n  extraVolumes:\n    - name: workspace\n      persistentVolumeClaim:\n        claimName: data\n  extraVolumeMounts:\n    - name: workspace\n      mountPath: /workspace\n",
+    );
+    let deployment = find_deployment(&manifests);
+    let pod = pod_spec(&deployment);
+    let volume = pod["volumes"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|volume| volume["name"] == "workspace")
+        .expect("the extra volume");
+    let mount = pod["containers"][0]["volumeMounts"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|mount| mount["name"] == "workspace")
+        .expect("the extra mount");
+
+    assert_eq!(volume["persistentVolumeClaim"]["claimName"], "data");
+    assert_eq!(mount["mountPath"], "/workspace");
+}
+
+#[test]
 fn default_deployment_renders_without_host_network() {
     let manifests = render("");
     let deployment = find_deployment(&manifests);

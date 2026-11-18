@@ -1078,9 +1078,17 @@
 	{:else if modelsEmpty}
 		<div class="flex flex-1 items-center justify-center">
 			<StateMessage tone="notice" title={m.agents_models_empty_title()}>
-				<div class="flex flex-col items-center gap-6">
+				<div class="flex flex-col items-center gap-3">
 					<a href="{base}/new?kind=flow" class="btn btn-primary btn-sm">{m.agents_models_add()}</a>
-					<CodingAgentsLink href={AGENT_SETUP_URL} label={m.agents_connect_coding_agent()} />
+					{#if !codingAgentsHidden}
+						<span class="text-xs text-base-content/50">{m.agents_or()}</span>
+						<CodingAgentsLink
+							href={AGENT_SETUP_URL}
+							label={m.agents_connect_coding_agent()}
+							ondismiss={hideCodingAgents}
+							dismissLabel={m.agents_connect_coding_agent_dismiss()}
+						/>
+					{/if}
 				</div>
 			</StateMessage>
 		</div>

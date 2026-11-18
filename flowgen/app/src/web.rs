@@ -25,13 +25,14 @@ use tracing::{info, warn};
 /// Default port for the web server.
 pub const DEFAULT_WEB_PORT: u16 = 8080;
 
-/// Default path prefix for the web UI.
-pub const DEFAULT_WEB_PATH: &str = "/";
-
 /// Base path the SvelteKit bundle was compiled with (`PUBLIC_BASE`
 /// in `web/svelte.config.js`). `serve_embedded` rewrites this to
 /// whatever `web.path` was configured.
 pub const BUILT_BASE_PATH: &str = "/flowgen";
+
+/// Default path prefix for the web UI: the bundle's own, so the default
+/// serves it as built.
+pub const DEFAULT_WEB_PATH: &str = BUILT_BASE_PATH;
 
 /// SSE event name carrying `FlowMetricsSnapshot` payloads on `/api/flows/stream`.
 const SSE_EVENT_SNAPSHOT: &str = "snapshot";
@@ -179,6 +180,7 @@ fn key_may_call(api_prefix: &str, method: &axum::http::Method, path: &str) -> bo
             "/changes",
             "/version",
             "/workspace/file",
+            "/workspace/templates",
             "/docs",
             "/hubs",
         ]
@@ -385,6 +387,10 @@ fn router(path: &str, mut state: WebState) -> Router {
         .route(
             &format!("{api_prefix}/workspace/file"),
             get(crate::authoring::workspace_file),
+        )
+        .route(
+            &format!("{api_prefix}/workspace/templates"),
+            get(crate::hubs::list_installed),
         )
         .route(
             &format!("{api_prefix}/changes"),
@@ -2381,18 +2387,30 @@ fn rewrite_base_path(asset_path: &str, bytes: &[u8], prefix: &str) -> Option<Vec
         _ => return None,
     }
     let text = std::str::from_utf8(bytes).ok()?;
-    // Slashed form first so the bare replace does not overwrite
-    // asset URLs that share the `/flowgen` prefix.
-    let slashed_replacement = match prefix {
-        "" => "/".to_string(),
-        other => format!("{other}/"),
-    };
-    let slashed_needle = format!("{BUILT_BASE_PATH}/");
-    let rewritten = text
-        .replace(&slashed_needle, &slashed_replacement)
-        .replace(BUILT_BASE_PATH, prefix);
+    let mut rewritten = String::with_capacity(text.len());
+    let mut copied = 0;
+    for (at, _) in text.match_indices(BUILT_BASE_PATH) {
+        let end = at + BUILT_BASE_PATH.len();
+        let opens = text[..at].chars().next_back();
+        let closes = text[end..].chars().next();
+        let starts_url = matches!(opens, Some(c) if URL_OPENERS.contains(&c))
+            && matches!(closes, Some(c) if URL_CONTINUATIONS.contains(&c));
+        if starts_url {
+            rewritten.push_str(&text[copied..at]);
+            rewritten.push_str(prefix);
+            copied = end;
+        }
+    }
+    rewritten.push_str(&text[copied..]);
     Some(rewritten.into_bytes())
 }
+
+/// What comes before the base path where it starts a URL: a quote or `url(`.
+const URL_OPENERS: [char; 4] = ['"', '\'', '`', '('];
+
+/// What comes after the base path where it starts a URL: the rest of the
+/// path, or the end of the string.
+const URL_CONTINUATIONS: [char; 5] = ['/', '"', '\'', '`', ')'];
 
 #[cfg(test)]
 pub(crate) mod tests {
@@ -2402,7 +2420,7 @@ pub(crate) mod tests {
     #[test]
     fn test_default_constants() {
         assert_eq!(DEFAULT_WEB_PORT, 8080);
-        assert_eq!(DEFAULT_WEB_PATH, "/");
+        assert_eq!(DEFAULT_WEB_PATH, "/flowgen");
     }
 
     pub(crate) fn test_state() -> WebState {
@@ -2685,6 +2703,7 @@ pub(crate) mod tests {
             (Method::GET, "/f/api/flows/a/b"),
             (Method::GET, "/f/api/changes/abc"),
             (Method::GET, "/f/api/workspace/file"),
+            (Method::GET, "/f/api/workspace/templates"),
             (Method::GET, "/f/api/docs/ai/mcp"),
             (Method::GET, "/f/api/hubs/connve/templates"),
             (Method::POST, "/f/api/changes"),
@@ -4687,6 +4706,17 @@ pub(crate) mod tests {
         let out = rewrite_base_path("index.html", html, "").expect("rewrite");
         let text = std::str::from_utf8(&out).unwrap();
         assert_eq!(text, r#"<link href="/style.css">"#);
+    }
+
+    #[test]
+    fn rewrite_base_path_leaves_other_paths_that_contain_the_base() {
+        let js = br#"a="/mcp/v1/system/flowgen_agent";b="https://connve.com/docs/flowgen/x";c=`/flowgen/${d}`"#;
+        let out = rewrite_base_path("app.js", js, "").expect("rewrite");
+        let text = std::str::from_utf8(&out).unwrap();
+        assert_eq!(
+            text,
+            r#"a="/mcp/v1/system/flowgen_agent";b="https://connve.com/docs/flowgen/x";c=`/${d}`"#
+        );
     }
 
     #[test]

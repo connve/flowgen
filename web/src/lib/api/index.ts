@@ -100,6 +100,7 @@ export type AuthoringTarget = Types.AuthoringTarget;
 export type ValidationIssue = Types.ValidationIssue;
 export type Hub = Types.Hub;
 export type HubTemplate = Types.HubTemplate;
+export type InstalledTemplate = Types.InstalledTemplate;
 export type SessionMessage = Types.SessionMessage;
 export type Session = Types.Session;
 export type SessionSummary = Types.SessionSummary;

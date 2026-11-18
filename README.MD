@@ -2,11 +2,27 @@
 
 [![CI](https://github.com/connve/flowgen/actions/workflows/test.yml/badge.svg)](https://github.com/connve/flowgen/actions/workflows/test.yml) [![License: MPL 2.0](https://img.shields.io/badge/License-MPL%202.0-brightgreen.svg)](https://opensource.org/licenses/MPL-2.0) [![GitHub release](https://img.shields.io/github/v/release/connve/flowgen)](https://github.com/connve/flowgen/releases)
 
-Flowgen is a configuration-based data activation workflow application written in Rust.
+Flowgen is an open-source composable data activation platform. Turn your data into the next best action!
 
 ## Overview
 
-Flowgen executes data activation workflows defined in YAML configuration files. A flow consists of sequential tasks with support for error handling and retries. The system supports integrations with object stores, HTTP APIs, Salesforce, and other data sources.
+Flowgen doesn't own your data or replace your stack. It sits between the systems you already have, your warehouse, your CRM, your marketing tools, and you compose flows from small tasks: read, transform, call, write. A flow can run on a schedule, react to events, serve an HTTP endpoint or become a tool for your agents, and one flow can call another.
+
+One binary, no database, with a web UI, an MCP server and an AI gateway. See [Why Flowgen](https://connve.com/docs/flowgen/getting-started/why-flowgen) and the [docs](https://connve.com/docs/flowgen).
+
+## Install
+
+```bash
+brew install connve/tap/flowgen
+```
+
+or
+
+```bash
+curl -fsSL https://connve.com/flowgen/install.sh | sh
+```
+
+Then run `flowgen`. The first run creates a workspace in `~/flowgen` and opens the web UI at `http://127.0.0.1:8080/flowgen/`.
 
 ## Deployment
 
@@ -25,12 +41,12 @@ Chart configuration options are documented in [charts/flowgen/values.yaml](chart
 ### Docker
 
 ```bash
-docker pull ghcr.io/connve-labs/flowgen:latest
+docker pull ghcr.io/connve/flowgen:latest
 
 docker run \
   -v $(pwd)/config.yaml:/etc/app/config.yaml \
   -v $(pwd)/flows:/etc/app/flows \
-  ghcr.io/connve-labs/flowgen:latest
+  ghcr.io/connve/flowgen:latest --config /etc/app/config.yaml
 ```
 
 ### Local Development
@@ -79,6 +95,19 @@ Tests that spin up real containers (via
 running Docker daemon are marked `#[ignore]` so a plain
 `cargo test` stays fast and works on machines without Docker. CI
 runs the ignored set in a dedicated `test-integration` job.
+
+### Kubernetes
+
+```bash
+mise run kind:up      # a kind cluster, flowgen-dev, with an empty workspace repository
+mise run kind:deploy  # builds the image, installs NATS and the chart with dev/kind/ values
+mise run kind:ui      # the web UI at http://127.0.0.1:18080/flowgen/
+mise run kind:down    # deletes the cluster
+```
+
+The cluster runs three pods with the system flows of the image. The
+workspace repository and its releases sit on the node, so it needs no git
+server, registry or credentials.
 
 ## Configuration
 

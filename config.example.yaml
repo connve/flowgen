@@ -212,7 +212,7 @@ http_server:
 #   # update_check:
 #   #   enabled: true
 #   #   url: "https://api.github.com/repos/connve/flowgen/releases/latest"
-#   #   interval: 24h
+#   #   interval: 1h
 #   # Change proposals for flows and resources, approved in the web UI.
 #   # authoring:
 #   #   enabled: true

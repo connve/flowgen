@@ -16,3 +16,40 @@ run = [
 [tasks.msrv]
 description = "Check the workspace builds with the minimum supported Rust version"
 run = "cargo +1.97.1 check --workspace --all-targets"
+
+[tasks."kind:up"]
+description = "Create a kind cluster with an empty workspace repository on its node"
+run = """
+set -eu
+kind create cluster --name flowgen-dev
+repo=$(mktemp -d)
+git -C "$repo" init -q -b main
+printf '# Workspace\\n' > "$repo/README.md"
+git -C "$repo" add README.md
+git -C "$repo" -c user.name=flowgen -c user.email=flowgen@localhost commit -qm "Start the workspace"
+docker exec flowgen-dev-control-plane mkdir -p /var/flowgen/releases
+docker cp "$repo" flowgen-dev-control-plane:/var/flowgen/repo
+docker exec flowgen-dev-control-plane chown -R 65534:65534 /var/flowgen
+rm -rf "$repo"
+"""
+
+[tasks."kind:deploy"]
+description = "Build the image and install NATS and flowgen on the kind cluster"
+run = """
+set -eu
+docker build -f docker/Dockerfile -t flowgen:dev --build-arg SERVICE_NAME=flowgen .
+kind load docker-image flowgen:dev --name flowgen-dev
+helm repo add nats https://nats-io.github.io/k8s/helm/charts --force-update
+helm upgrade --install nats nats/nats --version 1.3.13 --kube-context kind-flowgen-dev -n flowgen --create-namespace -f dev/kind/nats.yaml --wait
+helm upgrade --install flowgen charts/flowgen --kube-context kind-flowgen-dev -n flowgen -f dev/kind/flowgen.yaml --wait
+kubectl --context kind-flowgen-dev -n flowgen rollout restart deployment/flowgen
+kubectl --context kind-flowgen-dev -n flowgen rollout status deployment/flowgen
+"""
+
+[tasks."kind:ui"]
+description = "Forward the web UI of the kind cluster to http://127.0.0.1:18080/flowgen/"
+run = "kubectl --context kind-flowgen-dev -n flowgen port-forward --address 127.0.0.1 service/flowgen-web 18080:8080"
+
+[tasks."kind:down"]
+description = "Delete the kind cluster and its workspace"
+run = "kind delete cluster --name flowgen-dev"

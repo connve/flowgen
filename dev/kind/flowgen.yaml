@@ -1,0 +1,62 @@
+global:
+  image:
+    repository: flowgen
+    tag: dev
+    pullPolicy: Never
+
+flowgen:
+  replicaCount: 3
+
+  config:
+    settings:
+      cache:
+        type: nats
+        url: "nats://nats.flowgen.svc.cluster.local:4222"
+      flows:
+        path: /etc/app/flows
+        cache:
+          enabled: true
+      resources:
+        path: /etc/app/resources
+        cache:
+          enabled: true
+      http_server:
+        enabled: true
+        port: 3000
+      health:
+        enabled: true
+        port: 8081
+      mcp_server:
+        enabled: true
+        port: 3001
+      ai_gateway:
+        enabled: true
+        port: 3002
+      web:
+        enabled: true
+        port: 8080
+        agents:
+          enabled: true
+        authoring:
+          enabled: true
+      telemetry:
+        enabled: true
+
+  env:
+    - name: RUST_LOG
+      value: "info,async_nats=warn,opentelemetry=warn"
+
+  systemFlows:
+    enabled: true
+    repository: /workspace/repo
+    workspacePath: ""
+    releases: "oci-layout:///workspace/releases"
+
+  extraVolumes:
+    - name: workspace
+      hostPath:
+        path: /var/flowgen
+        type: Directory
+  extraVolumeMounts:
+    - name: workspace
+      mountPath: /workspace
