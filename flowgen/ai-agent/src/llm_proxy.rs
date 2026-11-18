@@ -15,7 +15,7 @@ use flowgen_core::registry::ResponseRegistry;
 use flowgen_core::task::TaskConfig;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::{fs, sync::Arc};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 /// LLM proxy task configuration.
@@ -57,13 +57,10 @@ pub struct LlmProxy {
     /// bare id, leaving the model choice to the routing script.
     #[serde(default)]
     pub models: Vec<String>,
-    /// HTTP headers a request must carry, with matching values, for this
-    /// proxy to be visible on `GET <path>/models` and reachable at all.
-    /// All declared headers must match (AND). An empty map (the default)
-    /// means every caller can reach it. A caller missing a required header
-    /// gets the same 404 as an unknown proxy name.
+    /// Proxies on this gateway that this one calls, such as an agent's model.
+    /// It is listed and reachable only while each of them is registered.
     #[serde(default)]
-    pub headers: std::collections::HashMap<String, String>,
+    pub requires: Vec<String>,
     /// Wire protocol exposed for this task. Defaults to OpenAI-compatible.
     #[serde(default)]
     pub protocol: Protocol,
@@ -96,11 +93,10 @@ pub enum Error {
         #[source]
         source: serde_json::Error,
     },
-    #[error("Error reading credentials file at {path}: {source}")]
+    #[error("Error reading credentials: {source}")]
     ReadCredentials {
-        path: std::path::PathBuf,
         #[source]
-        source: std::io::Error,
+        source: flowgen_core::credentials::Error,
     },
     #[error("Missing required builder attribute: {0}")]
     MissingBuilderAttribute(String),
@@ -153,10 +149,9 @@ impl flowgen_core::task::runner::Runner for Processor {
 
         let credentials = match &init_config.credentials_path {
             Some(path) => {
-                let content = fs::read_to_string(path).map_err(|e| Error::ReadCredentials {
-                    path: path.clone(),
-                    source: e,
-                })?;
+                let content = flowgen_core::credentials::read_async(path)
+                    .await
+                    .map_err(|source| Error::ReadCredentials { source })?;
                 Some(
                     serde_json::from_str::<HttpCredentials>(&content)
                         .map_err(|source| Error::SerdeJson { source })?,
@@ -291,7 +286,7 @@ mod tests {
         Arc::new(LlmProxy {
             name: "test_proxy".to_string(),
             models: Vec::new(),
-            headers: std::collections::HashMap::new(),
+            requires: Vec::new(),
             protocol: Protocol::Openai,
             credentials_path: None,
             auth: None,
@@ -485,7 +480,7 @@ mod tests {
         let cfg = LlmProxy {
             name: "gw".to_string(),
             models: vec!["glm-4.6".to_string(), "kimi-k2.7-code".to_string()],
-            headers: std::collections::HashMap::new(),
+            requires: Vec::new(),
             protocol: Protocol::Openai,
             credentials_path: Some(PathBuf::from("/c.json")),
             auth: None,

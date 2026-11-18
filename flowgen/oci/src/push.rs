@@ -62,11 +62,12 @@ pub struct OciPush {
     #[serde(default)]
     pub annotations: BTreeMap<String, String>,
     /// Registry credentials: `{username, password}` or a Docker `config.json`.
+    /// Empty means none.
     ///
     /// ```yaml
     /// credentials_path: /etc/registry/credentials.json
     /// ```
-    #[serde(default)]
+    #[serde(default, deserialize_with = "flowgen_core::config::optional_path")]
     pub credentials_path: Option<PathBuf>,
     /// Optional list of upstream task names this task depends on.
     ///
@@ -465,6 +466,16 @@ mod tests {
     async fn event_data_without_files_is_rejected_as_permanent() {
         let error = handle(json(r#"{"commit": "a"}"#)).await;
         assert!(matches!(error, Error::MissingFiles), "{error}");
+        assert!(error.is_permanent());
+    }
+
+    #[tokio::test]
+    async fn an_empty_files_list_is_rejected_before_any_push_as_permanent() {
+        let error = handle(json(r#"{"files": []}"#)).await;
+        assert!(
+            matches!(error, Error::Push(super::client::Error::NoFiles)),
+            "{error}"
+        );
         assert!(error.is_permanent());
     }
 

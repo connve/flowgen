@@ -195,6 +195,8 @@ impl std::fmt::Debug for CacheSource {
 pub struct ResourceLoader {
     base_path: Option<PathBuf>,
     cache: Option<CacheSource>,
+    drafts: Arc<std::collections::HashMap<String, String>>,
+    defaults: Arc<std::collections::BTreeMap<String, String>>,
 }
 
 impl ResourceLoader {
@@ -206,7 +208,26 @@ impl ResourceLoader {
         Self {
             base_path,
             cache: None,
+            drafts: Arc::default(),
+            defaults: Arc::default(),
         }
+    }
+
+    /// This loader with `drafts`, content by key, loaded before every other source.
+    pub fn with_drafts(mut self, drafts: std::collections::HashMap<String, String>) -> Self {
+        self.drafts = Arc::new(drafts);
+        self
+    }
+
+    /// This loader with `defaults`, content by key, loaded when no other source has the key.
+    pub fn with_defaults(mut self, defaults: std::collections::BTreeMap<String, String>) -> Self {
+        self.defaults = Arc::new(defaults);
+        self
+    }
+
+    /// The content of [`Self::with_defaults`], by key.
+    pub fn defaults(&self) -> impl Iterator<Item = (&String, &String)> {
+        self.defaults.iter()
     }
 
     /// Creates a new cache-backed `ResourceLoader`.
@@ -221,12 +242,34 @@ impl ResourceLoader {
         Self {
             base_path: None,
             cache: Some(CacheSource { cache, prefix }),
+            drafts: Arc::default(),
+            defaults: Arc::default(),
         }
     }
 
     /// Returns the configured filesystem base path, if any.
     pub fn base_path(&self) -> Option<&Path> {
         self.base_path.as_deref()
+    }
+
+    /// The keys of the cached resources, such as `queries/orders.sql`; none without a cache.
+    pub async fn cached_keys(&self) -> Result<Vec<String>, Error> {
+        let Some(source) = &self.cache else {
+            return Ok(Vec::new());
+        };
+        let prefix = format!("{}.", source.prefix);
+        let keys = source
+            .cache
+            .list_keys(&prefix)
+            .await
+            .map_err(|error| Error::Cache {
+                key: prefix.clone(),
+                source: error,
+            })?;
+        Ok(keys
+            .into_iter()
+            .filter_map(|key| key.strip_prefix(&prefix).map(str::to_string))
+            .collect())
     }
 
     /// Adds a cache fallback to a filesystem-backed loader.
@@ -239,18 +282,23 @@ impl ResourceLoader {
         self
     }
 
-    /// Loads a resource by key.
-    ///
-    /// Tries the filesystem first (when configured). On a miss, falls back
-    /// to the cache (when configured). Returns `ResourceNotFound` only when
-    /// every configured source is missing the key, and
-    /// `ResourcePathNotConfigured` when neither source is configured.
-    ///
-    /// # Arguments
-    /// * `key` - Resource key (e.g., "query.sql" or "queries/orders.sql").
-    ///
-    /// # Returns
-    /// The resource content as a String.
+    /// Changes to the cached resources; a loader without a cache never changes.
+    pub async fn watch(
+        &self,
+    ) -> Result<
+        futures_util::stream::BoxStream<
+            'static,
+            Result<crate::cache::WatchEvent, crate::cache::Error>,
+        >,
+        crate::cache::Error,
+    > {
+        match &self.cache {
+            Some(source) => source.cache.watch(&source.prefix, false).await,
+            None => Ok(Box::pin(futures_util::stream::pending())),
+        }
+    }
+
+    /// Loads `key`, such as `queries/orders.sql`, from the drafts, the filesystem, the cache, then the defaults.
     pub async fn load(&self, key: &str) -> Result<String, Error> {
         let inside = Path::new(key)
             .components()
@@ -259,6 +307,9 @@ impl ResourceLoader {
             return Err(Error::InvalidKey {
                 key: key.to_string(),
             });
+        }
+        if let Some(draft) = self.drafts.get(key) {
+            return Ok(draft.clone());
         }
 
         // Filesystem first when configured.
@@ -281,24 +332,32 @@ impl ResourceLoader {
         // Cache as primary or fallback when configured.
         if let Some(cache_source) = &self.cache {
             let cache_key = format!("{}.{}", cache_source.prefix, key);
-            let bytes = cache_source
-                .cache
-                .get(&cache_key)
-                .await
-                .map_err(|source| Error::Cache {
+            let cached =
+                cache_source
+                    .cache
+                    .get(&cache_key)
+                    .await
+                    .map_err(|source| Error::Cache {
+                        key: key.to_string(),
+                        source,
+                    })?;
+            if let Some(bytes) = cached {
+                return String::from_utf8(bytes.to_vec()).map_err(|source| Error::CacheUtf8 {
                     key: key.to_string(),
                     source,
-                })?
-                .ok_or_else(|| Error::ResourceNotFound {
-                    key: key.to_string(),
-                })?;
-            return String::from_utf8(bytes.to_vec()).map_err(|source| Error::CacheUtf8 {
-                key: key.to_string(),
-                source,
-            });
+                });
+            }
         }
 
-        if self.base_path.is_none() {
+        if let Some(default) = self.defaults.get(key) {
+            return Ok(default.clone());
+        }
+
+        if self.base_path.is_none()
+            && self.cache.is_none()
+            && self.drafts.is_empty()
+            && self.defaults.is_empty()
+        {
             return Err(Error::ResourcePathNotConfigured);
         }
 
@@ -312,6 +371,47 @@ impl ResourceLoader {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn drafts_are_loaded_before_the_files_they_change() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rhai"), "deployed").unwrap();
+        std::fs::write(dir.path().join("b.rhai"), "deployed").unwrap();
+        let drafts = [("a.rhai".to_string(), "draft".to_string())].into();
+        let loader = ResourceLoader::new(Some(dir.path().to_path_buf())).with_drafts(drafts);
+
+        assert_eq!(loader.load("a.rhai").await.unwrap(), "draft");
+        assert_eq!(loader.load("b.rhai").await.unwrap(), "deployed");
+        assert!(matches!(
+            loader.load("../a.rhai").await,
+            Err(Error::InvalidKey { .. })
+        ));
+        let only_drafts = ResourceLoader::new(None)
+            .with_drafts([("a.rhai".to_string(), "draft".to_string())].into());
+        assert!(matches!(
+            only_drafts.load("c.rhai").await,
+            Err(Error::ResourceNotFound { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn defaults_are_loaded_when_no_other_source_has_the_key() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), "workspace").unwrap();
+        let defaults = [
+            ("a.md".to_string(), "default".to_string()),
+            ("b.md".to_string(), "default".to_string()),
+        ]
+        .into();
+        let loader = ResourceLoader::new(Some(dir.path().to_path_buf())).with_defaults(defaults);
+
+        assert_eq!(loader.load("a.md").await.unwrap(), "workspace");
+        assert_eq!(loader.load("b.md").await.unwrap(), "default");
+        assert!(matches!(
+            loader.load("c.md").await,
+            Err(Error::ResourceNotFound { .. })
+        ));
+    }
 
     #[test]
     fn test_new_with_path() {

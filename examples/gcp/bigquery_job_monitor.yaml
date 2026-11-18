@@ -12,7 +12,6 @@ flow:
     tags: ["bigquery", "gcp", "job", "monitor", "example"]
   require_leader_election: true
   tasks:
-
     # Placeholder trigger; real deployments emit from upstream job-create flows.
     - generate:
         name: trigger
@@ -23,7 +22,7 @@ flow:
         name: poll_job_status
         operation: get
         project_id: my-gcp-project
-        credentials_path: /etc/gcp/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/gcp.json"
         job_type: load
         job_id: "job_abc123xyz"
         poll_interval: 5s

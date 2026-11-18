@@ -310,7 +310,7 @@ impl Runner for ListProcessor {
         };
 
         let credentials_path = self.config.credentials_path.clone();
-        let client_options = self.config.client_options.clone();
+        let s3 = self.config.s3.clone();
         let client = self
             .task_context
             .client_registry
@@ -318,11 +318,12 @@ impl Runner for ListProcessor {
                 flowgen_core::client_registry::ClientKeyBuilder::new(self.task_type)
                     .field("client_path", &client_path)
                     .field("credentials_path", &credentials_path)
+                    .field("s3", &s3)
                     .build(),
                 || async {
                     let mut client_builder = super::client::ClientBuilder::new().path(client_path);
-                    if let Some(options) = client_options {
-                        client_builder = client_builder.options(options);
+                    if let Some(s3) = s3 {
+                        client_builder = client_builder.s3(s3);
                     }
                     if let Some(credentials_path) = credentials_path {
                         client_builder = client_builder.credentials_path(credentials_path);

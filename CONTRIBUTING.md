@@ -54,6 +54,11 @@ it again whenever you're adding a new task type or touching error handling.
   combinator form. Follow clippy rather than adding `#[allow(...)]` to keep
   the `match` style; `cargo clippy -- -D warnings` is the hard constraint,
   the style preference is soft.
+- No `serde_json::json!` outside tests: build JSON from a `Serialize`
+  struct.
+- No vendor names (other products or clouds) in general docs, code docs,
+  OpenAPI descriptions or examples; they belong only in their own
+  connector's crate and docs pages and in hub templates.
 - Declare a crate's modules inline in `lib.rs`
   (`pub mod push { pub mod config; pub mod processor; }`), or as
   `module.rs` next to a `module/` directory. No `mod.rs` files.
@@ -117,6 +122,14 @@ tokio = { workspace = true, features = ["full"] }
   at the actual misconfiguration.
 - Any change to `AppConfig` needs a matching update in
   `config.example.yaml`, with a comment explaining the option.
+- Options that apply to one provider sit in a block named after it, such as
+  `vertexai:` on `ai_completion`, `s3:` on `object_store` or `nats:` on
+  `kv_store`. A block set for another provider fails to load with
+  `flowgen_core::config::ProviderOptionsMismatch`. Fields several providers
+  share stay at the top level.
+- No back-compat shims: nobody runs an older version against new config or
+  stored data, so rename or remove a field, a serde alias or a stored key
+  outright, and say so in the CHANGELOG under Breaking.
 - Environment overrides layer over the config file with the `APP_` prefix
   and `__` as the level separator, so `APP_WEB__AUTH__CLIENT_SECRET` sets
   `web.auth.client_secret`. Single underscores are part of field names,
@@ -140,9 +153,14 @@ shape — e.g. BigQuery's `QueryResponse` becomes an Arrow `RecordBatch` for
   prefixed by area (`flows_`, `editor_`, `changes_`, `common_`); reuse
   `common_*` before adding a key. Counts use the plural format.
 - Product names, config keys, paths and data from the API stay as they are.
-- An empty state says what is missing and the next step; an error says what
-  failed and what to do. Show the server's reason with `failure()` and
-  `errorMessage()` from `$lib/api` rather than a bare HTTP status.
+- An empty state names what is missing; add a next step only when no button
+  already offers it. An error says what failed. Show the server's reason
+  with `failure()` and `errorMessage()` from `$lib/api` rather than a bare
+  HTTP status.
+- No sentence that restates a status, title or button. A line of text earns
+  its place only with a fact the UI cannot show otherwise.
+- No vendor names (product or cloud brands) in UI strings; a connector's own
+  name and data from the API stay as they are.
 
 ## Architecture reference
 
@@ -154,7 +172,10 @@ Google Cloud. One crate is one connector. It declares the connector once in
 implements `TaskMeta` for each of its task configs:
 
 ```rust
-use flowgen_core::task::meta::{host, Connection, Connector, Icon, TaskMeta};
+use flowgen_core::task::meta::{
+    host, parses, read_credentials, Connection, Connector, CredentialsField, CredentialsForm,
+    FieldKind, Icon, TaskMeta,
+};
 use std::path::Path;
 
 /// The connector of this crate's task types.
@@ -163,12 +184,20 @@ pub const CONNECTOR: Connector = Connector {
     label: "Salesforce",
     icon: Icon::Svg(include_str!("../icons/salesforce.svg")),
     describe_credentials: Some(describe_credentials),
+    credentials: &[CredentialsForm {
+        label: "Client credentials",
+        fields: &[
+            CredentialsField::text("instance_url", "Instance URL").of(FieldKind::Url),
+            CredentialsField::text("client_id", "Consumer key"),
+            CredentialsField::secret("client_secret", "Consumer secret"),
+        ],
+        check: parses::<salesforce_core::client::Credentials>,
+    }],
 };
 
 /// The host of the org the credentials log in to.
 fn describe_credentials(path: &Path) -> Option<String> {
-    let content = std::fs::read_to_string(path).ok()?;
-    let credentials: salesforce_core::client::Credentials = serde_json::from_str(&content).ok()?;
+    let credentials: salesforce_core::client::Credentials = read_credentials(path)?;
     Some(host(&credentials.instance_url))
 }
 
@@ -197,9 +226,14 @@ config when the flow is loaded.
   connection to another connector's system names that crate's constant, as
   `ai_completion` does with `flowgen_mcp::CONNECTOR` for its MCP servers.
 - `describe_credentials` names the account or instance a credentials file
-  points to. It reads the file with the same type the task loads it with
-  and returns only non-secret fields. Leave it `None` when the file holds
-  nothing but a secret.
+  points to. It reads the file with `read_credentials`, as the same type the
+  task loads it with, and returns only non-secret fields. Leave it `None`
+  when the file holds nothing but a secret.
+- `credentials` lists the forms the web UI offers for **Add credentials**:
+  each form's fields and a `check` that parses the file the way the task
+  reads it, such as `parses::<Credentials>` or
+  `flowgen_core::credentials::check_service_account`. A form without fields
+  takes the file as uploaded.
 
 Task types in `flowgen_core` keep the default connector, `core`, with empty
 `impl TaskMeta` blocks in `flowgen/core/src/task/meta.rs`. `GET
@@ -553,19 +587,14 @@ impl ProcessorBuilder {
 }
 ```
 
-Error variants every task needs at minimum:
+A task with its own `Runner` needs at least a builder error; the generic
+`Processor<C: Operation>` already has it:
 
 ```rust
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("Missing required builder attribute: {}", _0)]
     MissingRequiredAttribute(String),
-
-    #[error("Task failed after all retry attempts: {source}")]
-    RetryExhausted {
-        #[source]
-        source: Box<Error>,
-    },
     // ... other error variants
 }
 ```
@@ -605,12 +634,14 @@ A few patterns come up often enough to call out explicitly:
    `source.render(self.task_context.resource_loader.as_ref(), &event_data).await?`,
    or resolve static content with
    `source.resolve(self.task_context.resource_loader.as_ref()).await?`.
-6. **Credentials files**: prefer a `credentials_path` field that points at a
-   JSON file over inline secrets. `flowgen_core::credentials` provides
-   loaders for HTTP credentials (`load_http_credentials`) and web UI OIDC
-   credentials (`load_web_credentials`); both share the same file-reading
-   path. Keep the loaded secret in a `secrecy::SecretString` and redact it on
-   serialization.
+6. **Credentials files**: secrets come only from the JSON file at
+   `credentials_path`, never inline and never from the flow. Load it with
+   `flowgen_core::credentials::load_credentials::<T>` (or `read_async` for
+   the raw content), which also reads the system keychain and decrypts a
+   SOPS-encrypted Secret, off the async runtime. Keep the loaded secret in a
+   `secrecy::SecretString` and redact it on serialization. Values that are
+   not secret, such as a project, region or endpoint, belong in the task
+   config, never in the credentials file.
 
 Reference implementations:
 - `flowgen/salesforce/src/processor.rs` — generic `Processor<C: Operation>`,

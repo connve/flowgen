@@ -12,7 +12,6 @@ flow:
     description: "Exposes a Salesforce record upsert by external ID as an MCP tool callable by LLM agents."
     tags: ["salesforce", "upsert", "mcp", "tool", "example"]
   tasks:
-
     - mcp_tool:
         name: salesforce_upsert
         description: "Create or update a Salesforce record by external ID."
@@ -36,7 +35,7 @@ flow:
     - salesforce_restapi_sobject:
         name: upsert_record
         operation: upsert
-        credentials_path: /etc/sfdc/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
         sobject_type: "{{event.data.sobject_type}}"
         external_id_field: "{{event.data.external_id_field}}"
         external_id_value: "{{event.data.external_id_value}}"

@@ -26,6 +26,8 @@ pub const ARTIFACT_TYPE: &str = "application/vnd.connve.flowgen.files.v1";
 pub enum Error {
     #[error("At least one tag is required")]
     NoTags,
+    #[error("At least one file is required")]
+    NoFiles,
     #[error("Invalid OCI reference '{reference}': {source}")]
     InvalidReference {
         reference: String,
@@ -59,6 +61,8 @@ pub enum Error {
         #[source]
         source: oci_client::errors::OciDistributionError,
     },
+    #[error(transparent)]
+    Layout(#[from] crate::layout::Error),
 }
 
 impl Error {
@@ -66,7 +70,9 @@ impl Error {
     pub fn is_permanent(&self) -> bool {
         match self {
             Error::Registry(source) => source.is_permanent(),
+            Error::Layout(source) => source.is_permanent(),
             Error::NoTags
+            | Error::NoFiles
             | Error::InvalidReference { .. }
             | Error::InvalidPath { .. }
             | Error::DuplicatePath { .. }
@@ -98,7 +104,8 @@ pub struct Pushed {
 /// Where to push.
 #[derive(Debug, Clone)]
 pub struct Push {
-    /// Registry and repository without a tag, e.g. `registry.example.com/team/configs`.
+    /// Registry and repository without a tag, e.g. `registry.example.com/team/configs`,
+    /// or an OCI Image Layout folder, `oci-layout://<folder>`.
     pub repository: String,
     /// Registry credentials: `{username, password}` or a Docker `config.json`.
     pub credentials_path: Option<PathBuf>,
@@ -111,6 +118,9 @@ impl Push {
     /// once, then the same manifest per tag. Tags and paths are checked
     /// before anything is sent, so a bad input never leaves a partial release.
     pub async fn push(&self, files: Vec<ArtifactFile>, tags: &[String]) -> Result<Pushed, Error> {
+        if let Some(folder) = crate::layout::repository(&self.repository) {
+            return self.write_layout(folder?, files, tags).await;
+        }
         let references = tags
             .iter()
             .map(|tag| self.reference(tag))
@@ -119,21 +129,14 @@ impl Push {
             Some(first) => first,
             None => return Err(Error::NoTags),
         };
-        let files = prepare(files)?;
         let auth =
             crate::registry::load_auth(self.credentials_path.as_deref(), first.registry()).await?;
-        let layer = tokio::task::spawn_blocking(move || layer(files))
-            .await
-            .map_err(|source| Error::LayerTask { source })?
-            .map_err(|source| Error::Layer { source })?;
-        let layer = Bytes::from(layer);
-        let layer_descriptor = descriptor(IMAGE_LAYER_GZIP_MEDIA_TYPE, &layer);
-        let config_descriptor = descriptor(EMPTY_MEDIA_TYPE, EMPTY_CONTENT);
-        let manifest = manifest(
-            config_descriptor.clone(),
-            layer_descriptor.clone(),
-            &self.annotations,
-        )?;
+        let Artifact {
+            layer,
+            layer_descriptor,
+            config_descriptor,
+            manifest,
+        } = self.artifact(files).await?;
         let digest = sha256_digest(&manifest);
 
         let client = crate::registry::client(first);
@@ -172,6 +175,64 @@ impl Push {
         })
     }
 
+    /// The layer of `files` and the manifest that names it.
+    async fn artifact(&self, files: Vec<ArtifactFile>) -> Result<Artifact, Error> {
+        let files = prepare(files)?;
+        let layer = tokio::task::spawn_blocking(move || layer(files))
+            .await
+            .map_err(|source| Error::LayerTask { source })?
+            .map_err(|source| Error::Layer { source })?;
+        let layer = Bytes::from(layer);
+        let layer_descriptor = descriptor(IMAGE_LAYER_GZIP_MEDIA_TYPE, &layer);
+        let config_descriptor = descriptor(EMPTY_MEDIA_TYPE, EMPTY_CONTENT);
+        let manifest = manifest(
+            config_descriptor.clone(),
+            layer_descriptor.clone(),
+            &self.annotations,
+        )?;
+        Ok(Artifact {
+            layer,
+            layer_descriptor,
+            config_descriptor,
+            manifest,
+        })
+    }
+
+    /// Writes the artifact into the OCI Image Layout at `folder`.
+    async fn write_layout(
+        &self,
+        folder: PathBuf,
+        files: Vec<ArtifactFile>,
+        tags: &[String],
+    ) -> Result<Pushed, Error> {
+        if tags.is_empty() {
+            return Err(Error::NoTags);
+        }
+        for tag in tags {
+            crate::layout::check_tag(tag)?;
+        }
+        let Artifact {
+            layer, manifest, ..
+        } = self.artifact(files).await?;
+        let layout = crate::layout::Layout::new(folder);
+        let owned_tags = tags.to_vec();
+        let digest = tokio::task::spawn_blocking(move || {
+            layout.write_blob(&layer)?;
+            layout.write_blob(EMPTY_CONTENT)?;
+            layout.tag(&manifest, OCI_IMAGE_MEDIA_TYPE, &owned_tags)
+        })
+        .await
+        .map_err(|source| Error::LayerTask { source })??;
+        let repository = self.repository.trim_end_matches('/');
+        Ok(Pushed {
+            digest,
+            references: tags
+                .iter()
+                .map(|tag| format!("{repository}:{tag}"))
+                .collect(),
+        })
+    }
+
     fn reference(&self, tag: &str) -> Result<Reference, Error> {
         let reference = format!("{}:{tag}", self.repository.trim_end_matches('/'));
         reference
@@ -180,8 +241,16 @@ impl Push {
     }
 }
 
-/// Files keyed by normalized path, rejecting paths that cannot be extracted
-/// safely and paths that name the same file twice.
+/// A built artifact: its one layer and the manifest that names it.
+struct Artifact {
+    layer: Bytes,
+    layer_descriptor: OciDescriptor,
+    config_descriptor: OciDescriptor,
+    manifest: Bytes,
+}
+
+/// Files keyed by normalized path, rejecting no files, paths that cannot be
+/// extracted safely and paths that name the same file twice.
 fn prepare(files: Vec<ArtifactFile>) -> Result<BTreeMap<String, Vec<u8>>, Error> {
     let mut prepared = BTreeMap::new();
     for ArtifactFile { path, content } in files {
@@ -191,7 +260,10 @@ fn prepare(files: Vec<ArtifactFile>) -> Result<BTreeMap<String, Vec<u8>>, Error>
         }
         prepared.insert(path, content);
     }
-    Ok(prepared)
+    match prepared.is_empty() {
+        true => Err(Error::NoFiles),
+        false => Ok(prepared),
+    }
 }
 
 /// `path` with empty and `.` segments dropped, the form the tar entry gets.

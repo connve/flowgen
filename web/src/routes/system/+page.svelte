@@ -1,9 +1,11 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import ResourceViewer from '$lib/ResourceViewer.svelte';
-	import CopyButton from '$lib/CopyButton.svelte';
-	import StateMessage from '$lib/StateMessage.svelte';
-	import { apiUrl, errorMessage, failure, type ConfigInfo } from '$lib/api';
+	import { CopyButton, Loading, StateMessage } from '@connve/ui';
+	import AppConfigFields from '$lib/AppConfigFields.svelte';
+	import ConfigViewSwitch from '$lib/ConfigViewSwitch.svelte';
+	import { configView } from '$lib/configView.svelte';
+	import { errorMessage, getConfig } from '$lib/api';
 	import { m } from '$lib/paraglide/messages.js';
 	import { pageTitle } from '$lib/pageTitle';
 
@@ -13,10 +15,7 @@
 
 	onMount(async () => {
 		try {
-			const res = await fetch(apiUrl('api/config'));
-			if (!res.ok) throw await failure(res);
-			const body = (await res.json()) as ConfigInfo;
-			yaml = body.yaml;
+			yaml = (await getConfig()).data.yaml;
 		} catch (err) {
 			error = errorMessage(err, m.common_config_unavailable());
 		} finally {
@@ -35,9 +34,7 @@
 	</div>
 
 	{#if loading}
-		<div class="flex flex-1 items-center justify-center">
-			<span class="loading loading-spinner loading-lg text-primary"></span>
-		</div>
+		<Loading />
 	{:else if error}
 		<StateMessage tone="oops" title={m.system_config_load_failed_title()} message={error} />
 	{:else}
@@ -47,10 +44,19 @@
 			>
 				<div class="flex h-10 shrink-0 items-center justify-between bg-base-100 px-4">
 					<span class="text-xs font-medium text-base-content/50">{m.system_config_heading()}</span>
-					<CopyButton text={yaml} label={m.common_copy()} />
+					<div class="flex items-center gap-2">
+						<ConfigViewSwitch />
+						<CopyButton text={yaml} label={m.common_copy()} />
+					</div>
 				</div>
-				<div class="min-h-0 flex-1 overflow-auto bg-base-200">
-					<ResourceViewer content={yaml} extension="yaml" />
+				<div
+					class="min-h-0 flex-1 overflow-auto {configView.value === 'fields' ? 'bg-base-100' : 'bg-base-200'}"
+				>
+					{#if configView.value === 'fields'}
+						<AppConfigFields {yaml} />
+					{:else}
+						<ResourceViewer content={yaml} extension="yaml" />
+					{/if}
 				</div>
 			</div>
 		</div>

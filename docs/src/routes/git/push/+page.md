@@ -13,10 +13,10 @@ The output lists the text files under `path`; files that are not UTF-8 are left 
 ```yaml
 - git_push:
     name: commit
-    repository_url: "{{env.GIT_REPOSITORY_URL}}"
+    repository: "{{env.GIT_REPOSITORY_URL}}"
     branch: main
     path: "configs/"
-    credentials_path: /etc/git/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/git.json"
     author:
       name: "{{event.data.author.name}}"
       email: "{{event.data.author.email}}"
@@ -28,12 +28,12 @@ The output lists the text files under `path`; files that are not UTF-8 are left 
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `name` | string | required | Task name. |
-| `repository_url` | string | required | Git repository URL. With `credentials_path` it must be HTTPS, or HTTP to a loopback host; SSH is not supported. |
-| `branch` | string | `main` | Branch to push to. Created on the first push to an empty repository; in a repository with other branches it must exist. |
+| `repository` | string | required | The repository: a URL, pushed to over HTTPS, or HTTP to a loopback host, with SSH not supported; or a path on this machine with `branch` checked out, where the commit moves the branch and writes the files into the working tree, without a push, and a file whose working copy differs from the branch is a conflict. A path takes no `credentials_path`. |
+| `branch` | string | `main` for a URL, the checked-out branch for a path | Branch to push to. Created on the first push to an empty repository; in a repository with other branches it must exist. For a path it must be the checked-out branch. |
 | `path` | string | | Directory within the repository the file paths are relative to. Paths that leave it are rejected. |
-| `credentials_path` | string | | Path to [credentials JSON file](/docs/flowgen/git#credentials). |
-| `author.name` | string | required | Commit author name. Supports templating. |
-| `author.email` | string | required | Commit author email. Supports templating. |
+| `credentials_path` | string | | Path to [credentials JSON file](/docs/flowgen/git#credentials). Empty means none. |
+| `author.name` | string | | Commit author name. Required for a URL; for a path the author defaults to the git user of the machine. An empty name leaves the author unset. Supports templating. |
+| `author.email` | string | | Commit author email. Required with `author.name`. Supports templating. |
 | `committer.name` | string | author's | Committer name. Supports templating. |
 | `committer.email` | string | author's | Committer email. Supports templating. |
 | `signing_key_path` | string | | Path to an unencrypted OpenSSH Ed25519 private key that signs each commit. See [Signed commits](#signed-commits). |
@@ -61,8 +61,8 @@ With `signing_key_path`, each commit is signed the way `git commit -S` signs wit
 ```yaml
 - git_push:
     name: commit
-    repository_url: "{{env.GIT_REPOSITORY_URL}}"
-    credentials_path: /etc/git/credentials.json
+    repository: "{{env.GIT_REPOSITORY_URL}}"
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/git.json"
     signing_key_path: /etc/git/signing_key
     committer:
       name: "flowgen"
@@ -86,4 +86,4 @@ Create the key with `ssh-keygen -t ed25519 -N "" -f signing_key`, mount the priv
 ## Examples
 
 - [`examples/git/push_snapshot.yaml`](https://github.com/connve/flowgen/blob/main/examples/git/push_snapshot.yaml) commits a daily API snapshot.
-- [`examples/authoring/publish_workspace.yaml`](https://github.com/connve/flowgen/blob/main/examples/authoring/publish_workspace.yaml) commits approved [authoring](/docs/flowgen/concepts/authoring) changes.
+- [`config/commit_workspace.yaml`](https://github.com/connve/flowgen/blob/main/config/commit_workspace.yaml) commits approved [authoring](/docs/flowgen/concepts/authoring) changes to the workspace's repository, on the same machine or a remote one.

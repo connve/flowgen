@@ -1,0 +1,22 @@
+# Flowgen Agent tool: reads one docs page as Markdown.
+flow:
+  labels:
+    display_name: "Read Doc"
+    description: "Returns one flowgen docs page, such as a task's fields, for Flowgen Agent."
+    tags: ["mcp", "agent", "flowgen"]
+  tasks:
+    - mcp_tool:
+        name: read_doc
+        description: "Read one flowgen docs page as Markdown, with a task's fields and examples. Read a task's page before using its fields."
+        input_schema:
+          type: object
+          properties:
+            page:
+              type: string
+              description: "Page path from list_docs, e.g. object-store/object-store."
+          required: [page]
+
+    - http_request:
+        name: fetch
+        endpoint: "{{env.FLOWGEN_URL}}/api/docs/{{event.data.page}}"
+        method: GET

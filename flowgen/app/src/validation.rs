@@ -178,11 +178,14 @@ pub struct Workspace {
 /// Validates the flows under `<root>/flows` and the resources under
 /// `<root>/resources`, skipping hidden files and folders.
 pub fn validate_workspace(root: &std::path::Path) -> Result<Workspace, ReadError> {
-    let folders: Vec<_> = ["flows", "resources"]
-        .into_iter()
-        .map(|folder| root.join(folder))
-        .filter(|dir| dir.is_dir())
-        .collect();
+    let folders: Vec<_> = [
+        flowgen_core::workspace::FLOWS_DIR,
+        flowgen_core::workspace::RESOURCES_DIR,
+    ]
+    .into_iter()
+    .map(|folder| root.join(folder))
+    .filter(|dir| dir.is_dir())
+    .collect();
     if folders.is_empty() {
         return Err(ReadError::NoWorkspace {
             root: root.to_path_buf(),
@@ -530,18 +533,25 @@ flow:
         assert_eq!(validate_resource("queries/a.sql", "select"), Vec::new());
     }
 
-    /// Every flow file under `examples/`, as `(path, content)`.
+    /// Every flow file under `examples/` and `config/`, as `(path, content)`.
     fn example_flows() -> Vec<(String, String)> {
-        let examples = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples");
+        let folders = [
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples"),
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../../config"),
+        ];
         let mut flows = Vec::new();
-        for entry in walkdir::WalkDir::new(examples) {
+        for entry in folders.into_iter().flat_map(walkdir::WalkDir::new) {
             let entry = entry.unwrap();
             let path = entry.path();
             let is_flow = matches!(
                 path.extension().and_then(|e| e.to_str()),
                 Some("yaml" | "yml")
             );
-            if !is_flow || path.components().any(|c| c.as_os_str() == "resources") {
+            if !is_flow
+                || path
+                    .components()
+                    .any(|c| c.as_os_str() == flowgen_core::workspace::RESOURCES_DIR)
+            {
                 continue;
             }
             let content = std::fs::read_to_string(path).unwrap();

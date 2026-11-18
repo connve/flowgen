@@ -1,6 +1,6 @@
 # MCP
 
-Expose flows and curated content to [Model Context Protocol](https://modelcontextprotocol.io) clients — Claude Desktop, Cursor, and other MCP-aware LLM applications. Flowgen ships four MCP task types built on a shared server:
+Expose flows and curated content to [Model Context Protocol](https://modelcontextprotocol.io) clients such as coding agents and chat apps. Flowgen ships four MCP task types built on a shared server:
 
 | Task | Client sees | Purpose |
 |---|---|---|
@@ -50,6 +50,12 @@ mcp_servers:
     allowed_tools: [web_search]
 ```
 
+## Instructions
+
+A toolset tells agents how to use it with the resource `instructions.md` in its folder: `resources/sales/instructions.md` for `/mcp/v1/sales`. The `initialize` response carries it as `instructions`, which a client that supports them adds to the model's context; `path` itself carries none. A client reads them when it connects, so a change reaches it on its next connection.
+
+Every client that connects gets them, so keep them short: the order of work and the rules the tools' descriptions can't say. An `ai_completion` adds the instructions of its `mcp_servers` after its `system_prompt`.
+
 ## `mcp_tool`
 
 Registers a flow as an LLM-callable tool. Inbound `tools/call` requests are injected as events at the head of the flow's pipeline; downstream tasks process the arguments and the final result is returned to the client.
@@ -75,7 +81,6 @@ Registers a flow as an LLM-callable tool. Inbound `tools/call` requests are inje
 | `description` | string | required | Human-readable description shown to LLMs for tool selection. |
 | `input_schema` | object | | JSON Schema for the tool's input parameters. A call whose arguments do not match it gets a tool error naming the first problem, such as `Invalid arguments: "project_id" is a required property`, and the flow does not run. The error leaves out argument values. A call without arguments is checked as `{}`. An invalid schema fails the task at startup, and a `$ref` to another file or URL is not fetched. |
 | `credentials_path` | string | | Overrides `mcp_server.credentials_path` for this tool. |
-| `headers` | map of string to string | `{}` | HTTP headers a request must carry, with matching values, for this tool to be listed on `tools/list` and callable at all. All declared headers must match. Empty (the default) means every caller can see and call it. A caller missing a required header gets the same "unknown tool" error as a nonexistent tool name — use this to give an agent only the specific tools it needs, e.g. a marketing agent that should see a BigQuery tool but not a Salesforce tool. |
 | `ack_timeout` | duration | wait indefinitely | Max time for the flow to take the call and finish it. If the flow is too busy to take it in time, the client gets a "Server is too busy" error; if it doesn't finish in time, a timeout error. |
 | `auth` | object | | Per-tool authentication. When `auth.required` is true, requests must include a valid bearer token validated by the shared auth provider; the resolved user context is injected into `event.meta.auth`. |
 | `depends_on` | list | | Upstream task names. |
@@ -99,14 +104,14 @@ Publishes curated read-only content. The content is served by `resources/read` o
 
 ```yaml
 - mcp_resource:
-    name: sf_account_schema
-    description: "Salesforce Account SObject field schema."
+    name: account_schema
+    description: "Field schema of an account record."
     mime_type: application/json
     content:
-      resource: "schemas/sf-account.json"
+      resource: "schemas/account.json"
 ```
 
-Auto-generated URI: `flowgen://<flow_name>/sf_account_schema` (scheme controlled by `resource_uri_scheme`).
+Auto-generated URI: `flowgen://<flow_name>/account_schema` (scheme controlled by `resource_uri_scheme`).
 
 ### Explicit URI override
 
@@ -128,7 +133,7 @@ Use when the resource has a real URL the client can also reach directly.
 - mcp_resource:
     name: account_summary
     uri_template: "flowgen://account/{id}"
-    description: "Per-account summary; bind {id} to a Salesforce ID."
+    description: "Per-account summary; bind {id} to an account ID."
     mime_type: text/markdown
     content: |
       # Account {{id}}
@@ -152,7 +157,6 @@ Client calls `resources/read({uri: "flowgen://account/001Qy0abc"})`; the server 
 | `mime_type` | string | `text/plain` | Standard MIME type. |
 | `content` | string/resource | required | Inline string or `resource:` reference. For templates, rendered as a Handlebars template against `{placeholder}` bindings on each read. |
 | `parameters` | list | | URI-template parameter descriptors. Only valid when `uri_template` is set. Each entry may attach a `completion` source served by `completion/complete`. |
-| `headers` | map of string to string | `{}` | HTTP headers a request must carry, with matching values, for this resource to be listed and readable at all. Same semantics as `mcp_tool`'s `headers` (see above). |
 | `depends_on` | list | | Upstream task names. |
 | `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
 
@@ -165,13 +169,13 @@ Publishes a slash-command template. MCP clients surface each registered prompt i
 ```yaml
 - mcp_prompt:
     name: explain_query
-    description: "Explain what a BigQuery SQL query does."
+    description: "Explain what a SQL query does."
     arguments:
       - name: query
         description: "The SQL query text."
         required: true
     template: |
-      Explain what this BigQuery query does, what tables it reads,
+      Explain what this query does, what tables it reads,
       and what the result shape will look like.
 
       ```sql
@@ -231,7 +235,6 @@ arguments:
 | `arguments` | list | | Argument definitions (see above). |
 | `template` | string/resource | | Single-message shorthand. Mutually exclusive with `messages`. |
 | `messages` | list | | Multi-message form. Each entry is `{role, content}` where `role` is `user` or `assistant` and `content` is a string or `resource:` reference rendered as a Handlebars template. Mutually exclusive with `template`. |
-| `headers` | map of string to string | `{}` | HTTP headers a request must carry, with matching values, for this prompt to be listed and usable at all. Same semantics as `mcp_tool`'s `headers` (see above). |
 | `depends_on` | list | | Upstream task names. |
 | `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
 

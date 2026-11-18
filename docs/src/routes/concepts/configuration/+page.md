@@ -4,7 +4,7 @@ Flowgen reads a single YAML file (passed via `--config`). Top-level sections:
 
 ```yaml
 flows:             # Flow discovery (required).
-cache:             # Distributed cache backend (optional).
+cache:             # Cache backend (optional, a local redb file by default).
 resources:         # External resource loading (optional).
 http_server:       # Webhook / metrics HTTP server (optional).
 mcp_server:        # MCP server for tools/resources/prompts (optional).
@@ -14,7 +14,9 @@ health:            # k8s liveness/readiness listener (defaults on).
 retry:             # Default retry policy for every task (optional).
 telemetry:         # OpenTelemetry export (optional).
 shutdown_timeout:  # How long a stopping flow lets its events finish (optional).
+host:              # The address every server listens on (optional).
 ai_budget:         # Token and amount limits of every ai_completion (optional).
+credentials:       # Folder and age key of encrypted credentials (optional).
 ```
 
 Only `flows` is required. Every other section has working defaults. A key no setting knows fails the start with an error naming it.
@@ -28,7 +30,7 @@ flows:
   path: /etc/flowgen/flows/
 ```
 
-Discovers every `.yaml`/`.yml`/`.json` file under the path and runs them with an in-memory cache, no resources directory, no HTTP server, and no telemetry.
+Discovers every `.yaml`/`.yml`/`.json` file under the path and runs them with the cache in a local redb file at `.flowgen/state.redb`, no resources directory, no HTTP server, and no telemetry.
 
 ## Full reference
 
@@ -37,11 +39,8 @@ flows:
   path: /etc/flowgen/flows/
   cache:
     enabled: true
-    prefix: flows
-    db_name: flowgen_system
 
 cache:
-  enabled: true
   type: nats
   credentials_path: /etc/nats/credentials.json
   url: "{{env.NATS_URL}}"
@@ -80,8 +79,6 @@ web:
   enabled: true
   port: 8080
   path: /flowgen
-  headers:
-    X-Flowgen-Client: flowgen-ui
 
 health:
   enabled: true
@@ -109,10 +106,9 @@ Flow discovery. Filesystem and distributed cache can be used independently or to
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `path` | string | | Directory or glob pattern. Filesystem-mode loads every `.yaml`/`.yml`/`.json` file recursively. Omit to skip filesystem loading. |
-| `cache` | object | | Cache-mode flow loading. Loads flows from the metadata cache in addition to the filesystem. |
+| `cache` | object | | Cache-mode flow loading. Loads flows from the system bucket, under `flows.`, in addition to the filesystem. |
 | `cache.enabled` | bool | required | Enable cache-mode flow loading. |
-| `cache.prefix` | string | `flows` | Cache key prefix for flow entries. |
-| `cache.db_name` | string | `flowgen_system` | Cache bucket holding the flow definitions. |
+| `system` | bool | `false` | Runs this version's system flows under `system/`: the [lifecycle flows](/docs/flowgen/concepts/authoring#lifecycle-flows), Flowgen Agent and its tools, and the hubs. A flow at `path` with the same identity takes their place. A workspace started by `flowgen` without `--config` holds them in its repository instead. |
 
 Both sources can be active at the same time. Use this for gradual migration: a small set of bootstrap flows mounted from disk (typically a sync flow that pulls user flows from Git into the cache), with the bulk of user flows loaded from the cache. On a name collision the filesystem entry wins, so a locally mounted bootstrap flow cannot be silently overridden by a stale cache entry.
 
@@ -120,20 +116,27 @@ Cache-mode flow loading is useful when flows are provisioned dynamically — for
 
 ## `cache`
 
-Distributed cache backend. When omitted, flowgen uses an in-memory cache (single-node only).
+Cache backend. When omitted, flowgen keeps the cache in a local redb file at `.flowgen/state.redb`.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `enabled` | bool | required | Set `false` to fall back to in-memory cache. |
-| `type` | string | required | Backend type. Currently `nats`. |
+| `type` | string | `redb` | `nats` for a NATS server shared by every replica, `redb` for a local file used by a single process. |
+| `path` | string | `.flowgen/state.redb` | The file of a `redb` cache. Created with its folder when missing. |
 | `credentials_path` | string | optional | Path to NATS credentials file. |
 | `url` | string | `localhost:4222` | NATS server URL. |
 | `runtime.db_name` | string | `flowgen_cache` | KV bucket for flow state, reachable from scripts via `ctx.cache`. |
-| `system.db_name` | string | `flowgen_system` | KV bucket for leader-election leases and peer registration. Kept apart from `runtime` so scripts cannot reach coordination state. Created whenever the cache is enabled. |
-| `history` | int | `64` | Historical entries retained per key. Only applies when the bucket is created. Server caps at 64. |
+| `system.db_name` | string | `flowgen_system` | KV bucket for leader-election leases and peer registration. Kept apart from `runtime` so scripts cannot reach coordination state. |
+| `history` | int | `64` | Historical entries retained per key. For NATS, only applies when the bucket is created; the server caps it at 64. |
 | `tombstone_ttl` | duration | `1h` | TTL for delete/purge tombstones. Required for per-key TTLs on cache entries to work. |
 
-If NATS is configured but unreachable, flowgen falls back to in-memory automatically and logs a warning. See [Caching](/docs/flowgen/concepts/caching).
+If NATS is configured but flowgen cannot connect, it does not start. See [Caching](/docs/flowgen/concepts/caching).
+
+A `redb` cache keeps flow state, leases and per-key TTLs across restarts without a NATS server. The `runtime` and `system` buckets are separate tables in the one file. Only one process can open the file, so use NATS when more than one replica runs.
+
+```yaml
+cache:
+  path: /var/lib/flowgen/state.redb
+```
 
 ## `resources`
 
@@ -142,10 +145,8 @@ External resource loading for SQL queries, prompts, scripts, schemas. See [Resou
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `path` | string | | Filesystem base directory for resources. Resource keys resolve relative to this path. |
-| `cache` | object | | Cache-backed resources. When `cache.enabled` is true, resources load from the cache. |
+| `cache` | object | | Cache-backed resources. When `cache.enabled` is true, resources load from the system bucket, under `resources.`. |
 | `cache.enabled` | bool | required | Enable cache-backed resources. |
-| `cache.prefix` | string | `resources` | Cache key prefix for resource entries. |
-| `cache.db_name` | string | `flowgen_system` | Cache bucket holding resource entries. |
 
 When `resources` is omitted, only inline content is supported — any task that uses `{ resource: ... }` will fail at startup with a clear error.
 
@@ -195,21 +196,24 @@ Embedded web dashboard and JSON API.
 | `enabled` | bool | required | Set `true` to start the server. |
 | `port` | int | `8080` | Listening port. |
 | `path` | string | `/` | Path prefix for both the UI and the API. |
-| `headers` | map of string to string | `{}` | HTTP headers sent with every request the web server makes to the AI gateway for the Agents tab. Set this so `llm_proxy`/`mcp_tool` tasks scoped with a matching `headers` field can identify and allow the web server as a caller — see [AI Gateway](/docs/flowgen/ai/gateway) and [MCP](/docs/flowgen/ai/mcp). |
+| `headers` | map of string to string | `{}` | HTTP headers sent with every request the web server makes to the AI gateway for the Agents tab, such as a key the gateway requires. |
 | `agents.enabled` | bool | required | Shows the Agents tab and enables `/api/agents`. Omit `agents` to hide the tab. |
-| `agents.conversation_history_ttl` | duration | `30d` | How long a conversation is kept after its last message; `0` keeps it indefinitely. |
-| `agents.cache_prefix` | string | `agents` | Cache key prefix for conversations, read state and folders: segments of letters, digits, `-` and `_` joined by `.`. A flow opens a conversation under `<cache_prefix>.conversations.`. |
+| `agents.session_history_ttl` | duration | `30d` | How long a session is kept after its last message; `0` keeps it indefinitely. |
+| `agents.cache_prefix` | string | `agents` | Cache key prefix for sessions, read state and folders: segments of letters, digits, `-` and `_` joined by `.`. A flow opens a session under `<cache_prefix>.sessions.`. |
 | `agents.reply_save_interval` | duration | `3s` | How often a reply in progress is saved; above 0. A pending reply not saved for ten times this long is shown as interrupted. |
 | `agents.reply_idle_timeout` | duration | `10m` | How long a reply may wait for the AI gateway's next output before it fails; above 0. |
 | `agents.on_behalf_of_user` | bool | `false` | Calls the AI gateway as the signed-in user, with their login token as the bearer. The gateway's `auth` must be `oidc` with the issuer of `web.auth` and its `client_id` as the audience. |
 | `ai_gateway_url` | string | same-process `ai_gateway` | Base URL of the AI gateway the Agents tab replies through, e.g. `http://127.0.0.1:3002/v1`. Set when the AI gateway runs in another process or pod. |
 | `api_credentials_path` | string | | Machine keys the API accepts as `Authorization: Bearer` next to the login session. See [Authoring](/docs/flowgen/concepts/authoring#machine-keys). |
 | `frame_ancestors` | list of string | `["'self'"]` | Who may show the web UI in a frame, as Content-Security-Policy `frame-ancestors` sources, e.g. `https://console.example.com`. |
+| `update_check.enabled` | bool | `true` | Checks for a newer flowgen release and shows it next to the version in the web UI. |
+| `update_check.url` | string | `https://api.github.com/repos/connve/flowgen/releases/latest` | Where the newest release is read from, as a GitHub releases API `latest` response. Point it at a mirror when the server has no internet access. |
+| `update_check.interval` | duration | `24h` | How often to check. |
 | `authoring.enabled` | bool | required | Enables change proposals. See [Authoring](/docs/flowgen/concepts/authoring). |
 | `authoring.targets` | list | one `workspace` target over `flows/` and `resources/` | Where changes can be proposed. See [Targets](/docs/flowgen/concepts/authoring#targets). |
 | `authoring.targets[].name` | string | required | Name shown on the target's changes. |
 | `authoring.targets[].paths` | list of string | required | Workspace folders the target covers, e.g. `flows/user/`. |
-| `authoring.targets[].publish_flow` | string | `system/publish_workspace` | Identity of the flow, starting with an [`inproc_endpoint`](/docs/flowgen/core/inproc), that publishes the target's approved changes. |
+| `authoring.targets[].commit_flow` | string | `system/commit_workspace` | Identity of the flow, starting with an [`inproc_endpoint`](/docs/flowgen/core/inproc), that commits the target's approved changes. |
 | `authoring.targets[].approver_groups` | list of string | `[]` | Identity provider groups whose members may approve and reject the target's changes. Empty allows every signed-in user. |
 | `authoring.targets[].track_deployment` | bool | `true` | Reports when a committed change runs on this instance. Turn off when the target is not deployed here automatically. |
 | `authoring.groups_claim` | string | `groups` | Claim of the signed-in user that lists their groups. |
@@ -229,30 +233,30 @@ The API contract is defined in `openapi.yaml` and served at `<path>/api/openapi.
 | `GET <path>/api/config` | Non-secret config info shown in the web UI (e.g. whether the Agents chat is configured). |
 | `GET <path>/api/agents/models` | Proxies `GET /models` on the AI gateway for the built-in Agents chat's model picker. |
 | `GET <path>/api/agents/tools` | Each `mcp_tool` with its flow and the connectors that flow reaches. |
-| `GET <path>/api/agents/conversations/stream` | Server-Sent Events of the caller's conversations: the list on connect, then each change and removal. |
-| `PATCH <path>/api/agents/conversations/{id}` | Rename a conversation, or move it to one of the caller's folders. |
-| `PUT`, `DELETE <path>/api/agents/conversations/{id}/read` | Mark a conversation read or unread for the caller. |
-| `POST <path>/api/agents/conversations/{id}/reply` | Add the user's message and have the agent reply. The reply runs on the server and is saved into the conversation as it arrives. `409` while another reply to the conversation is in progress. |
-| `GET`, `DELETE <path>/api/agents/conversations/{id}/reply` | Follow the reply in progress as Server-Sent Events from the pod writing it, or stop it from any pod. |
+| `GET <path>/api/agents/sessions/stream` | Server-Sent Events of the caller's sessions: the list on connect, then each change and removal. |
+| `PATCH <path>/api/agents/sessions/{id}` | Rename a session, or move it to one of the caller's folders. |
+| `PUT`, `DELETE <path>/api/agents/sessions/{id}/read` | Mark a session read or unread for the caller. |
+| `POST <path>/api/agents/sessions/{id}/reply` | Add the user's message and have the agent reply. The reply runs on the server and is saved into the session as it arrives. `409` while another reply to the session is in progress. |
+| `GET`, `DELETE <path>/api/agents/sessions/{id}/reply` | Follow the reply in progress as Server-Sent Events from the pod writing it, or stop it from any pod. |
 | `POST <path>/api/workspace/validate` | Validates flow and resource files without running them. |
 | `GET`, `POST <path>/api/changes` | List and propose workspace changes. |
 | `GET <path>/api/changes/{id}` | One change with its diff. |
 | `POST <path>/api/changes/{id}/approve`, `/reject` | Decide a pending change; a signed-in user only. |
 | `GET <path>/api/openapi.yaml` | The spec itself. |
 
-### Conversations from flows
+### Sessions from flows
 
-With `web.auth`, each signed-in user sees their own conversations and the shared ones; without it, every conversation is shared.
+With `web.auth`, each signed-in user sees their own sessions and the shared ones; without it, every session is shared.
 
-A flow opens a conversation in the Agents tab by writing it to the system bucket (`cache.system.db_name`) with [`nats_kv_store`](/docs/flowgen/nats/kv-store). Under `agents.conversations.<id>` it is shared. Under `agents.conversations.<user>.<id>`, where `<user>` is the hex SHA-256 of the user id, only that user sees it; a flow started by an `http_endpoint` or `mcp_tool` with `auth` has the id in `event.meta.auth.user_id`, so a script gets `<user>` with `sha256(event.meta.auth.user_id)`. The id uses only letters, digits, `-` and `_`. `event.data.content` is a `Conversation` from `openapi.yaml` as JSON, with `origin: agent` and `unread: true`, and optionally `folder`, e.g. `Preflight/Klaviyo`. It is unread for each user until they open it, and again when it changes. Marking a conversation read or unread, or moving it to another folder, affects only the user who does it; without `web.auth` it affects everyone.
+A flow opens a session in the Agents tab by writing it to the system bucket (`cache.system.db_name`) with [`kv_store`](/docs/flowgen/kv-store/kv-store). Under `agents.sessions.<id>` it is shared. Under `agents.sessions.<user>.<id>`, where `<user>` is the hex SHA-256 of the user id, only that user sees it; a flow started by an `http_endpoint` or `mcp_tool` with `auth` has the id in `event.meta.auth.user_id`, so a script gets `<user>` with `sha256(event.meta.auth.user_id)`. The id uses only letters, digits, `-` and `_`. `event.data.content` is a `Session` from `openapi.yaml` as JSON, with `origin: agent` and `unread: true`, and optionally `folder`, e.g. `Reports/Weekly`. It is unread for each user until they open it, and again when it changes. Marking a session read or unread, or moving it to another folder, affects only the user who does it; without `web.auth` it affects everyone.
 
 ```yaml
-- nats_kv_store:
-    name: open_conversation
+- kv_store:
+    name: open_session
     url: "{{env.NATS_URL}}"
     bucket: flowgen_system
     operation: put
-    key: "agents.conversations.{{event.meta.correlation_id}}"
+    key: "agents.sessions.{{event.meta.correlation_id}}"
     ttl: 30d
 ```
 
@@ -287,6 +291,10 @@ See [Retry](/docs/flowgen/concepts/retry) for how events, task startup, subscrib
 How long a stopping flow lets its events in flight finish, `20s` by default; a flow can set its own. After it, the tasks get 5 more seconds to hand back what they hold. See [Stopping a flow](/docs/flowgen/concepts/flows#stopping-a-flow).
 
 A pod stops its flows on shutdown, so Kubernetes' `terminationGracePeriodSeconds` must exceed the longest `shutdown_timeout` by at least 15 seconds. Flows called through `inproc_endpoint` stop after the others, so with such flows it must exceed twice the longest `shutdown_timeout` by 25 seconds. The Helm chart sets it to 65, which covers the default `shutdown_timeout` of 20 seconds either way.
+
+## `host`
+
+The address the web UI, HTTP server, MCP server, AI gateway, health server and cluster listener listen on, `0.0.0.0` by default. With `127.0.0.1` only the same machine reaches them, and the web UI, HTTP server, MCP server and AI gateway answer `403` to a request whose `Host` or `Origin` names another machine, which blocks DNS rebinding and cross-site requests. On Kubernetes keep the default: Services and probes connect to the pod's address.
 
 ## `ai_budget`
 
@@ -341,6 +349,18 @@ flowgen --config /etc/flowgen/config.yaml
 ```
 
 Flowgen validates the config at startup. Any field with a typo, missing required value, or invalid type produces an error before any flow runs.
+
+Without `--config`, flowgen runs on a workspace folder: `flowgen <folder>`, or `FLOWGEN_HOME`, or `~/flowgen`. A new folder becomes a git repository with one commit holding the system flows in `flows/system/`, `.system-flows` and `.sops.yaml`; a folder inside a git repository becomes a workspace of that repository, so one repository can hold a folder per environment. Each run starts the [lifecycle flows](/docs/flowgen/concepts/authoring#lifecycle-flows) from the last commit, and every other flow loads from the cache in `.flowgen/state.redb`. The config is `host: 127.0.0.1` with the web UI, HTTP server, MCP server, AI gateway and telemetry on. `APP_` environment variables change it.
+
+A run on a workspace whose system flows differ from the running version says so. `flowgen bootstrap [<folder>]` commits the system flows of the running version that are missing or differ, lists them in `.system-flows`, and deletes a system flow an earlier bootstrap listed that the running version lacks. A flow you added to `flows/system/`, such as a hub, is not on the list and stays.
+
+## Testing a script
+
+```bash
+flowgen test resources/scripts/transform.rhai --data samples/
+```
+
+Runs a Rhai script on sample events the way the [`script`](/docs/flowgen/core/script) task runs it, with its limits, helpers and module imports, and `ctx.cache` in memory. `--data` is a file or a folder: a `.json`, `.yaml` or `.yml` file is one event and an `.ndjson` or `.jsonl` file is one event per line, each as `event.data`. Imports resolve in the nearest `resources/` folder above the script. It prints the events each sample emits, or the error it raised, and exits with `1` when a sample fails and `2` when the script or the samples cannot be read.
 
 ## Validating a workspace
 

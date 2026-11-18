@@ -11,7 +11,6 @@ flow:
     description: "Runs a SOQL query for Account records in the industry posted to an HTTP webhook, via the REST API."
     tags: ["salesforce", "soql", "query", "http", "example"]
   tasks:
-
     - http_endpoint:
         name: receive_request
         method: POST
@@ -20,7 +19,7 @@ flow:
     # :industry is bound as a quoted, escaped SOQL literal.
     - salesforce_restapi_query:
         name: soql_query
-        credentials_path: /etc/sfdc/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
         query: "SELECT Id, Name, Industry FROM Account WHERE Industry = :industry"
         parameters:
           industry: "{{event.data.industry}}"

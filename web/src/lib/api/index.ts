@@ -1,11 +1,41 @@
 import { base } from '$app/paths';
+import { error } from '@sveltejs/kit';
 import { m } from '$lib/paraglide/messages.js';
-import type { components } from './generated';
+import { client } from './generated/client.gen';
+import type * as Types from './generated/types.gen';
 
-// The mount prefix is baked into the SvelteKit build via `paths.base` in
-// svelte.config.js (PUBLIC_BASE at build time). `base` therefore already
-// matches `web.path` in flowgen config, so an API call is just `base +
-// path`.
+export * from './generated/sdk.gen';
+
+// A failed call, with the server's reason as its message.
+export class ApiError extends Error {
+	constructor(
+		message: string,
+		readonly status: number
+	) {
+		super(message);
+	}
+}
+
+client.interceptors.error.use((error, response) => {
+	if (error instanceof Error || response === undefined) return error;
+	return new ApiError(
+		serverReason(error) ?? m.common_failed_with_status({ status: response.status }),
+		response.status
+	);
+});
+
+// Whether `err` is a failed call that answered `status`.
+export function isStatus(err: unknown, status: number): boolean {
+	return err instanceof ApiError && err.status === status;
+}
+
+// Fails a page load with a failed call's status and reason; `notFound` words a 404.
+export function loadError(err: unknown, fallback: string, notFound?: string): never {
+	if (err instanceof ApiError) error(err.status, err.status === 404 && notFound ? notFound : err.message);
+	error(503, errorMessage(err, fallback));
+}
+
+// The address of a server path under the UI's mount prefix, for streams and links.
 export function apiUrl(path: string): string {
 	const clean = path.startsWith('/') ? path : `/${path}`;
 	return `${base}${clean}`;
@@ -16,22 +46,21 @@ export function encodePath(path: string): string {
 	return path.split('/').map(encodeURIComponent).join('/');
 }
 
-// A failed response as the server explains it: its text, or the `error.message`
-// of a JSON body. Without either, the status and where to look.
-export async function failure(res: Response): Promise<Error> {
-	const body = (await res.text().catch(() => '')).trim();
-	return new Error(serverReason(body) ?? m.common_failed_with_status({ status: res.status }));
-}
-
-function serverReason(body: string): string | null {
-	if (body === '' || body.startsWith('<')) return null;
-	try {
-		const json = JSON.parse(body);
-		const message = json?.error?.message ?? json?.message ?? json?.error;
-		return typeof message === 'string' && message !== '' ? message : null;
-	} catch {
-		return body;
+function serverReason(body: unknown): string | null {
+	if (typeof body === 'string') {
+		const text = body.trim();
+		if (text === '' || text.startsWith('<')) return null;
+		try {
+			return serverReason(JSON.parse(text));
+		} catch {
+			return text;
+		}
 	}
+	if (typeof body !== 'object' || body === null) return null;
+	const { error, message } = body as { error?: unknown; message?: unknown };
+	const nested = typeof error === 'object' && error !== null ? (error as { message?: unknown }).message : error;
+	const reason = typeof nested === 'string' && nested !== '' ? nested : message;
+	return typeof reason === 'string' && reason !== '' ? reason : null;
 }
 
 // What to show for a failed request; browsers word a lost connection as
@@ -43,27 +72,35 @@ export function errorMessage(err: unknown, fallback: string): string {
 	return err instanceof Error && err.message ? err.message : fallback;
 }
 
-type Schemas = components['schemas'];
-
-export type FlowSummary = Schemas['FlowSummary'];
-export type FlowDetail = Schemas['FlowDetail'];
-export type FlowStatus = Schemas['FlowStatus'];
-export type FlowSummarySource = Schemas['FlowSummary']['source'];
-export type ResourceSummary = Schemas['ResourceSummary'];
-export type ResourceContent = Schemas['ResourceContent'];
-export type VersionInfo = Schemas['VersionInfo'];
-export type ClusterStatus = Schemas['ClusterStatus'];
-export type Connection = Schemas['Connection'];
-export type Connector = Schemas['Connector'];
-export type AgentTool = Schemas['AgentTool'];
-export type PodStatus = Schemas['PodStatus'];
-export type ConfigInfo = Schemas['ConfigInfo'];
-export type LogRecord = Schemas['LogRecord'];
-export type LogSpan = Schemas['LogSpan'];
-export type KeyValue = Schemas['KeyValue'];
-export type UserContext = Schemas['UserContext'];
-export type Change = Schemas['Change'];
-export type ChangeSummary = Schemas['ChangeSummary'];
-export type ChangeStatus = Schemas['ChangeStatus'];
-export type AuthoringTarget = Schemas['AuthoringTarget'];
-export type ValidationIssue = Schemas['ValidationIssue'];
+export type FlowSummary = Types.FlowSummary;
+export type FlowDetail = Types.FlowDetail;
+export type FlowStatus = Types.FlowStatus;
+export type FlowSummarySource = Types.FlowSummary['source'];
+export type ResourceSummary = Types.ResourceSummary;
+export type ResourceContent = Types.ResourceContent;
+export type VersionInfo = Types.VersionInfo;
+export type ClusterStatus = Types.ClusterStatus;
+export type Connection = Types.Connection;
+export type Connector = Types.Connector;
+export type CredentialsForm = Types.CredentialsForm;
+export type CredentialsField = Types.CredentialsField;
+export type AgentTool = Types.AgentTool;
+export type PodStatus = Types.PodStatus;
+export type ConfigInfo = Types.ConfigInfo;
+export type LogRecord = Types.LogRecord;
+export type LogLevel = Types.LogLevel;
+export type LogSpan = Types.LogSpan;
+export type KeyValue = Types.KeyValue;
+export type UserContext = Types.UserContext;
+export type Change = Types.Change;
+export type ChangeSummary = Types.ChangeSummary;
+export type ChangeProposal = Types.ChangeProposal;
+export type ChangeStatus = Types.ChangeStatus;
+export type AuthoringTarget = Types.AuthoringTarget;
+export type ValidationIssue = Types.ValidationIssue;
+export type Hub = Types.Hub;
+export type HubTemplate = Types.HubTemplate;
+export type SessionMessage = Types.SessionMessage;
+export type Session = Types.Session;
+export type SessionSummary = Types.SessionSummary;
+export type ToolStep = Types.ToolStep;

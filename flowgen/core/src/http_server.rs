@@ -25,7 +25,7 @@ use dashmap::DashMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use crate::auth::AuthProvider;
 
@@ -46,12 +46,6 @@ pub enum Error {
         #[source]
         source: std::io::Error,
     },
-    /// A caller's request headers did not satisfy a registration's
-    /// required `headers`. Not returned to the caller directly — roles map
-    /// this to whatever wire error keeps a scoped registration
-    /// indistinguishable from one that does not exist.
-    #[error("Call to '{task}' rejected: caller headers did not satisfy the required headers")]
-    HeadersRejected { task: String },
 }
 
 /// Marker trait for registrations that know which flow they belong to.
@@ -67,46 +61,6 @@ pub trait HasFlowName {
     fn is_stopped(&self) -> bool {
         false
     }
-}
-
-/// Checks a registration's required `headers` (empty = reachable by
-/// everyone) against the actual request headers. All entries must match.
-/// Shared by every role that scopes callers this way (AI gateway proxies,
-/// MCP tools), so the semantics can't drift between them.
-pub fn headers_satisfy(
-    headers: &axum::http::HeaderMap,
-    required: &std::collections::HashMap<String, String>,
-) -> bool {
-    required.iter().all(|(name, expected)| {
-        headers
-            .get(name.as_str())
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|actual| actual == expected)
-    })
-}
-
-/// Emits a `task.run`/`task.handle` error so a call rejected by `headers`
-/// scoping shows up in that flow's Activity panel instead of only the
-/// role's own request log. Shared by every role that scopes callers via
-/// `headers_satisfy` (AI gateway proxies, MCP tools/resources/prompts).
-pub fn record_headers_rejected_activity(
-    flow_name: &str,
-    task_name: &str,
-    task_id: usize,
-    task_type: &str,
-) {
-    let run_span = tracing::info_span!(
-        "task.run",
-        flow = %flow_name,
-        task = %task_name,
-        task_id = task_id,
-        task_type = %task_type,
-    );
-    let e = Error::HeadersRejected {
-        task: task_name.to_string(),
-    };
-    tracing::info_span!(parent: &run_span, "task.handle", duration_ms = tracing::field::Empty)
-        .in_scope(|| error!(error = %e, event.subject = %task_name));
 }
 
 /// Common axum state shared with every dispatcher.
@@ -309,8 +263,8 @@ impl<D: Dispatcher> HttpServer<D> {
             .is_some_and(|registration| registration.flow_name() == flow_name)
     }
 
-    /// Removes every registration owned by the named flow.
-    pub fn deregister_flow(&self, flow_name: &str) {
+    /// Removes every registration owned by the named flow; returns how many.
+    pub fn deregister_flow(&self, flow_name: &str) -> usize {
         let before = self.table.len();
         self.table.retain(|_, reg| reg.flow_name() != flow_name);
         let removed = before.saturating_sub(self.table.len());
@@ -321,12 +275,13 @@ impl<D: Dispatcher> HttpServer<D> {
                 "Deregistered HTTP server entries for flow"
             );
         }
+        removed
     }
 
-    /// Starts the server on `port`. The router is built once via the dispatcher and the
+    /// Starts the server on `host` and `port`. The router is built once via the dispatcher and the
     /// listener serves requests until the future is dropped or returns.
-    pub async fn start_server(&self, port: u16) -> Result<(), Error> {
-        let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
+    pub async fn start_server(&self, host: &str, port: u16) -> Result<(), Error> {
+        let listener = tokio::net::TcpListener::bind((host, port))
             .await
             .map_err(|source| Error::BindListener { port, source })?;
         self.serve(listener).await
@@ -349,7 +304,7 @@ impl<D: Dispatcher> HttpServer<D> {
             path: self.path.clone(),
             extras: self.extras.clone(),
         };
-        let router = D::build_router(state);
+        let router = local_only(D::build_router(state), &listener);
 
         axum::serve(listener, router)
             .await
@@ -362,9 +317,129 @@ impl<D: Dispatcher> HttpServer<D> {
     }
 }
 
+/// `router`, which on a `listener` reachable only from this machine answers
+/// 403 to a request whose `Host` or `Origin` names another machine, as a web
+/// page using DNS rebinding or a cross-site request would send.
+pub fn local_only(router: Router, listener: &tokio::net::TcpListener) -> Router {
+    match listener.local_addr() {
+        Ok(address) if address.ip().is_loopback() => {
+            router.layer(axum::middleware::from_fn(reject_remote_names))
+        }
+        _ => router,
+    }
+}
+
+/// Whether the `Host` and `Origin` of a request, when set, name this machine.
+fn names_this_machine(headers: &axum::http::HeaderMap) -> bool {
+    let named = |header: axum::http::HeaderName| headers.get(header).map(|value| value.to_str());
+    let host = match named(axum::http::header::HOST) {
+        Some(Ok(host)) => loopback(host),
+        Some(Err(_)) => false,
+        None => true,
+    };
+    let origin = match named(axum::http::header::ORIGIN) {
+        Some(Ok(origin)) => match origin.split_once("://") {
+            Some((_, authority)) => loopback(authority),
+            None => false,
+        },
+        Some(Err(_)) => false,
+        None => true,
+    };
+    host && origin
+}
+
+async fn reject_remote_names(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    match names_this_machine(request.headers()) {
+        true => next.run(request).await,
+        false => {
+            warn!("Refused a request to a local server that names another machine");
+            axum::response::IntoResponse::into_response((
+                axum::http::StatusCode::FORBIDDEN,
+                "This server answers only requests addressed to this machine",
+            ))
+        }
+    }
+}
+
+/// Whether `authority`, a host with an optional port, names this machine.
+fn loopback(authority: &str) -> bool {
+    if let Ok(ip) = authority.parse::<std::net::IpAddr>() {
+        return ip.is_loopback();
+    }
+    let host = match authority.strip_prefix('[') {
+        Some(bracketed) => match bracketed.split_once(']') {
+            Some((ip, _)) => ip,
+            None => return false,
+        },
+        None => match authority.rsplit_once(':') {
+            Some((host, port)) if port.chars().all(|c| c.is_ascii_digit()) => host,
+            _ => authority,
+        },
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_names_of_this_machine_are_loopback() {
+        for local in [
+            "127.0.0.1",
+            "127.0.0.1:8080",
+            "localhost:3001",
+            "LOCALHOST",
+            "[::1]:8080",
+            "::1",
+        ] {
+            assert!(loopback(local), "{local}");
+        }
+        for remote in [
+            "evil.example.com",
+            "evil.example.com:8080",
+            "10.0.0.1:80",
+            "localhost.evil.com",
+            "[::1",
+            "",
+        ] {
+            assert!(!loopback(remote), "{remote}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_local_server_refuses_requests_that_name_another_machine() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = local_only(
+            Router::new().route("/", axum::routing::post(|| async { "ok" })),
+            &listener,
+        );
+        tokio::spawn(async move { axum::serve(listener, router).await });
+        let client = reqwest::Client::new();
+        let status = |host: Option<&'static str>, origin: Option<&'static str>| {
+            let mut request = client.post(format!("http://{address}/"));
+            if let Some(host) = host {
+                request = request.header("Host", host);
+            }
+            if let Some(origin) = origin {
+                request = request.header("Origin", origin);
+            }
+            async move { request.send().await.unwrap().status().as_u16() }
+        };
+
+        assert_eq!(status(None, None).await, 200);
+        assert_eq!(status(None, Some("http://localhost:5173")).await, 200);
+        assert_eq!(status(Some("evil.example.com"), None).await, 403);
+        assert_eq!(status(None, Some("https://evil.example.com")).await, 403);
+        assert_eq!(status(None, Some("null")).await, 403);
+    }
 
     #[derive(Clone, Debug)]
     struct TestReg {

@@ -1,0 +1,50 @@
+# Puts, gets, lists and deletes keys in a redb file every minute.
+# Swap the url for nats://<host>:4222 (and add credentials_path) to use NATS.
+flow:
+  labels:
+    display_name: "Key-Value Store Operations"
+    description: "Puts, gets, lists and deletes keys in a key-value store."
+    tags: ["kv-store", "redb", "example"]
+  tasks:
+    - generate:
+        name: tick
+        interval: 1m
+        payload:
+          content: "hello"
+
+    # Writes event.data.content under the key, for a day.
+    - kv_store:
+        name: put
+        url: "redb://.flowgen/examples.redb"
+        bucket: examples
+        operation: put
+        key: "greetings.hello"
+        ttl: 1d
+
+    # Reads the key: {key, content, found}.
+    - kv_store:
+        name: get
+        url: "redb://.flowgen/examples.redb"
+        bucket: examples
+        operation: get
+        key: "greetings.hello"
+
+    # Lists the keys under the prefix, with their values.
+    - kv_store:
+        name: list
+        url: "redb://.flowgen/examples.redb"
+        bucket: examples
+        operation: list
+        key_prefix: "greetings."
+        include_values: true
+
+    - log:
+        name: print
+
+    # Deletes the key.
+    - kv_store:
+        name: delete
+        url: "redb://.flowgen/examples.redb"
+        bucket: examples
+        operation: delete
+        key: "greetings.hello"

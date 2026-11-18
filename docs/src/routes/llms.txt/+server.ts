@@ -7,9 +7,8 @@ export const GET: RequestHandler = () => {
 	const sections = navigation.map((section) => {
 		const items = [...section.items, ...(section.subsections ?? []).flatMap((sub) => sub.items)];
 		const lines = items.flatMap((item) => {
-			const markdown = page(item.href);
-			if (markdown === undefined) return [];
-			const about = summary(markdown);
+			if (page(item.href) === undefined) return [];
+			const about = summary(item.href);
 			return [`- [${item.title}](${markdownUrl(item.href)})${about ? `: ${about}` : ''}`];
 		});
 		return `## ${section.title}\n\n${lines.join('\n')}`;

@@ -93,11 +93,11 @@ pub struct Completion {
     /// Example: "http://localhost:11434/v1" for Ollama, "http://localhost:1234/v1" for LM Studio.
     pub endpoint: Option<String>,
     /// Optional HTTP headers sent with every request (`provider: custom` /
-    /// Ollama only), same shape as `http_endpoint.headers`. Used, for
-    /// example, to send `X-Flowgen-Client` when the downstream endpoint is
-    /// another flowgen `llm_proxy` scoped by `headers`.
+    /// Ollama only), same shape as `http_endpoint.headers`.
     #[serde(default)]
     pub headers: Option<std::collections::HashMap<String, String>>,
+    /// Options of `provider: vertexai`.
+    pub vertexai: Option<VertexAiOptions>,
     /// Optional system prompt to set context for the AI (supports resource loading).
     /// Can be inline string or external file (e.g., .md, .txt) via resource loader.
     pub system_prompt: Option<Source>,
@@ -315,16 +315,14 @@ struct ReasoningEffortParams {
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct McpServerConfig {
-    /// MCP server endpoint URL (e.g., "http://localhost:3001/mcp").
+    /// MCP server endpoint URL (e.g., "http://localhost:3001/mcp"); supports `{{env.VAR_NAME}}` templates.
     pub url: String,
     /// Optional path to credentials file for authenticating with the MCP server.
     /// Uses the same format as http_request credentials (JSON file with
     /// `bearer_auth` and/or `basic_auth` fields).
     pub credentials_path: Option<std::path::PathBuf>,
     /// Optional HTTP headers sent with every request to this MCP server,
-    /// same shape as `http_endpoint.headers`. Used, for example, to send
-    /// `X-Flowgen-Client` so the server can scope which tools this agent
-    /// can see and call via the tool's `headers` field.
+    /// same shape as `http_endpoint.headers`.
     pub headers: Option<std::collections::HashMap<String, String>>,
     /// Calls this server with the signed-in user's token as the bearer, so it
     /// must trust the same identity provider.
@@ -398,6 +396,8 @@ impl ManagedToolSink for AllowedTools {
 
 impl ConfigExt for Completion {}
 
+impl ConfigExt for McpServerConfig {}
+
 /// AI provider options.
 ///
 /// Providers not listed here can be reached via `Provider::Custom` with
@@ -414,7 +414,7 @@ pub enum Provider {
     Cohere,
     /// Google AI provider (Gemini API).
     Google,
-    /// Google Vertex AI provider (uses Application Default Credentials).
+    /// Google Vertex AI provider; a service account key, else Application Default Credentials.
     VertexAi,
     /// Groq provider.
     Groq,
@@ -500,18 +500,8 @@ pub enum Error {
     },
     #[error("Missing credentials path for provider: {provider}")]
     MissingCredentialsPath { provider: String },
-    #[error("Failed to read credentials file at {path:?}: {source}")]
-    ReadCredentials {
-        path: std::path::PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("Failed to parse credentials file at {path:?}: {source}")]
-    ParseCredentials {
-        path: std::path::PathBuf,
-        #[source]
-        source: serde_json::Error,
-    },
+    #[error(transparent)]
+    Credentials(flowgen_core::credentials::Error),
     #[error("Rig client error: {}", _0)]
     RigClient(String),
     #[error("Completion generation failed: {message}")]
@@ -542,6 +532,8 @@ pub enum Error {
     McpConnection { url: String, reason: String },
     #[error("MCP server {url} cannot set both on_behalf_of_user and credentials_path")]
     McpUserCredentials { url: String },
+    #[error(transparent)]
+    ProviderOptions(#[from] flowgen_core::config::ProviderOptionsMismatch),
     #[error("MCP server {url} needs a signed-in user")]
     McpUserRequired { url: String },
     #[error("MCP server {url} rejected the signed-in user's token")]
@@ -616,6 +608,16 @@ impl Error {
 impl Completion {
     /// Checks that `max_turns` leaves room for the model calls the task needs.
     pub fn validate(&self) -> Result<(), Error> {
+        match (&self.vertexai, &self.provider) {
+            (None, _) | (Some(_), Provider::VertexAi) => {}
+            (Some(_), provider) => {
+                return Err(flowgen_core::config::ProviderOptionsMismatch {
+                    options: "vertexai",
+                    used: provider.as_str().to_string(),
+                }
+                .into())
+            }
+        }
         let min_turns = match self.mcp_servers.is_empty() {
             true => 1,
             false => 2,
@@ -730,22 +732,26 @@ impl From<CompletionUsage> for crate::ai_gateway::config::Usage {
     }
 }
 
-/// API credentials for AI providers.
+/// Options of `provider: vertexai`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq, Hash)]
+#[serde(deny_unknown_fields)]
+pub struct VertexAiOptions {
+    /// Google Cloud project; defaults to `GOOGLE_CLOUD_PROJECT`, else the service account key's `project_id`.
+    pub project_id: Option<String>,
+    /// Google Cloud location; defaults to `GOOGLE_CLOUD_LOCATION`, else `global`.
+    pub location: Option<String>,
+}
+
+/// API credentials for AI providers; `vertexai` reads a service account key instead.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Credentials {
-    /// API key for the provider; every provider needs one except `vertexai`, `ollama` and `custom`.
+    /// API key for the provider; `ollama` and `custom` can go without.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
     /// Optional organization ID (OpenAI, Anthropic).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub organization_id: Option<String>,
-    /// Optional project ID (Google/Gemini).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub project_id: Option<String>,
-    /// Optional region (AWS Bedrock).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub region: Option<String>,
 }
 
 /// One live MCP server connection plus the credentials used to establish it.
@@ -757,10 +763,13 @@ struct McpServerConnection {
     on_behalf_of_user: bool,
     /// Header value the connection was opened with, for change detection.
     active_header: Option<String>,
+    /// How to use the server, from its `initialize` response.
+    instructions: Option<String>,
     connection: McpConnection,
 }
 
-/// Closes the connection, which the tools of a prefixed server would keep open.
+/// Closes the connection, which the tools of a prefixed server would keep
+/// open, when the task did not close it on stopping.
 impl Drop for McpServerConnection {
     fn drop(&mut self) {
         let connection = self.connection.clone();
@@ -777,9 +786,42 @@ impl Drop for McpServerConnection {
 struct McpTools {
     handle: ToolServerHandle,
     connections: Vec<McpServerConnection>,
+    /// The servers' instructions for the system prompt.
+    instructions: Option<String>,
+}
+
+/// The `instructions` of the servers that give them, separated by a blank line.
+fn servers_instructions(connections: &[McpServerConnection]) -> Option<String> {
+    let given: Vec<&str> = connections
+        .iter()
+        .filter_map(|server| server.instructions.as_deref())
+        .collect();
+    match given.is_empty() {
+        true => None,
+        false => Some(given.join("\n\n")),
+    }
+}
+
+/// The task's system prompt followed by its MCP servers' instructions.
+fn with_instructions(system_prompt: Option<String>, instructions: Option<&str>) -> Option<String> {
+    match (system_prompt, instructions) {
+        (Some(prompt), Some(instructions)) => Some(format!("{prompt}\n\n{instructions}")),
+        (prompt, None) => prompt,
+        (None, Some(instructions)) => Some(instructions.to_string()),
+    }
 }
 
 impl McpTools {
+    /// Closes every connection and waits until each has closed.
+    async fn close(&self) {
+        futures_util::future::join_all(
+            self.connections
+                .iter()
+                .map(|server| server.connection.close()),
+        )
+        .await;
+    }
+
     /// Whether every connection still carries the `Authorization` header it
     /// would get now.
     async fn is_current(&self, user_token: Option<&str>) -> Result<bool, Error> {
@@ -1023,17 +1065,24 @@ async fn connect_mcp_tools(
             }
         }
 
+        let instructions = connection
+            .peer()
+            .peer_info()
+            .and_then(|info| info.instructions.clone())
+            .filter(|text| !text.trim().is_empty());
         connections.push(McpServerConnection {
             url: mcp_config.url.clone(),
             creds: oauth_creds,
             on_behalf_of_user: mcp_config.on_behalf_of_user,
             active_header: header_value,
+            instructions,
             connection,
         });
     }
 
     Ok(McpTools {
         handle,
+        instructions: servers_instructions(&connections),
         connections,
     })
 }
@@ -1110,30 +1159,23 @@ async fn build_agent_client(
     task_context: &flowgen_core::task::context::TaskContext,
     static_context: Option<Vec<flowgen_core::resource::Source>>,
 ) -> Result<crate::agent::AgentClient, Error> {
-    let credentials =
-        match config.provider {
-            Provider::Custom => {
-                if let Some(path) = &config.credentials_path {
-                    Some(load_credentials(path).await?)
-                } else {
-                    None
-                }
-            }
-            _ => {
-                let path = config.credentials_path.as_ref().ok_or_else(|| {
-                    Error::MissingCredentialsPath {
-                        provider: config.provider.as_str().to_string(),
-                    }
-                })?;
-                Some(load_credentials(path).await?)
-            }
-        };
-
     let mut builder =
         crate::agent::ClientBuilder::new(config.provider.clone(), config.model.clone());
 
-    if let Some(creds) = credentials {
-        builder = builder.credentials(creds);
+    match (&config.provider, &config.credentials_path) {
+        (Provider::VertexAi, Some(path)) => {
+            builder = builder.service_account(load_credentials(path).await?);
+        }
+        (_, Some(path)) => builder = builder.credentials(load_credentials(path).await?),
+        (Provider::VertexAi | Provider::Ollama | Provider::Custom, None) => {}
+        (provider, None) => {
+            return Err(Error::MissingCredentialsPath {
+                provider: provider.as_str().to_string(),
+            })
+        }
+    }
+    if let Some(vertexai) = &config.vertexai {
+        builder = builder.vertexai(vertexai.clone());
     }
     if let Some(endpoint) = &config.endpoint {
         builder = builder.endpoint(endpoint.clone());
@@ -1187,19 +1229,13 @@ async fn build_agent_client(
         .map_err(|source| Error::AgentClient { source })
 }
 
-/// Loads credentials from a JSON file.
-async fn load_credentials(path: &std::path::Path) -> Result<Credentials, Error> {
-    let content = tokio::fs::read_to_string(path)
+/// Loads credentials from a JSON file, or its keychain entry.
+async fn load_credentials<T: serde::de::DeserializeOwned>(
+    path: &std::path::Path,
+) -> Result<T, Error> {
+    flowgen_core::credentials::load_credentials(path)
         .await
-        .map_err(|e| Error::ReadCredentials {
-            path: path.to_path_buf(),
-            source: e,
-        })?;
-
-    serde_json::from_str::<Credentials>(&content).map_err(|e| Error::ParseCredentials {
-        path: path.to_path_buf(),
-        source: e,
-    })
+        .map_err(Error::Credentials)
 }
 
 /// Handles individual completion operations.
@@ -1235,6 +1271,7 @@ struct ClientId {
     model: String,
     endpoint: Option<String>,
     credentials_path: Option<std::path::PathBuf>,
+    vertexai: Option<VertexAiOptions>,
 }
 
 /// MCP connections and the agent clients built on their tools, kept per task
@@ -1264,6 +1301,17 @@ impl Toolset {
         }
     }
 
+    /// Its MCP servers' instructions for the system prompt.
+    fn instructions(&self) -> Option<&str> {
+        self.mcp.as_ref()?.instructions.as_deref()
+    }
+
+    async fn close(&self) {
+        if let Some(mcp) = &self.mcp {
+            mcp.close().await;
+        }
+    }
+
     /// The agent client for `rendered`, built on first use.
     async fn client(
         &self,
@@ -1276,6 +1324,7 @@ impl Toolset {
             model: rendered.model.clone(),
             endpoint: rendered.endpoint.clone(),
             credentials_path: rendered.credentials_path.clone(),
+            vertexai: rendered.vertexai.clone(),
         };
         let mut clients = self.clients.lock().await;
         if let Some(client) = clients.get(&id) {
@@ -1316,6 +1365,14 @@ impl ToolsetSlot {
         let toolset = Arc::new(Toolset::connect(config, user_token).await?);
         *self.toolset.lock().await = Some(Arc::clone(&toolset));
         Ok(toolset)
+    }
+
+    /// Closes the open toolset's connections, if any.
+    async fn close(&self) {
+        let toolset = self.toolset.lock().await.take();
+        if let Some(toolset) = toolset {
+            toolset.close().await;
+        }
     }
 
     async fn fresh(&self, user_token: Option<&str>) -> Result<Option<Arc<Toolset>>, Error> {
@@ -1386,6 +1443,13 @@ impl UserToolsets {
         user.slot.current(config, Some(token)).await
     }
 
+    /// Closes every user's connections.
+    async fn close(&self) {
+        let users: Vec<Arc<UserToolset>> =
+            self.0.lock().await.drain().map(|(_, user)| user).collect();
+        futures_util::future::join_all(users.iter().map(|user| user.slot.close())).await;
+    }
+
     /// Closes the connections of users idle for [`USER_MCP_IDLE`] at `now`.
     async fn close_idle(&self, now: std::time::Instant) {
         self.0
@@ -1399,7 +1463,7 @@ impl UserToolsets {
 struct Agent {
     client: Arc<crate::agent::AgentClient>,
     images: Vec<String>,
-    _toolset: Arc<Toolset>,
+    toolset: Arc<Toolset>,
 }
 
 /// Images go as base64, since some providers don't fetch URLs.
@@ -1468,6 +1532,12 @@ fn user_id(event: &Event) -> Option<&str> {
 }
 
 impl EventHandler {
+    /// Closes the task's and every user's MCP connections and waits until they have closed.
+    async fn close(&self) {
+        self.toolset.close().await;
+        self.users.close().await;
+    }
+
     /// The charge of an agent run's model calls, when the app sets a budget.
     fn spending(&self, event: &Event, model: &str) -> Option<crate::budget::Spending> {
         self.task_context
@@ -1537,7 +1607,7 @@ impl EventHandler {
         Ok(Agent {
             client,
             images,
-            _toolset: toolset,
+            toolset,
         })
     }
 
@@ -1548,7 +1618,7 @@ impl EventHandler {
         let Agent {
             client,
             images,
-            _toolset,
+            toolset,
         } = self.resolve_client(&event).await?;
         let event = Arc::new(event);
         let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
@@ -1570,10 +1640,11 @@ impl EventHandler {
                     .await;
             }
 
+            let system_prompt = with_instructions(rendered_system_prompt, toolset.instructions());
             let completion = client
                 .complete(
                     user_message(&self.image_client, &self.config, rendered_prompt, images).await?,
-                    rendered_system_prompt.as_deref(),
+                    system_prompt.as_deref(),
                     self.spending(&event, client.model()),
                 )
                 .await
@@ -1864,7 +1935,7 @@ impl EventHandler {
         let Agent {
             client,
             images,
-            _toolset,
+            toolset,
         } = self.resolve_client(&event).await?;
 
         flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
@@ -1884,10 +1955,11 @@ impl EventHandler {
                     .await;
             }
 
+            let system_prompt = with_instructions(rendered_system_prompt, toolset.instructions());
             let mut stream = client
                 .complete_stream(
                     user_message(&self.image_client, &self.config, rendered_prompt, images).await?,
-                    rendered_system_prompt.as_deref(),
+                    system_prompt.as_deref(),
                     self.spending(&event, client.model()),
                 )
                 .await;
@@ -2205,13 +2277,22 @@ impl flowgen_core::task::runner::Runner for Processor {
     /// connections open on their first request.
     async fn init(&self) -> Result<Self::EventHandler, Self::Error> {
         validate_mcp_servers(&self.config)?;
-        let toolset = match user_mcp_server(&self.config) {
+        let mut config = (*self.config).clone();
+        config.mcp_servers = self
+            .config
+            .mcp_servers
+            .iter()
+            .map(|server| server.render(&std::collections::HashMap::<String, String>::new()))
+            .collect::<Result<_, _>>()
+            .map_err(|source| Error::ConfigRender { source })?;
+        let config = Arc::new(config);
+        let toolset = match user_mcp_server(&config) {
             Some(_) => None,
-            None => Some(Arc::new(Toolset::connect(&self.config, None).await?)),
+            None => Some(Arc::new(Toolset::connect(&config, None).await?)),
         };
 
         Ok(EventHandler {
-            config: Arc::clone(&self.config),
+            config,
             task_id: self.task_id,
             tx: self.tx.clone(),
             task_type: self.task_type,
@@ -2273,7 +2354,7 @@ impl flowgen_core::task::runner::Runner for Processor {
 
         flowgen_core::task::runner::process_events(
             self.rx,
-            event_handler,
+            Arc::clone(&event_handler),
             &retry_config,
             self.config.max_in_flight,
             &self.task_context,
@@ -2282,6 +2363,7 @@ impl flowgen_core::task::runner::Runner for Processor {
         if let Some(sweeper) = sweeper {
             sweeper.abort();
         }
+        event_handler.close().await;
         Ok(())
     }
 }
@@ -2367,13 +2449,16 @@ impl ProcessorBuilder {
 mod tests {
     use super::*;
     use axum::response::IntoResponse;
+    use flowgen_core::task::runner::Runner;
     use serde_json::json;
 
     /// An MCP server with one tool, `lookup`, that records the `Authorization`
-    /// header of every request and, as `call:<name>`, every tool call.
+    /// header of every request, as `call:<name>` every tool call, and as
+    /// `delete` every closed session.
     async fn mcp_server() -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
         let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
         let recorded = Arc::clone(&seen);
+        let deleted = Arc::clone(&seen);
         let post = move |headers: http::HeaderMap, body: axum::Json<serde_json::Value>| {
             let recorded = Arc::clone(&recorded);
             async move {
@@ -2386,11 +2471,13 @@ mod tests {
                 let Some(id) = body.get("id").cloned() else {
                     return axum::http::StatusCode::ACCEPTED.into_response();
                 };
+                let opens_session = body["method"] == "initialize";
                 let result = match body["method"].as_str() {
                     Some("initialize") => json!({
                         "protocolVersion": body["params"]["protocolVersion"],
                         "capabilities": {"tools": {}},
-                        "serverInfo": {"name": "a", "version": "0"}
+                        "serverInfo": {"name": "a", "version": "0"},
+                        "instructions": "Use lookup."
                     }),
                     Some("tools/list") => json!({
                         "tools": [{"name": "lookup", "inputSchema": {"type": "object"}}]
@@ -2404,14 +2491,24 @@ mod tests {
                     }
                     _ => json!({}),
                 };
-                axum::Json(json!({"jsonrpc": "2.0", "id": id, "result": result})).into_response()
+                let response = axum::Json(json!({"jsonrpc": "2.0", "id": id, "result": result}));
+                match opens_session {
+                    true => ([("mcp-session-id", "a")], response).into_response(),
+                    false => response.into_response(),
+                }
             }
         };
         let app = axum::Router::new().route(
             "/mcp",
             axum::routing::post(post)
                 .get(|| async { axum::http::StatusCode::METHOD_NOT_ALLOWED })
-                .delete(|| async { axum::http::StatusCode::OK }),
+                .delete(move || {
+                    let deleted = Arc::clone(&deleted);
+                    async move {
+                        deleted.lock().unwrap().push("delete".to_string());
+                        axum::http::StatusCode::OK
+                    }
+                }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/mcp", listener.local_addr().unwrap());
@@ -2428,6 +2525,7 @@ mod tests {
             credentials_path: None,
             endpoint: None,
             headers: None,
+            vertexai: None,
             system_prompt: None,
             temperature: None,
             max_tokens: None,
@@ -2587,6 +2685,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_servers_instructions_follow_the_system_prompt() {
+        let (first_url, _) = mcp_server().await;
+        let (second_url, _) = mcp_server().await;
+        let server = |url: &str, prefix: Option<&str>| McpServerConfig {
+            on_behalf_of_user: false,
+            prefix: prefix.map(str::to_string),
+            ..user_server(url)
+        };
+        let mut config = agent(server(&first_url, None));
+        let one = connect_mcp_tools(&config, None).await.unwrap();
+        config.mcp_servers = vec![server(&first_url, None), server(&second_url, Some("b_"))];
+        let two = connect_mcp_tools(&config, None).await.unwrap();
+
+        assert_eq!(one.instructions.as_deref(), Some("Use lookup."));
+        assert_eq!(
+            two.instructions.as_deref(),
+            Some("Use lookup.\n\nUse lookup.")
+        );
+        assert_eq!(
+            with_instructions(Some("Be brief.".to_string()), one.instructions.as_deref()),
+            Some("Be brief.\n\nUse lookup.".to_string())
+        );
+        assert_eq!(
+            with_instructions(None, one.instructions.as_deref()),
+            Some("Use lookup.".to_string())
+        );
+        assert_eq!(
+            with_instructions(Some("Be brief.".to_string()), None),
+            Some("Be brief.".to_string())
+        );
+    }
+
+    #[tokio::test]
     async fn dropping_the_tools_of_a_prefixed_server_closes_its_connection() {
         let (mcp_url, _) = mcp_server().await;
         let config = agent(McpServerConfig {
@@ -2604,6 +2735,34 @@ mod tests {
                 .await
                 .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn a_stopping_task_closes_its_mcp_sessions_before_it_returns() {
+        let (mcp_url, seen) = mcp_server().await;
+        let config = agent(McpServerConfig {
+            on_behalf_of_user: false,
+            ..user_server(&mcp_url)
+        });
+        let (_tx, rx) = tokio::sync::mpsc::channel(1);
+        let processor = ProcessorBuilder::new()
+            .config(Arc::new(config.clone()))
+            .receiver(rx)
+            .task_type("ai_completion")
+            .task_context(Arc::new(task_context()))
+            .build()
+            .await
+            .unwrap();
+        let handler = processor.init().await.unwrap();
+        handler.toolset.current(&config, None).await.unwrap();
+
+        handler.close().await;
+
+        assert!(seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request == "delete"));
     }
 
     #[tokio::test]
@@ -3208,8 +3367,6 @@ mod tests {
         let creds = Credentials {
             api_key: Some("sk-test123".to_string()),
             organization_id: Some("org-123".to_string()),
-            project_id: None,
-            region: None,
         };
 
         let json = serde_json::to_string(&creds).unwrap();
@@ -3383,23 +3540,14 @@ mod tests {
         let creds: Credentials = serde_json::from_str(json).unwrap();
         assert_eq!(creds.api_key.as_deref(), Some("sk-abc"));
         assert_eq!(creds.organization_id, None);
-        assert_eq!(creds.project_id, None);
-        assert_eq!(creds.region, None);
     }
 
     #[test]
     fn credentials_all_fields() {
-        let json = r#"{
-            "api_key": "sk-123",
-            "organization_id": "org-456",
-            "project_id": "proj-789",
-            "region": "us-east-1"
-        }"#;
+        let json = r#"{"api_key": "sk-123", "organization_id": "org-456"}"#;
         let creds: Credentials = serde_json::from_str(json).unwrap();
         assert_eq!(creds.api_key.as_deref(), Some("sk-123"));
         assert_eq!(creds.organization_id, Some("org-456".to_string()));
-        assert_eq!(creds.project_id, Some("proj-789".to_string()));
-        assert_eq!(creds.region, Some("us-east-1".to_string()));
     }
 
     #[test]
@@ -3407,29 +3555,66 @@ mod tests {
         let creds = Credentials {
             api_key: Some("sk-x".to_string()),
             organization_id: None,
-            project_id: None,
-            region: None,
         };
         let v = serde_json::to_value(&creds).unwrap();
         let obj = v.as_object().unwrap();
         assert!(obj.contains_key("api_key"));
         assert!(!obj.contains_key("organization_id"));
-        assert!(!obj.contains_key("project_id"));
-        assert!(!obj.contains_key("region"));
     }
 
     #[test]
-    fn a_vertex_ai_file_without_a_key_loads_and_a_keyed_provider_needs_one() {
-        let vertex: Credentials =
-            serde_json::from_str(r#"{"project_id": "p", "region": "r"}"#).unwrap();
+    fn a_keyed_provider_needs_a_key() {
         let keyless = crate::agent::ClientBuilder::new(Provider::OpenAi, "m".to_string())
-            .credentials(vertex.clone())
+            .credentials(Credentials {
+                api_key: None,
+                organization_id: None,
+            })
             .build();
 
-        assert_eq!(vertex.api_key, None);
         assert!(matches!(
             keyless,
             Err(crate::agent::Error::MissingCredentials)
+        ));
+    }
+
+    #[test]
+    fn vertex_ai_options_are_task_config_for_vertex_ai_only() {
+        let config = |provider: &str| -> Completion {
+            serde_yaml::from_str(&format!(
+                "name: a\nprovider: {provider}\nmodel: m\nprompt: p\nvertexai:\n  project_id: p\n  location: l\n"
+            ))
+            .unwrap()
+        };
+        let credentials = serde_json::from_str::<Credentials>(r#"{"project_id": "p"}"#);
+
+        assert_eq!(
+            config("vertexai").vertexai,
+            Some(VertexAiOptions {
+                project_id: Some("p".to_string()),
+                location: Some("l".to_string()),
+            })
+        );
+        assert!(config("vertexai").validate().is_ok());
+        assert_eq!(
+            config("openai").validate().unwrap_err().to_string(),
+            "`vertexai` options don't apply to openai"
+        );
+        assert!(credentials.is_err());
+    }
+
+    #[test]
+    fn a_vertex_ai_client_signs_in_with_its_service_account_key() {
+        let client = crate::agent::ClientBuilder::new(Provider::VertexAi, "m".to_string())
+            .vertexai(VertexAiOptions {
+                project_id: Some("p".to_string()),
+                location: None,
+            })
+            .service_account(serde_json::Value::Object(Default::default()))
+            .build();
+
+        assert!(matches!(
+            client,
+            Err(crate::agent::Error::ServiceAccount { .. })
         ));
     }
 
@@ -3443,6 +3628,7 @@ mod tests {
             credentials_path: None,
             endpoint: None,
             headers: None,
+            vertexai: None,
             system_prompt: None,
             temperature: None,
             max_tokens: None,
@@ -3486,6 +3672,7 @@ mod tests {
             credentials_path: Some(PathBuf::from("/secrets/anthropic.json")),
             endpoint: None,
             headers: None,
+            vertexai: None,
             system_prompt: Some(Source::Inline("You are a helpful assistant.".to_string())),
             temperature: Some(0.7),
             max_tokens: Some(1000),
@@ -3541,6 +3728,7 @@ mod tests {
             credentials_path: None,
             endpoint: None,
             headers: None,
+            vertexai: None,
             system_prompt: None,
             temperature: None,
             max_tokens: None,
@@ -3571,6 +3759,7 @@ mod tests {
             credentials_path: None, // Local providers may not need credentials.
             endpoint: Some("http://localhost:11434/v1".to_string()),
             headers: None,
+            vertexai: None,
             system_prompt: None,
             temperature: Some(0.8),
             max_tokens: Some(2000),
@@ -3606,6 +3795,7 @@ mod tests {
             credentials_path: Some(PathBuf::from("/secrets/openai.json")),
             endpoint: None,
             headers: None,
+            vertexai: None,
             system_prompt: Some(Source::Resource {
                 resource: "prompts/system.md".to_string(),
             }),
@@ -3641,6 +3831,7 @@ mod tests {
             credentials_path: Some(PathBuf::from("/secrets/openai.json")),
             endpoint: None,
             headers: None,
+            vertexai: None,
             system_prompt: Some(Source::Inline("Answer based on context".to_string())),
             temperature: Some(0.3),
             max_tokens: Some(500),

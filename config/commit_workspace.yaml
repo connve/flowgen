@@ -1,0 +1,33 @@
+# Commits an approved change to the workspace repository, as the person who
+# approved it, else the git user of this machine. Approvals call it in-process;
+# it has no HTTP route. FLOWGEN_REPOSITORY is the repository, a path on this
+# machine or a URL, and FLOWGEN_WORKSPACE_PATH the workspace folder in it,
+# empty for the whole repository; a local run sets both. FLOWGEN_GIT_CREDENTIALS
+# is the credentials file a URL needs.
+flow:
+  labels:
+    display_name: "Commit Workspace"
+    description: "Commits an approved change to the workspace repository."
+    tags: ["system", "git-push", "authoring"]
+  tasks:
+    # Receives {id, target, title, author: {name, email}, files: [{path, content, previous}]}.
+    - inproc_endpoint:
+        name: on_approve
+        ack_timeout: 120s
+
+    # Commits the files to the workspace's branch.
+    - git_push:
+        name: commit
+        repository: "{{env.FLOWGEN_REPOSITORY}}"
+        path: "{{env.FLOWGEN_WORKSPACE_PATH}}"
+        credentials_path: "{{env.FLOWGEN_GIT_CREDENTIALS}}"
+        author:
+          name: "{{event.data.author.name}}"
+          email: "{{event.data.author.email}}"
+        message: "{{event.data.title}}"
+
+    # Recorded on the change as its result; a failed commit fails the change.
+    - script:
+        name: result
+        code: |
+          #{ commit: event.data.commit, changed: event.data.changed }

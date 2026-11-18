@@ -13,7 +13,6 @@ flow:
     description: "Receives placed orders over an HTTP webhook and sends each customer a Braze transactional email with the order's details."
     tags: ["braze", "messaging", "transactional", "example"]
   tasks:
-
     # POST /api/flowgen/workers/v1/braze/orders
     - http_endpoint:
         name: receive_orders
@@ -24,7 +23,7 @@ flow:
     - braze_messaging:
         name: send_confirmation
         operation: send_transactional
-        credentials_path: /etc/braze/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/braze.json"
         base_url: "{{env.BRAZE_REST_ENDPOINT}}"
         campaign_id: "{{env.BRAZE_CONFIRMATION_CAMPAIGN_ID}}"
         payload:

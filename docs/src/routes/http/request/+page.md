@@ -9,7 +9,7 @@ Makes outbound HTTP requests. URL, headers, and payload support templating.
     name: call_api
     endpoint: "https://api.example.com/orders/{{event.data.id}}"
     method: GET
-    credentials_path: /etc/http/api-credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/http-api.json"
 ```
 
 ### Fields
@@ -19,7 +19,7 @@ Makes outbound HTTP requests. URL, headers, and payload support templating.
 | `name` | string | required | Task name. |
 | `endpoint` | string | required | Target URL. Supports templating. |
 | `method` | string | `GET` | `GET`, `POST`, `PUT`, `DELETE`, `PATCH`, `HEAD`. |
-| `credentials_path` | string | | Path to credentials file for request authentication. |
+| `credentials_path` | string | | Path to credentials file for request authentication. Credentials are sent only over HTTPS, or over HTTP to a loopback host. |
 | `payload` | object | | Request body (see below). |
 | `headers` | map | | HTTP headers. Values support templating. |
 | `timeout` | duration | `30s` | Total request timeout from start to response body received. Set explicitly to override or omit-with-`null` to disable. |
@@ -78,7 +78,7 @@ For nested data, either:
     name: create_order
     endpoint: "https://api.example.com/orders"
     method: POST
-    credentials_path: /etc/http/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/http.json"
     payload:
       object:
         customer_id: "{{event.data.customer_id}}"
@@ -92,7 +92,7 @@ For nested data, either:
     name: forward
     endpoint: "https://api.example.com/ingest"
     method: POST
-    credentials_path: /etc/http/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/http.json"
     payload:
       from_event: true
 ```
@@ -104,7 +104,7 @@ For nested data, either:
     name: search_orders
     endpoint: "https://api.example.com/orders"
     method: GET
-    credentials_path: /etc/http/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/http.json"
     payload:
       send_as: queryparams
       object:

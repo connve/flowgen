@@ -11,7 +11,6 @@ flow:
     tags: ["bigquery", "gcp", "query", "analytics", "example"]
   require_leader_election: true
   tasks:
-
     - generate:
         name: trigger
         interval: 300s
@@ -19,7 +18,7 @@ flow:
     # Data lives in `data-warehouse-project`, job bills to `billing-project`.
     - gcp_bigquery_query:
         name: cross_project_analytics
-        credentials_path: /etc/gcp/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/gcp.json"
         project_id: data-warehouse-project
         job_project_id: billing-project
         query: "SELECT customer_id, SUM(amount) as total FROM `data-warehouse-project.analytics.orders` WHERE region = @region AND order_date >= @start_date GROUP BY customer_id"

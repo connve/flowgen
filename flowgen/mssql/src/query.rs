@@ -320,7 +320,7 @@ impl Runner for Processor {
                     .build(),
                 || async {
                     let credentials =
-                        crate::client::read_credentials(&init_config.credentials_path)?;
+                        crate::client::load_credentials(&init_config.credentials_path).await?;
                     Ok(Client::new(
                         &credentials,
                         init_config.max_connections,

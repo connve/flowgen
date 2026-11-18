@@ -46,6 +46,8 @@ pub mod retry;
 pub mod serde;
 /// Service discovery and connection management.
 pub mod service;
+/// Files encrypted with SOPS and age, as the `sops` CLI and Flux read them.
+pub mod sops;
 /// OpenTelemetry integration for metrics and distributed tracing.
 pub mod telemetry;
 /// Flow-scoped runtime bookkeeping: activity metrics fed by a custom
@@ -58,6 +60,8 @@ pub mod flow {
 }
 /// Validation helpers for config-supplied identifiers and paths.
 pub mod validate;
+/// The layout of a workspace.
+pub mod workspace;
 /// Task execution framework with runner trait, context, and manager.
 pub mod task {
     pub use flowgen_macros::TaskConfig;

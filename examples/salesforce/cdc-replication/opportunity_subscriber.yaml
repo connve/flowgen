@@ -15,10 +15,9 @@ flow:
     tags: ["salesforce", "cdc", "nats", "example"]
   require_leader_election: true
   tasks:
-
     - salesforce_pubsubapi_subscribe:
         name: start_subscription
-        credentials_path: /etc/sfdc/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
         topic:
           name: /data/OpportunityChangeEvent
           durable_consumer_options:
@@ -29,7 +28,7 @@ flow:
 
     - nats_jetstream_publish:
         name: publish_events
-        credentials_path: /etc/nats/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/nats.json"
         url: "{{env.NATS_URL}}"
         subject: pubsub.data.{{event.subject}}
         stream:

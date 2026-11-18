@@ -1,4 +1,6 @@
 /target
+# The default local cache file.
+.flowgen/
 .idea/
 .cargo/*
 !.cargo/audit.toml
@@ -14,6 +16,7 @@
 /web/.svelte-kit
 /web/dist
 /web/.vite
+/.vite
 /web/.env
 /web/.env.*
 # Copied from flowgen/*/icons/ by the docs' npm predev/prebuild.

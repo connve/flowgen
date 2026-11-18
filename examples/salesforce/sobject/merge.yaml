@@ -19,7 +19,6 @@ flow:
     description: "Accepts merge instructions over an HTTP webhook and merges a duplicate record into a master record via the SOAP API."
     tags: ["salesforce", "merge", "http", "soap-api", "example"]
   tasks:
-
     - http_endpoint:
         name: receive_request
         method: POST
@@ -27,7 +26,7 @@ flow:
 
     - salesforce_soapapi_merge:
         name: merge
-        credentials_path: /etc/sfdc/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
         sobject_type: "{{event.data.sobject_type}}"
         master_record_id: "{{event.data.master_id}}"
         record_ids_to_merge:

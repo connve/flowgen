@@ -7,7 +7,7 @@ Runs a SQL statement against Microsoft SQL Server. Returns the rows as Arrow Rec
 ```yaml
 - mssql_query:
     name: get_orders
-    credentials_path: /etc/mssql/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/mssql.json"
     query: "SELECT * FROM orders WHERE date = @P1"
     parameters:
       - "{{event.data.date}}"

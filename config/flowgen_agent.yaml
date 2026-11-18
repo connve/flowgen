@@ -1,0 +1,32 @@
+# The agent built into a workspace, in the Agents chat. It reads the
+# workspace, drafts flows and resources, validates them and proposes the
+# change for a person to approve; it cannot approve changes itself. Its tools
+# are the flows in flowgen_agent/, whose MCP toolset gives every agent the
+# instructions in system/flowgen_agent/instructions.md; its basics are
+# system/flowgen_agent/basics.md. A workspace file with the same key replaces
+# either. It asks the AI gateway for the model `default`, which a model flow
+# from the hub's templates serves.
+flow:
+  labels:
+    display_name: "Flowgen Agent"
+    description: "Answers questions and drafts, validates and proposes changes to this workspace."
+    tags: ["agent", "flowgen"]
+  tasks:
+    # The model `flowgen` on the AI gateway, shown once a model flow serves `default`.
+    - llm_proxy:
+        name: flowgen
+        requires: [default]
+
+    # The agent loop, with the workspace tools from flowgen's MCP server.
+    - ai_completion:
+        name: agent
+        provider: custom
+        endpoint: "{{env.FLOWGEN_AI_GATEWAY_URL}}"
+        model: default
+        prompt: "{{event.data.prompt}}"
+        system_prompt: "You are Flowgen Agent, the assistant built into flowgen. Answer briefly and plainly."
+        static_context:
+          - resource: system/flowgen_agent/basics.md
+        mcp_servers:
+          - url: "{{env.FLOWGEN_MCP_URL}}/system/flowgen_agent"
+        stream: true

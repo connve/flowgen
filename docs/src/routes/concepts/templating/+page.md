@@ -56,11 +56,12 @@ A task's static YAML thus becomes a per-event configuration. Connectors that loa
 **Composing a key prefix from event data:**
 
 ```yaml
-- nats_kv_store:
+- kv_store:
     name: cache_user
+    url: "{{env.NATS_URL}}"
+    bucket: users
     operation: put
     key: "users.{{event.data.id}}"
-    value: "{{event.data}}"
 ```
 
 ## Type preservation for object and array values
@@ -74,14 +75,6 @@ When a template is exactly `{{ path }}` (no surrounding text, no helpers), flowg
     payload:
       from_event: false
       object: "{{event.data}}"
-```
-
-```yaml
-- gcp_bigquery_job:
-    name: load
-    operation: create
-    # source_uris stays a list, not a string representation of one.
-    source_uris: "{{event.meta.source_uris}}"
 ```
 
 If you need a stringified value, embed the template inside other text: `"key.{{event.data.id}}"` always renders as a string.
@@ -111,12 +104,13 @@ Numeric and boolean fields (such as `port`, `enabled`, `max_results`) accept tem
 Resource-loaded content (SQL queries, prompts, HTML templates) is also rendered. See [Resources](/docs/flowgen/concepts/resources) for inline-vs-file-vs-cache trade-offs.
 
 ```yaml
-- gcp_bigquery_query:
+- postgres_query:
     name: daily_report
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/postgres.json"
     query:
       resource: queries/daily_report.sql
     parameters:
-      report_date: "{{event.data.date}}"
+      - "{{event.data.date}}"
 ```
 
 The SQL file itself can use the same `{{ event.data.x }}` syntax — flowgen renders the loaded content against the event before executing the query.

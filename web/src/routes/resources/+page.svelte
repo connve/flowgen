@@ -5,28 +5,34 @@
 	import { goto, pushState, replaceState } from '$app/navigation';
 	import { page } from '$app/state';
 	import ResourceViewer from '$lib/ResourceViewer.svelte';
-	import CopyButton from '$lib/CopyButton.svelte';
-	import Inspector from '$lib/Inspector.svelte';
-	import StateMessage from '$lib/StateMessage.svelte';
+	import {
+		CopyButton,
+		FolderTree,
+		IconButton,
+		Inspector,
+		ListHeader,
+		Loading,
+		SidePane,
+		StateMessage,
+		buildTree,
+		isMobile
+	} from '@connve/ui';
 	import Icon from '@iconify/svelte';
 	import { m } from '$lib/paraglide/messages.js';
-	import FolderTree from '$lib/FolderTree.svelte';
-	import ListHeader from '$lib/ListHeader.svelte';
-	import SidePane from '$lib/SidePane.svelte';
-	import { isMobile } from '$lib/mobile';
 	import { pageTitle } from '$lib/pageTitle';
+	import { deploymentsStream } from '$lib/urls';
+	import { visibleEventSource } from '$lib/visibleEventSource';
 	import {
-		apiUrl,
 		encodePath,
 		errorMessage,
-		failure,
+		getResource,
+		isStatus,
+		listResources,
 		type AuthoringTarget,
 		type ChangeSummary,
 		type ResourceSummary as Resource,
 		type ResourceContent
 	} from '$lib/api';
-	import { buildTree } from '$lib/tree';
-	import IconButton from '$lib/IconButton.svelte';
 	import {
 		authoringEnabled,
 		authoringTargets,
@@ -74,15 +80,23 @@
 		pendingChanges().then((changes) => (pending = changes));
 
 		try {
-			const response = await fetch(apiUrl('api/resources'));
-			if (!response.ok) throw await failure(response);
-			resources = await response.json();
+			resources = (await listResources()).data;
 		} catch (err) {
 			error = errorMessage(err, m.resources_load_failed_reason());
 		} finally {
 			loading = false;
 		}
 	});
+
+	// Loads the list again each time a resource changes, such as a deployed change.
+	onMount(() =>
+		visibleEventSource(deploymentsStream(), (source) =>
+			source.addEventListener('deployment', () => {
+				listResources().then(({ data }) => (resources = data), () => undefined);
+				pendingChanges().then((changes) => (pending = changes));
+			})
+		)
+	);
 
 	function toggleFolder(path: string) {
 		if (expandedFolders.has(path)) expandedFolders.delete(path);
@@ -135,10 +149,12 @@
 			selectedLoading = true;
 		}
 		try {
-			const response = await fetch(apiUrl(`api/resources/${encodePath(key)}`));
-			if (response.status === 404) throw new Error(m.resource_not_found({ key }));
-			if (!response.ok) throw await failure(response);
-			const body: ResourceContent = await response.json();
+			const body = await getResource({ path: { key } }).then(
+				({ data }) => data,
+				(err) => {
+					throw isStatus(err, 404) ? new Error(m.resource_not_found({ key })) : err;
+				}
+			);
 			contentCache.set(key, body);
 			if (pendingResource !== key) return;
 			selected = key;
@@ -223,22 +239,21 @@
 				count={m.resources_item_count({ count: visibleResources.length })}
 				pending={authoring ? pending.length : null}
 				pendingLabel={m.resources_pending_changes({ count: pending.length })}
+				pendingHref="{base}/changes"
 				newHref="{base}/edit?new=resource{selectedFolder ? `&folder=${encodePath(selectedFolder)}` : ''}"
 			/>
 		</div>
 
 		<div class="flex min-h-0 flex-1 flex-col overflow-y-auto px-6 pb-6">
 		{#if loading}
-			<div class="flex justify-center py-12">
-				<span class="loading loading-spinner loading-lg text-primary"></span>
-			</div>
+			<Loading />
 		{:else if error}
 			<StateMessage tone="oops" title={m.resources_load_failed()} message={error} />
 		{:else if visibleResources.length === 0}
 			<StateMessage
 				tone="notice"
 				title={m.resources_empty_title()}
-				message={authoring ? m.resources_empty_message_authoring() : m.resources_empty_message()}
+				message={authoring ? undefined : m.resources_empty_message()}
 			/>
 		{:else}
 			<div class="-mx-6 shrink-0 overflow-x-auto px-6">
@@ -302,9 +317,7 @@
 				/>
 			{/snippet}
 			{#if selectedLoading}
-				<div class="flex justify-center py-12">
-					<span class="loading loading-spinner loading-md text-primary"></span>
-				</div>
+				<Loading size="md" />
 			{:else if selectedError}
 				<StateMessage tone="oops" title={m.resource_load_failed()} message={selectedError} />
 			{:else if selectedContent}

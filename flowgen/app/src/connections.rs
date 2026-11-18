@@ -5,7 +5,9 @@ use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use flowgen_client::types as api;
-use flowgen_core::task::meta::{is_per_event, render_env, Connection, Connector};
+use flowgen_core::task::meta::{
+    is_per_event, render_env, Connection, Connector, CredentialsForm, FieldKind,
+};
 use flowgen_core::telemetry::query::{LogFilter, LogsStore};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -60,18 +62,38 @@ pub fn of_tasks(tasks: &[TaskType]) -> Vec<TaskConnection> {
     found
 }
 
+/// One connection: the credentials it signs in with, or without any, where it connects.
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Debug)]
 struct Identity {
     connector: &'static str,
     credentials_path: Option<String>,
+    target: Option<String>,
 }
 
 impl Identity {
+    /// A credentials path that renders empty means none, as tasks read it.
+    fn of(connection: &Connection) -> Self {
+        let credentials_path = match &connection.credentials_path {
+            Some(path) if !is_per_event(path) && render_env(path).is_none() => None,
+            path => path.clone(),
+        };
+        Self {
+            connector: connection.connector.name,
+            target: match credentials_path {
+                Some(_) => None,
+                None => connection.target.clone(),
+            },
+            credentials_path,
+        }
+    }
+
     fn id(&self) -> String {
         let mut hasher = Sha256::new();
         hasher.update(self.connector);
         hasher.update([0]);
         hasher.update(self.credentials_path.as_deref().unwrap_or_default());
+        hasher.update([0]);
+        hasher.update(self.target.as_deref().unwrap_or_default());
         format!("{:x}", hasher.finalize())[..16].to_string()
     }
 }
@@ -92,6 +114,11 @@ struct Row {
     users: Vec<User>,
 }
 
+/// The connector named `name`.
+pub(crate) fn connector(name: &str) -> Option<Connector> {
+    connectors().remove(name).map(|(connector, _)| connector)
+}
+
 /// Every connector by name, with its task types.
 fn connectors() -> BTreeMap<&'static str, (Connector, Vec<&'static str>)> {
     let mut connectors = BTreeMap::new();
@@ -105,6 +132,41 @@ fn connectors() -> BTreeMap<&'static str, (Connector, Vec<&'static str>)> {
     connectors
 }
 
+fn credentials_form(form: &CredentialsForm) -> api::CredentialsForm {
+    api::CredentialsForm {
+        label: form.label.to_string(),
+        fields: form
+            .fields
+            .iter()
+            .map(|field| {
+                let (kind, choices, checked) = match field.kind {
+                    FieldKind::Text => (api::CredentialsFieldKind::Text, Vec::new(), false),
+                    FieldKind::Url => (api::CredentialsFieldKind::Url, Vec::new(), false),
+                    FieldKind::Secret => (api::CredentialsFieldKind::Secret, Vec::new(), false),
+                    FieldKind::Number => (api::CredentialsFieldKind::Number, Vec::new(), false),
+                    FieldKind::Boolean(checked) => {
+                        (api::CredentialsFieldKind::Boolean, Vec::new(), checked)
+                    }
+                    FieldKind::List => (api::CredentialsFieldKind::List, Vec::new(), false),
+                    FieldKind::Choice(choices) => (
+                        api::CredentialsFieldKind::Choice,
+                        choices.iter().map(|choice| choice.to_string()).collect(),
+                        false,
+                    ),
+                };
+                api::CredentialsField {
+                    key: field.key.to_string(),
+                    label: field.label.to_string(),
+                    kind,
+                    choices,
+                    checked,
+                    required: field.required,
+                }
+            })
+            .collect(),
+    }
+}
+
 /// `GET /api/connectors`.
 pub(crate) async fn list_connectors() -> Json<Vec<api::Connector>> {
     Json(
@@ -114,6 +176,7 @@ pub(crate) async fn list_connectors() -> Json<Vec<api::Connector>> {
                 name: connector.name.to_string(),
                 label: connector.label.to_string(),
                 task_types: task_types.into_iter().map(str::to_string).collect(),
+                credentials: connector.credentials.iter().map(credentials_form).collect(),
             })
             .collect(),
     )
@@ -243,9 +306,28 @@ async fn connection(state: &WebState, identity: Identity, row: Row) -> api::Conn
         Some(logs) => read_status(logs.as_ref(), &row.users).await,
         None => api::FlowStatus::Idle,
     };
+    let credentials_name = match (
+        std::env::var_os(flowgen_core::credentials::FOLDER_ENV),
+        identity.credentials_path.as_deref(),
+    ) {
+        (Some(folder), Some(path)) => credentials_name(path, std::path::Path::new(&folder)),
+        _ => None,
+    };
+    let credentials_found = match identity.credentials_path.as_deref().map(render_env) {
+        Some(Some(path)) => {
+            let path = path.to_string();
+            let checked = tokio::task::spawn_blocking(move || {
+                flowgen_core::credentials::exists(std::path::Path::new(&path))
+            });
+            checked.await.unwrap_or(true)
+        }
+        Some(None) | None => true,
+    };
     api::Connection {
         id: identity.id(),
         connector: identity.connector.to_string(),
+        credentials_name,
+        credentials_found,
         credentials_path: identity.credentials_path,
         account: row.account,
         targets: row.targets.into_iter().collect(),
@@ -256,22 +338,39 @@ async fn connection(state: &WebState, identity: Identity, row: Row) -> api::Conn
     }
 }
 
+/// The credentials a path reads from `folder`, by the file name: `orders-api`
+/// for `{{env.FLOWGEN_CREDENTIALS}}/orders-api.json`. A relative path is taken
+/// from the working directory, as tasks read it. `None` for a path set per
+/// event, a file elsewhere or a file name that cannot name credentials.
+fn credentials_name(path: &str, folder: &std::path::Path) -> Option<String> {
+    if is_per_event(path) {
+        return None;
+    }
+    let file = std::path::absolute(render_env(path)?).ok()?;
+    if file.parent()? != std::path::absolute(folder).ok()? {
+        return None;
+    }
+    let name = file.file_name()?.to_str()?.strip_suffix(".json")?;
+    match crate::credentials::is_name(name) {
+        true => Some(name.to_string()),
+        false => None,
+    }
+}
+
 /// The connections of `flows`, each with the tasks using it.
 fn gather(flows: &[(String, Vec<TaskConnection>)]) -> BTreeMap<Identity, Row> {
     let mut rows: BTreeMap<Identity, Row> = BTreeMap::new();
     for (flow, connections) in flows {
         for found in connections {
-            let identity = Identity {
-                connector: found.connection.connector.name,
-                credentials_path: found.connection.credentials_path.clone(),
-            };
-            let row = rows.entry(identity).or_insert_with(|| Row {
-                account: None,
-                targets: BTreeSet::new(),
-                per_event: false,
-                on_behalf_of_user: false,
-                users: Vec::new(),
-            });
+            let row = rows
+                .entry(Identity::of(&found.connection))
+                .or_insert_with(|| Row {
+                    account: None,
+                    targets: BTreeSet::new(),
+                    per_event: false,
+                    on_behalf_of_user: false,
+                    users: Vec::new(),
+                });
             if row.account.is_none() {
                 row.account = found.account.clone();
             }
@@ -444,7 +543,7 @@ mod tests {
     name: publish
     url: "nats://user:secret@nats:4222"
     subject: a
-- nats_kv_store:
+- kv_store:
     name: store
     url: "nats://other:4222"
     bucket: b
@@ -464,10 +563,12 @@ mod tests {
             ),
         ];
 
-        let identity = |connector: &'static str, credentials: Option<&str>| Identity {
-            connector,
-            credentials_path: credentials.map(str::to_string),
-        };
+        let identity =
+            |connector: &'static str, credentials: Option<&str>, target: Option<&str>| Identity {
+                connector,
+                credentials_path: credentials.map(str::to_string),
+                target: target.map(str::to_string),
+            };
         let row = |targets: &[&str], per_event: bool, users: Vec<User>| Row {
             account: None,
             targets: targets.iter().map(|target| target.to_string()).collect(),
@@ -482,27 +583,27 @@ mod tests {
             found,
             vec![
                 (
-                    identity("ai", None),
+                    identity("ai", None, Some("gateway:3002")),
                     row(&["gateway:3002"], true, vec![user("b", "agent")])
                 ),
                 (
-                    identity("gcp", Some("/etc/a/gcp.json")),
+                    identity("gcp", Some("/etc/a/gcp.json"), None),
                     row(&[], false, vec![user("a", "read"), user("b", "lookup")])
                 ),
                 (
-                    identity("mcp", None),
+                    identity("mcp", None, Some("localhost:3001")),
                     Row {
                         on_behalf_of_user: true,
                         ..row(&["localhost:3001"], false, vec![user("b", "agent")])
                     }
                 ),
                 (
-                    identity("nats", None),
-                    row(
-                        &["nats:4222", "other:4222"],
-                        false,
-                        vec![user("b", "publish"), user("b", "store")]
-                    )
+                    identity("nats", None, Some("nats:4222")),
+                    row(&["nats:4222"], false, vec![user("b", "publish")])
+                ),
+                (
+                    identity("nats", None, Some("other:4222")),
+                    row(&["other:4222"], false, vec![user("b", "store")])
                 ),
             ]
         );
@@ -526,6 +627,82 @@ mod tests {
 
         assert_eq!(found[0].account.as_deref(), Some("db:1433/sales"));
         assert!(!format!("{found:?}").contains("secret"));
+    }
+
+    #[test]
+    fn every_credentials_form_makes_a_file_its_tasks_read() {
+        let mut failed = Vec::new();
+        for (connector, _) in connectors().into_values() {
+            for form in connector
+                .credentials
+                .iter()
+                .filter(|form| !form.fields.is_empty())
+            {
+                let mut document = serde_json::Map::new();
+                for field in form.fields {
+                    let value: serde_json::Value = match field.kind {
+                        FieldKind::Url => "https://a.io".into(),
+                        FieldKind::Number => 1.into(),
+                        FieldKind::Boolean(checked) => checked.into(),
+                        FieldKind::Choice(choices) => choices[0].into(),
+                        FieldKind::List => vec!["a"].into(),
+                        FieldKind::Text | FieldKind::Secret => "a".into(),
+                    };
+                    let mut keys: Vec<&str> = field.key.split('.').collect();
+                    let last = keys.pop().unwrap();
+                    let mut node = &mut document;
+                    for key in keys {
+                        node = node
+                            .entry(key)
+                            .or_insert_with(|| serde_json::Value::Object(Default::default()))
+                            .as_object_mut()
+                            .unwrap();
+                    }
+                    node.insert(last.to_string(), value);
+                }
+                if let Err(message) = (form.check)(&serde_json::Value::Object(document).to_string())
+                {
+                    failed.push(format!("{} / {}: {message}", connector.name, form.label));
+                }
+            }
+        }
+        assert!(failed.is_empty(), "{failed:#?}");
+    }
+
+    #[test]
+    fn only_files_in_the_credentials_folder_are_named() {
+        let name = |path: &str| credentials_name(path, std::path::Path::new("/etc/credentials"));
+        assert_eq!(
+            name("/etc/credentials/orders-api.json").as_deref(),
+            Some("orders-api")
+        );
+        assert_eq!(name("/etc/a/orders-api.json"), None);
+        assert_eq!(name("/etc/credentials/a/b.json"), None);
+        assert_eq!(name("/etc/credentials/a.yaml"), None);
+        assert_eq!(name("/etc/credentials/My Key.json"), None);
+        assert_eq!(name("{{event.data.account}}.json"), None);
+
+        let relative = credentials_name("credentials/a.json", std::path::Path::new("credentials"));
+        assert_eq!(relative.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn a_credentials_path_that_renders_empty_is_the_same_connection_as_none() {
+        let without = Connection::new(flowgen_oci::CONNECTOR, None).target(&["a.io"]);
+        let unset = Connection::new(
+            flowgen_oci::CONNECTOR,
+            Some(std::path::Path::new(
+                "{{env.CONNECTIONS_TEST_UNSET_CREDENTIALS}}",
+            )),
+        )
+        .target(&["a.io"]);
+        let per_event = Connection::new(
+            flowgen_oci::CONNECTOR,
+            Some(std::path::Path::new("{{event.data.credentials}}")),
+        );
+
+        assert_eq!(Identity::of(&unset), Identity::of(&without));
+        assert!(Identity::of(&per_event).credentials_path.is_some());
     }
 
     #[test]

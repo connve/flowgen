@@ -12,7 +12,6 @@ flow:
     description: "Creates a draft Klaviyo email campaign for a list by name with an existing template, without sending it."
     tags: ["klaviyo", "campaigns", "templates", "example"]
   tasks:
-
     # POST /api/flowgen/workers/v1/klaviyo/campaigns
     - http_endpoint:
         name: receive_requests
@@ -32,7 +31,7 @@ flow:
     - klaviyo_lists:
         name: find_list
         operation: list
-        credentials_path: /etc/klaviyo/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/klaviyo.json"
         filter: "equals(name,'{{event.data.list_name}}')"
 
     # The draft campaign for that list, with one email that uses the template.
@@ -65,6 +64,6 @@ flow:
     - klaviyo_campaigns:
         name: create_campaign
         operation: create
-        credentials_path: /etc/klaviyo/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/klaviyo.json"
         payload:
           from_event: true

@@ -8,10 +8,9 @@ flow:
     description: "Writes events consumed from a NATS stream as documents into a MongoDB collection."
     tags: ["mongo", "write", "example"]
   tasks:
-
     - nats_jetstream_subscribe:
         name: consume_events
-        credentials_path: /etc/nats/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/nats.json"
         url: "127.0.0.1:4222"
         subject: pubsub.data.mongo
         stream:
@@ -29,6 +28,6 @@ flow:
     - mongodb_collection:
         name: write_customer
         operation: write
-        credentials_path: /etc/mongodb/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/mongodb.json"
         db_name: sales
         collection_name: customers

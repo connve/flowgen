@@ -12,7 +12,6 @@ flow:
     description: "Receives {version, files} on a webhook and pushes the files to a registry as an artifact tagged with the version and latest."
     tags: ["oci-push", "http", "example"]
   tasks:
-
     # Receives {version, files: [{path, content}]}.
     - http_endpoint:
         name: receive
@@ -23,4 +22,4 @@ flow:
         name: release
         repository: "{{env.OCI_REPOSITORY}}"
         tags: ["{{event.data.version}}", "latest"]
-        credentials_path: /etc/registry/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/registry.json"

@@ -30,16 +30,60 @@ fn default_nats_url() -> String {
     flowgen_nats::client::DEFAULT_NATS_URL.to_string()
 }
 
+/// The address every server listens on unless `host` says otherwise.
+pub const DEFAULT_HOST: &str = "0.0.0.0";
+
+fn default_redb_path() -> PathBuf {
+    PathBuf::from(flowgen_core::workspace::STATE_DIR).join(flowgen_core::workspace::CACHE_FILE)
+}
+
+pub fn default_host() -> String {
+    DEFAULT_HOST.to_string()
+}
+
 /// Default cache database name.
 pub const DEFAULT_CACHE_DB_NAME: &str = "flowgen_cache";
 
-/// Default cache key prefix for flows. The bucket already namespaces by
-/// `flowgen`, so the prefix does not repeat it.
-pub const DEFAULT_FLOWS_CACHE_PREFIX: &str = "flows";
+/// The key prefix of flows in the system bucket.
+pub const FLOWS_CACHE_PREFIX: &str = "flows";
 
-/// Default cache key prefix for resources. The bucket already namespaces by
-/// `flowgen`, so the prefix does not repeat it.
-pub const DEFAULT_RESOURCES_CACHE_PREFIX: &str = "resources";
+/// The variable every run sets to the version of flowgen, so a flow can pick
+/// what matches it, such as a hub's catalog for this version.
+pub const VERSION_ENV: &str = "FLOWGEN_VERSION";
+
+/// The variable a run sets, unless set already, to the address of its web server.
+pub const WEB_URL_ENV: &str = "FLOWGEN_URL";
+
+/// The variable a run sets, unless set already, to the address of its MCP server.
+pub const MCP_URL_ENV: &str = "FLOWGEN_MCP_URL";
+
+/// The variable a run sets, unless set already, to the address of its AI gateway.
+pub const AI_GATEWAY_URL_ENV: &str = "FLOWGEN_AI_GATEWAY_URL";
+
+/// The variable a run sets, unless set already, to the `kv_store` URL of its cache.
+pub const CACHE_URL_ENV: &str = "FLOWGEN_CACHE_URL";
+
+/// The variable a run sets, unless set already, to its cache's credentials
+/// file, empty when it has none.
+pub const CACHE_CREDENTIALS_ENV: &str = "FLOWGEN_CACHE_CREDENTIALS";
+
+/// The variable a run sets, unless set already, to its system bucket.
+pub const SYSTEM_BUCKET_ENV: &str = "FLOWGEN_SYSTEM_BUCKET";
+
+/// The variable a run sets, unless set already, to the OCI repository the
+/// workspace is released to and deployed from.
+pub const RELEASES_ENV: &str = "FLOWGEN_RELEASES";
+
+/// Where workspace releases go without `FLOWGEN_RELEASES`: an OCI Image
+/// Layout next to the local cache.
+pub const DEFAULT_RELEASES: &str = "oci-layout://.flowgen/releases";
+
+/// The variable a run sets, unless set already, to the folder flows read
+/// credentials from: `credentials.path`, else `credentials`.
+pub const CREDENTIALS_ENV: &str = flowgen_core::credentials::FOLDER_ENV;
+
+/// The key prefix of resources in the system bucket.
+pub const RESOURCES_CACHE_PREFIX: &str = "resources";
 
 /// Supported flow configuration file extensions for recursive discovery.
 pub const FLOW_CONFIG_EXTENSIONS: &[&str] = &["yaml", "yml", "json"];
@@ -265,6 +309,13 @@ macro_rules! task_types {
                 }
             }
 
+            /// Whether this task starts events and takes none, declared by its crate.
+            pub const fn is_source(&self) -> bool {
+                match self {
+                    $(TaskType::$tag(_) => <$config as TaskMeta>::SOURCE,)+
+                }
+            }
+
             /// Whether this task registers its flow with a shared server, so the
             /// flow must run on every pod and is never leader elected.
             pub const fn is_blocking(&self) -> bool {
@@ -388,8 +439,10 @@ task_types! {
     postgres_write(flowgen_postgres::write::Write),
     /// PostgreSQL change data capture task.
     postgres_cdc(flowgen_postgres::cdc::Cdc),
-    /// NATS Key-Value store operations (get, put, list, delete).
-    nats_kv_store(flowgen_nats::kv_store::KvStore),
+    /// Key-value store operations (get, put, list, delete) on a redb file or NATS.
+    kv_store(flowgen_kv_store::store::KvStore),
+    /// Starts the flow with a key's value whenever it changes, on a redb file or NATS.
+    kv_watch(flowgen_kv_store::watch::KvWatch),
     /// AI completion task for generating responses using LLMs.
     ai_completion(flowgen_ai_agent::completion::Completion),
     /// MCP tool task for exposing flows as MCP tools callable by LLMs.
@@ -449,7 +502,7 @@ impl std::fmt::Display for TaskType {
 /// [`AppConfig::load`], which rejects unknown keys of the file but not of `APP_*`.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 pub struct AppConfig {
-    /// Optional cache configuration (shared across components).
+    /// Cache configuration (shared across components); see [`AppConfig::cache_options`].
     pub cache: Option<CacheOptions>,
     /// Flow discovery options (shared across components).
     pub flows: FlowOptions,
@@ -478,8 +531,35 @@ pub struct AppConfig {
     /// How long a stopping flow lets its events in flight finish (can be overridden per flow).
     #[serde(default = "default_shutdown_timeout", with = "humantime_serde")]
     pub shutdown_timeout: Duration,
+    /// The address every server listens on. Defaults to `0.0.0.0`.
+    #[serde(default = "default_host")]
+    pub host: String,
     /// Token and amount limits of every `ai_completion`; unlimited when omitted.
     pub ai_budget: Option<flowgen_ai_agent::budget::BudgetConfig>,
+    /// Credentials added in the web UI, committed encrypted under `credentials/`.
+    /// Omit to manage credentials outside flowgen.
+    pub credentials: Option<CredentialsOptions>,
+}
+
+/// Where credentials added in the web UI go: each file encrypted with SOPS
+/// for the `recipients` and committed under `credentials/`. This instance
+/// decrypts them in memory when it has `identity_path`; in a cluster Flux
+/// decrypts them into a mounted Secret instead.
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialsOptions {
+    /// age public keys each credential is encrypted for, such as the key
+    /// the cluster decrypts with and the keys of the people who may read them.
+    #[serde(default)]
+    pub recipients: Vec<String>,
+    /// age key file this instance decrypts credentials with, set as
+    /// `SOPS_AGE_KEY_FILE` for the run; its public key is a recipient too.
+    /// Omit where the cluster decrypts them.
+    #[serde(default)]
+    pub identity_path: Option<PathBuf>,
+    /// The folder flows read credentials from, which `FLOWGEN_CREDENTIALS`
+    /// names: where they are decrypted to, or where the cluster mounts them.
+    pub path: PathBuf,
 }
 
 /// Rejected configuration, reported before anything starts.
@@ -491,15 +571,6 @@ pub enum ValidationError {
         #[from]
         source: flowgen_ai_agent::budget::Error,
     },
-    #[error(
-        "Move `cache.db_name` under `cache.runtime`:\n\
-         \x20 cache:\n\
-         \x20   runtime:\n\
-         \x20     db_name: {db_name:?}\n\
-         Left in place it is ignored, and the cache reads bucket `flowgen_cache` \
-         while the existing data stays in {db_name:?}. No other cache key changes."
-    )]
-    RenamedCacheDbName { db_name: String },
     #[error("`web.agents.{field}` must be longer than 0s, e.g. \"3s\"")]
     ZeroAgentsDuration { field: &'static str },
     #[error(
@@ -515,6 +586,62 @@ pub enum ValidationError {
 }
 
 impl AppConfig {
+    /// What flows read about this run, by variable: the addresses of its web
+    /// server, MCP server and AI gateway on this machine, its cache and system
+    /// bucket, where workspace releases go, and the folder flows read
+    /// credentials from.
+    pub fn run_variables(&self) -> [(&'static str, String); 8] {
+        let host = match self.host.as_str() {
+            DEFAULT_HOST => crate::local::LOCAL_HOST,
+            host => host,
+        };
+        let url =
+            |port: u16, path: &str| format!("http://{host}:{port}{}", path.trim_end_matches('/'));
+        let web = match &self.web {
+            Some(web) => web.clone(),
+            None => WebOptions::default(),
+        };
+        let mcp = match &self.mcp_server {
+            Some(mcp) => mcp.clone(),
+            None => McpServerOptions::default(),
+        };
+        let ai_gateway = match &self.ai_gateway {
+            Some(ai_gateway) => ai_gateway.clone(),
+            None => AiGatewayOptions::default(),
+        };
+        let cache = self.cache_options();
+        let cache_url = match cache.cache_type {
+            CacheType::Redb => format!("redb://{}", cache.path.display()),
+            CacheType::Nats => cache.url.clone(),
+        };
+        let cache_credentials = match &cache.credentials_path {
+            Some(path) => path.display().to_string(),
+            None => String::new(),
+        };
+        let credentials = match &self.credentials {
+            Some(credentials) => credentials.path.display().to_string(),
+            None => flowgen_core::workspace::CREDENTIALS_DIR.to_string(),
+        };
+        [
+            (WEB_URL_ENV, url(web.port, &web.path)),
+            (MCP_URL_ENV, url(mcp.port, &mcp.path)),
+            (AI_GATEWAY_URL_ENV, url(ai_gateway.port, &ai_gateway.path)),
+            (CACHE_URL_ENV, cache_url),
+            (CACHE_CREDENTIALS_ENV, cache_credentials),
+            (SYSTEM_BUCKET_ENV, cache.system.db_name),
+            (RELEASES_ENV, DEFAULT_RELEASES.to_string()),
+            (CREDENTIALS_ENV, credentials),
+        ]
+    }
+
+    /// The `cache` section, or the default `redb` file when there is none.
+    pub fn cache_options(&self) -> CacheOptions {
+        match &self.cache {
+            Some(cache) => cache.clone(),
+            None => CacheOptions::default(),
+        }
+    }
+
     /// Reads `file` with `env` layered over it; a key of `file` that no setting knows fails.
     pub fn load(
         file: impl config::Source + Send + Sync + 'static,
@@ -549,11 +676,6 @@ impl AppConfig {
 
     /// Rejects configuration that parses but would run with the wrong meaning.
     pub fn validate(&self) -> Result<(), ValidationError> {
-        if let Some(db_name) = self.cache.as_ref().and_then(|c| c.db_name.as_ref()) {
-            return Err(ValidationError::RenamedCacheDbName {
-                db_name: db_name.clone(),
-            });
-        }
         if let Some(budget) = self.ai_budget.as_ref() {
             budget.validate()?;
         }
@@ -578,21 +700,23 @@ impl AppConfig {
 }
 
 /// Cache type for storage backend.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CacheType {
     /// NATS JetStream Key-Value store.
     Nats,
+    /// A local file, for a single process without NATS.
+    #[default]
+    Redb,
 }
 
-/// Cache configuration options.
+/// Cache configuration options. Without a `cache` section, flowgen uses the
+/// defaults: a `redb` file at `.flowgen/state.redb`.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CacheOptions {
-    /// Whether caching is enabled.
-    pub enabled: bool,
-    /// Cache backend type.
-    #[serde(rename = "type")]
+    /// Cache backend type. Defaults to `redb`.
+    #[serde(rename = "type", default)]
     pub cache_type: CacheType,
     /// Optional path to cache credentials file.
     #[serde(default)]
@@ -600,10 +724,9 @@ pub struct CacheOptions {
     /// NATS server URL (e.g., "nats://localhost:4222"). Defaults to "localhost:4222".
     #[serde(default = "default_nats_url")]
     pub url: String,
-    /// Pre-0.135 spelling of `runtime.db_name`. Kept solely to reject it with
-    /// a migration hint naming the old bucket.
-    #[serde(default)]
-    pub db_name: Option<String>,
+    /// The file of a `redb` cache. Defaults to `.flowgen/state.redb`.
+    #[serde(default = "default_redb_path")]
+    pub path: PathBuf,
     /// Runtime bucket, reachable from scripts through `ctx.cache`.
     #[serde(default)]
     pub runtime: BucketOptions,
@@ -611,9 +734,7 @@ pub struct CacheOptions {
     /// Kept apart from `runtime` so scripts cannot reach coordination state.
     #[serde(default)]
     pub system: SystemBucketOptions,
-    /// Number of historical entries retained per key in the KV bucket.
-    /// Only applies when the bucket is created; changing this on an existing
-    /// bucket has no effect. Defaults to 10.
+    /// Values a NATS bucket keeps per key, set when it is created. Defaults to 64.
     pub history: Option<i64>,
     /// TTL for KV delete and purge tombstone markers.
     /// Accepts human-readable durations (e.g., "1h", "30m", "1d").
@@ -622,6 +743,21 @@ pub struct CacheOptions {
     /// Defaults to 1 hour.
     #[serde(default, with = "humantime_serde")]
     pub tombstone_ttl: Option<std::time::Duration>,
+}
+
+impl Default for CacheOptions {
+    fn default() -> Self {
+        Self {
+            cache_type: CacheType::default(),
+            credentials_path: None,
+            url: default_nats_url(),
+            path: default_redb_path(),
+            runtime: BucketOptions::default(),
+            system: SystemBucketOptions::default(),
+            history: None,
+            tombstone_ttl: None,
+        }
+    }
 }
 
 /// Runtime bucket options.
@@ -675,7 +811,7 @@ fn default_runtime_db_name() -> String {
 /// (a small set of bootstrap flows on disk plus user flows in the cache).
 /// On a name collision the filesystem entry wins so a locally mounted flow
 /// cannot be silently overridden by a stale cache entry.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FlowOptions {
     /// Path for discovering flow configuration files.
@@ -687,31 +823,25 @@ pub struct FlowOptions {
     /// When enabled, flows are loaded from the distributed cache instead of the filesystem.
     #[serde(default)]
     pub cache: Option<FlowCacheOptions>,
+    /// Runs this version's system flows under `system/`: committing,
+    /// releasing and deploying the workspace, Flowgen Agent and its tools,
+    /// and the hubs. A flow at `path` with the same identity takes their place.
+    #[serde(default)]
+    pub system: bool,
 }
 
-/// Default cache key prefix for flows.
-fn default_flows_cache_prefix() -> String {
-    DEFAULT_FLOWS_CACHE_PREFIX.to_string()
-}
-
-/// Default metadata bucket name for flow/resource loading.
+/// Default system bucket name.
 fn default_system_db_name() -> String {
     "flowgen_system".to_string()
 }
 
-/// Cache-based flow loading options.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+/// Cache-based flow loading options. Flows are read from the system bucket,
+/// under [`FLOWS_CACHE_PREFIX`].
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FlowCacheOptions {
     /// Whether to load flows from the cache instead of the filesystem.
     pub enabled: bool,
-    /// Optional cache key prefix (defaults to "flows").
-    #[serde(default = "default_flows_cache_prefix")]
-    pub prefix: String,
-    /// Metadata store bucket name (defaults to "flowgen_system").
-    /// Separate from the runtime cache bucket to avoid key collisions.
-    #[serde(default = "default_system_db_name")]
-    pub db_name: String,
 }
 
 /// Resource loading configuration.
@@ -736,24 +866,13 @@ pub struct ResourceOptions {
     pub cache: Option<ResourceCacheOptions>,
 }
 
-/// Default cache key prefix for resources.
-fn default_resources_cache_prefix() -> String {
-    DEFAULT_RESOURCES_CACHE_PREFIX.to_string()
-}
-
-/// Cache-based resource loading options.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+/// Cache-based resource loading options. Resources are read from the system
+/// bucket, under [`RESOURCES_CACHE_PREFIX`].
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceCacheOptions {
     /// Whether to load resources from the cache instead of the filesystem.
     pub enabled: bool,
-    /// Optional cache key prefix (defaults to "resources").
-    #[serde(default = "default_resources_cache_prefix")]
-    pub prefix: String,
-    /// Metadata store bucket name (defaults to "flowgen_system").
-    /// Separate from the runtime cache bucket to avoid key collisions.
-    #[serde(default = "default_system_db_name")]
-    pub db_name: String,
 }
 
 /// Default MCP server port.
@@ -791,6 +910,19 @@ pub struct McpServerOptions {
     /// deployment's brand instead of `flowgen`.
     #[serde(default = "default_resource_uri_scheme")]
     pub resource_uri_scheme: String,
+}
+
+impl Default for McpServerOptions {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: default_mcp_port(),
+            path: default_mcp_path(),
+            credentials_path: None,
+            auth: None,
+            resource_uri_scheme: default_resource_uri_scheme(),
+        }
+    }
 }
 
 /// Default scheme for auto-generated MCP resource URIs.
@@ -856,6 +988,19 @@ pub struct AiGatewayOptions {
     pub max_body_bytes: usize,
 }
 
+impl Default for AiGatewayOptions {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: default_ai_gateway_port(),
+            path: default_ai_gateway_path(),
+            credentials_path: None,
+            auth: None,
+            max_body_bytes: default_ai_gateway_max_body_bytes(),
+        }
+    }
+}
+
 /// Default web UI port.
 fn default_web_port() -> u16 {
     8080
@@ -891,9 +1036,7 @@ pub struct WebOptions {
     #[serde(default)]
     pub agents: Option<AgentsOptions>,
     /// HTTP headers sent with every request the web server makes to the AI
-    /// gateway for the Agents tab. Used to
-    /// identify this web server to `llm_proxy`/`mcp_tool` scoping, e.g.
-    /// `X-Flowgen-Client: flowgen-ui` matching a proxy's `headers` field.
+    /// gateway for the Agents tab, such as a key the gateway requires.
     #[serde(default)]
     pub headers: std::collections::HashMap<String, String>,
     /// OIDC login for the web UI (Okta, Zitadel, Auth0, or any
@@ -926,6 +1069,66 @@ pub struct WebOptions {
     /// e.g. `["'self'", "https://console.example.com"]`. Defaults to `'self'`.
     #[serde(default = "default_frame_ancestors")]
     pub frame_ancestors: Vec<String>,
+    /// Checking for a newer flowgen release, shown in the web UI.
+    #[serde(default)]
+    pub update_check: UpdateCheckOptions,
+}
+
+/// Checking for a newer flowgen release, shown in the web UI.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateCheckOptions {
+    /// Whether to check. Defaults to `true`.
+    #[serde(default = "default_update_check_enabled")]
+    pub enabled: bool,
+    /// The newest release, as a releases API `latest` response with `tag_name`.
+    #[serde(default = "default_update_check_url")]
+    pub url: String,
+    /// How often to check. Defaults to 24 hours.
+    #[serde(default = "default_update_check_interval", with = "humantime_serde")]
+    pub interval: Duration,
+}
+
+impl Default for UpdateCheckOptions {
+    fn default() -> Self {
+        Self {
+            enabled: default_update_check_enabled(),
+            url: default_update_check_url(),
+            interval: default_update_check_interval(),
+        }
+    }
+}
+
+fn default_update_check_enabled() -> bool {
+    true
+}
+
+fn default_update_check_url() -> String {
+    "https://api.github.com/repos/connve/flowgen/releases/latest".to_string()
+}
+
+fn default_update_check_interval() -> Duration {
+    Duration::from_secs(24 * 60 * 60)
+}
+
+impl Default for WebOptions {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: default_web_port(),
+            path: default_web_path(),
+            ai_gateway_url: None,
+            agents: None,
+            headers: Default::default(),
+            auth: None,
+            cookie_secret: None,
+            cookie_secure: default_cookie_secure(),
+            api_credentials_path: None,
+            authoring: None,
+            frame_ancestors: default_frame_ancestors(),
+            update_check: UpdateCheckOptions::default(),
+        }
+    }
 }
 
 pub(crate) fn default_frame_ancestors() -> Vec<String> {
@@ -952,6 +1155,7 @@ impl PartialEq for WebOptions {
             && self.api_credentials_path == other.api_credentials_path
             && self.authoring == other.authoring
             && self.frame_ancestors == other.frame_ancestors
+            && self.update_check == other.update_check
     }
 }
 
@@ -962,7 +1166,7 @@ pub struct AuthoringOptions {
     /// Whether change proposals are enabled.
     pub enabled: bool,
     /// Where changes can be proposed. Defaults to one `workspace` target
-    /// covering `flows/` and `resources/`.
+    /// covering `flows/`, `resources/` and `credentials/`.
     #[serde(default = "default_targets")]
     pub targets: Vec<AuthoringTarget>,
     /// Claim of the signed-in user that lists their groups. Defaults to `groups`.
@@ -980,16 +1184,16 @@ pub struct AuthoringTarget {
     /// targets belongs to the one with the most specific folder, and a change's
     /// files must all belong to one target.
     pub paths: Vec<String>,
-    /// Identity of the flow, starting with an `inproc_endpoint`, that publishes
+    /// Identity of the flow, starting with an `inproc_endpoint`, that commits
     /// an approved change. It receives `{id, target, title, author, files}`.
-    /// Defaults to `system/publish_workspace`.
-    #[serde(default = "default_publish_flow")]
-    pub publish_flow: String,
+    /// Defaults to `system/commit_workspace`.
+    #[serde(default = "default_commit_flow")]
+    pub commit_flow: String,
     /// Identity provider groups whose members may approve and reject. Empty
     /// allows every signed-in user.
     #[serde(default)]
     pub approver_groups: Vec<String>,
-    /// Whether a published change reports when this instance runs it. Turn off
+    /// Whether a committed change reports when this instance runs it. Turn off
     /// when the target is not deployed here automatically. Defaults to `true`.
     #[serde(default = "default_track_deployment")]
     pub track_deployment: bool,
@@ -1019,18 +1223,32 @@ impl AuthoringTarget {
     }
 }
 
+impl Default for AuthoringOptions {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            targets: default_targets(),
+            groups_claim: default_groups_claim(),
+        }
+    }
+}
+
 fn default_targets() -> Vec<AuthoringTarget> {
     vec![AuthoringTarget {
         name: "workspace".to_string(),
-        paths: vec!["flows/".to_string(), "resources/".to_string()],
-        publish_flow: default_publish_flow(),
+        paths: vec![
+            "flows/".to_string(),
+            "resources/".to_string(),
+            "credentials/".to_string(),
+        ],
+        commit_flow: default_commit_flow(),
         approver_groups: Vec::new(),
         track_deployment: default_track_deployment(),
     }]
 }
 
-fn default_publish_flow() -> String {
-    "system/publish_workspace".to_string()
+fn default_commit_flow() -> String {
+    "system/commit_workspace".to_string()
 }
 
 fn default_track_deployment() -> bool {
@@ -1060,18 +1278,18 @@ where
 pub struct AgentsOptions {
     /// Whether the Agents chat is enabled.
     pub enabled: bool,
-    /// How long a conversation lives in the configured cache before it
+    /// How long a session lives in the configured cache before it
     /// expires. Refreshed on every write, so the window counts from the last
     /// activity. Defaults to 30 days; set to `0` to persist indefinitely.
     /// Long-term history belongs in a database via a persistence flow, not
     /// this cache.
-    #[serde(default = "default_conversation_history_ttl", with = "humantime_serde")]
-    pub conversation_history_ttl: Option<Duration>,
+    #[serde(default = "default_session_history_ttl", with = "humantime_serde")]
+    pub session_history_ttl: Option<Duration>,
     /// Calls the AI gateway as the signed-in user, with their login token as the bearer.
     #[serde(default)]
     pub on_behalf_of_user: bool,
-    /// Cache key prefix for conversations, read state and folders; a flow
-    /// opens a conversation under `<prefix>.conversations.`.
+    /// Cache key prefix for sessions, read state and folders; a flow
+    /// opens a session under `<prefix>.sessions.`.
     #[serde(default = "default_agents_cache_prefix")]
     pub cache_prefix: String,
     /// How often a reply in progress is saved. A pending reply not saved for
@@ -1082,6 +1300,19 @@ pub struct AgentsOptions {
     /// before it ends with an error. Defaults to 10 minutes.
     #[serde(default = "default_reply_idle_timeout", with = "humantime_serde")]
     pub reply_idle_timeout: Duration,
+}
+
+impl Default for AgentsOptions {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            session_history_ttl: default_session_history_ttl(),
+            on_behalf_of_user: false,
+            cache_prefix: default_agents_cache_prefix(),
+            reply_save_interval: default_reply_save_interval(),
+            reply_idle_timeout: default_reply_idle_timeout(),
+        }
+    }
 }
 
 impl AgentsOptions {
@@ -1123,8 +1354,8 @@ pub(crate) fn default_reply_idle_timeout() -> Duration {
     Duration::from_secs(10 * 60)
 }
 
-/// Default conversation history TTL for the built-in Agents chat: 30 days.
-fn default_conversation_history_ttl() -> Option<Duration> {
+/// Default session history TTL for the built-in Agents chat: 30 days.
+fn default_session_history_ttl() -> Option<Duration> {
     Some(Duration::from_secs(30 * 24 * 60 * 60))
 }
 
@@ -1187,6 +1418,18 @@ pub struct HttpServerOptions {
     pub auth: Option<flowgen_core::auth::AuthConfig>,
 }
 
+impl Default for HttpServerOptions {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: default_http_port(),
+            path: default_http_path(),
+            credentials_path: None,
+            auth: None,
+        }
+    }
+}
+
 /// OpenTelemetry configuration for metrics, tracing, and log export.
 ///
 /// When `enabled` is false the runtime skips telemetry entirely. When
@@ -1208,6 +1451,17 @@ pub struct TelemetryOptions {
     /// Accepts human-readable durations: "30s", "1m", "5m".
     #[serde(default = "default_metrics_interval", with = "humantime_serde")]
     pub metrics_export_interval: Duration,
+}
+
+impl Default for TelemetryOptions {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            backend: None,
+            service_name: default_service_name(),
+            metrics_export_interval: default_metrics_interval(),
+        }
+    }
 }
 
 /// User-facing backend selection.
@@ -1323,7 +1577,13 @@ mod tests {
                 if !source.starts_with("flow:") || source.contains("# ...") {
                     continue;
                 }
-                if let Err(e) = FlowConfigRaw::parse("block.yaml", source) {
+                let loaded = match FlowConfigRaw::parse("block.yaml", source) {
+                    Ok(raw) => {
+                        crate::flow::resolve_parents(&raw.flow.tasks).map_err(|e| e.to_string())
+                    }
+                    Err(e) => Err(e.to_string()),
+                };
+                if let Err(e) = loaded {
                     failures.push(format!("{} block {}: {e}", path.display(), index + 1));
                 }
                 checked += 1;
@@ -1353,9 +1613,10 @@ mod tests {
         let cases = [
             ("flows:\n  cache:\n    enabled: true\n    prefx: f\n", "prefx"),
             (
-                "flows: {}\ncache:\n  enabled: true\n  type: nats\n  runtime:\n    name: c\n",
+                "flows: {}\ncache:\n  type: nats\n  runtime:\n    name: c\n",
                 "name",
             ),
+            ("flows: {}\ncache:\n  enabled: true\n  type: nats\n", "enabled"),
             (
                 "flows: {}\ntelemetry:\n  enabled: true\n  backend:\n    type: memory\n    logs_per_flows: 5\n",
                 "logs_per_flows",
@@ -1427,7 +1688,7 @@ mod tests {
         let authoring = config.web.unwrap().authoring.unwrap();
         assert_eq!(authoring.targets.len(), 1);
         let workspace = &authoring.targets[0];
-        assert_eq!(workspace.publish_flow, "system/publish_workspace");
+        assert_eq!(workspace.commit_flow, "system/commit_workspace");
         assert_eq!(
             authoring
                 .target_of("resources/s.rhai")
@@ -1442,7 +1703,7 @@ mod tests {
         let target = |name: &str, path: &str| AuthoringTarget {
             name: name.to_string(),
             paths: vec![path.to_string()],
-            publish_flow: default_publish_flow(),
+            commit_flow: default_commit_flow(),
             approver_groups: Vec::new(),
             track_deployment: true,
         };
@@ -1613,11 +1874,10 @@ mod tests {
     fn test_app_config_creation() {
         let app_config = AppConfig {
             cache: Some(CacheOptions {
-                enabled: true,
                 cache_type: CacheType::Nats,
                 credentials_path: Some(PathBuf::from("/test/cache")),
                 url: "localhost:4222".to_string(),
-                db_name: None,
+                path: default_redb_path(),
                 runtime: BucketOptions::default(),
                 system: SystemBucketOptions::default(),
                 history: None,
@@ -1626,6 +1886,7 @@ mod tests {
             flows: FlowOptions {
                 path: Some(PathBuf::from("/test/flows/*")),
                 cache: None,
+                system: false,
             },
             resources: None,
             http_server: None,
@@ -1636,11 +1897,13 @@ mod tests {
             retry: None,
             telemetry: None,
             shutdown_timeout: default_shutdown_timeout(),
+            host: default_host(),
             ai_budget: None,
+            credentials: None,
         };
 
         assert!(app_config.cache.is_some());
-        assert!(app_config.cache.as_ref().unwrap().enabled);
+        assert_eq!(app_config.cache_options().cache_type, CacheType::Nats);
         assert!(app_config.flows.path.is_some());
         assert!(app_config.telemetry.is_none());
         assert!(app_config.http_server.is_none());
@@ -1655,6 +1918,7 @@ mod tests {
             flows: FlowOptions {
                 path: Some(PathBuf::from("/flows/*")),
                 cache: None,
+                system: false,
             },
             resources: None,
             http_server: None,
@@ -1665,22 +1929,26 @@ mod tests {
             retry: None,
             telemetry: None,
             shutdown_timeout: default_shutdown_timeout(),
+            host: default_host(),
             ai_budget: None,
+            credentials: None,
         };
 
         assert!(app_config.cache.is_none());
         assert!(app_config.flows.path.is_some());
+        let cache = app_config.cache_options();
+        assert_eq!(cache.cache_type, CacheType::Redb);
+        assert_eq!(cache.path, default_redb_path());
     }
 
     #[test]
     fn test_app_config_serialization() {
         let app_config = AppConfig {
             cache: Some(CacheOptions {
-                enabled: false,
                 cache_type: CacheType::Nats,
                 credentials_path: Some(PathBuf::from("/serialize/cache")),
                 url: "localhost:4222".to_string(),
-                db_name: None,
+                path: default_redb_path(),
                 runtime: BucketOptions {
                     db_name: "test_db".to_string(),
                 },
@@ -1691,6 +1959,7 @@ mod tests {
             flows: FlowOptions {
                 path: Some(PathBuf::from("/serialize/flows/*")),
                 cache: None,
+                system: false,
             },
             resources: None,
             http_server: None,
@@ -1701,7 +1970,9 @@ mod tests {
             retry: None,
             telemetry: None,
             shutdown_timeout: default_shutdown_timeout(),
+            host: default_host(),
             ai_budget: None,
+            credentials: None,
         };
 
         let serialized = serde_json::to_string(&app_config).unwrap();
@@ -1713,11 +1984,10 @@ mod tests {
     fn test_app_config_clone() {
         let app_config = AppConfig {
             cache: Some(CacheOptions {
-                enabled: true,
                 cache_type: CacheType::Nats,
                 credentials_path: Some(PathBuf::from("/clone/cache")),
                 url: "localhost:4222".to_string(),
-                db_name: None,
+                path: default_redb_path(),
                 runtime: BucketOptions::default(),
                 system: SystemBucketOptions::default(),
                 history: None,
@@ -1726,6 +1996,7 @@ mod tests {
             flows: FlowOptions {
                 path: None,
                 cache: None,
+                system: false,
             },
             resources: None,
             http_server: None,
@@ -1736,7 +2007,9 @@ mod tests {
             retry: None,
             telemetry: None,
             shutdown_timeout: default_shutdown_timeout(),
+            host: default_host(),
             ai_budget: None,
+            credentials: None,
         };
 
         let cloned = app_config.clone();
@@ -1744,29 +2017,9 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_pre_0_135_cache_db_name() {
-        let yaml = r#"
-cache:
-  enabled: true
-  type: nats
-  url: "localhost:4222"
-  db_name: "legacy_bucket"
-flows:
-  path: "/flows"
-"#;
-        let config: AppConfig = serde_yaml::from_str(yaml).expect("parses");
-        let err = config.validate().expect_err("renamed key must be rejected");
-        assert!(
-            err.to_string().contains("legacy_bucket"),
-            "the error must name the bucket the operator would lose: {err}"
-        );
-    }
-
-    #[test]
     fn validate_accepts_the_new_bucket_layout() {
         let yaml = r#"
 cache:
-  enabled: true
   type: nats
   url: "localhost:4222"
   runtime:
@@ -1830,7 +2083,6 @@ flows:
     fn cache_omitting_both_buckets_uses_the_documented_defaults() {
         let yaml = r#"
 cache:
-  enabled: true
   type: nats
   url: "localhost:4222"
 flows:
@@ -1888,18 +2140,16 @@ flows:
     #[test]
     fn test_cache_options_creation() {
         let cache_options = CacheOptions {
-            enabled: true,
             cache_type: CacheType::Nats,
             credentials_path: Some(PathBuf::from("/test/credentials_path")),
             url: "localhost:4222".to_string(),
-            db_name: None,
+            path: default_redb_path(),
             runtime: BucketOptions::default(),
             system: SystemBucketOptions::default(),
             history: None,
             tombstone_ttl: None,
         };
 
-        assert!(cache_options.enabled);
         assert_eq!(
             cache_options.credentials_path,
             Some(PathBuf::from("/test/credentials_path"))
@@ -1907,36 +2157,23 @@ flows:
     }
 
     #[test]
-    fn test_cache_options_disabled() {
-        let cache_options = CacheOptions {
-            enabled: false,
-            cache_type: CacheType::Nats,
-            credentials_path: Some(PathBuf::from("/disabled/cache")),
-            url: "localhost:4222".to_string(),
-            db_name: None,
-            runtime: BucketOptions {
-                db_name: "custom_db".to_string(),
-            },
-            system: SystemBucketOptions::default(),
-            history: None,
-            tombstone_ttl: None,
-        };
-
-        assert!(!cache_options.enabled);
-        assert_eq!(
-            cache_options.credentials_path,
-            Some(PathBuf::from("/disabled/cache"))
-        );
+    fn a_cache_section_without_a_type_is_a_redb_file() {
+        let config: AppConfig = serde_yaml::from_str(
+            "cache:\n  path: /var/lib/flowgen/state.redb\nflows:\n  path: /flows\n",
+        )
+        .expect("parses");
+        let cache = config.cache_options();
+        assert_eq!(cache.cache_type, CacheType::Redb);
+        assert_eq!(cache.path, PathBuf::from("/var/lib/flowgen/state.redb"));
     }
 
     #[test]
     fn test_cache_options_serialization() {
         let cache_options = CacheOptions {
-            enabled: true,
             cache_type: CacheType::Nats,
             credentials_path: Some(PathBuf::from("/serialize/credentials_path")),
             url: "localhost:4222".to_string(),
-            db_name: None,
+            path: default_redb_path(),
             runtime: BucketOptions::default(),
             system: SystemBucketOptions::default(),
             history: None,
@@ -1952,7 +2189,7 @@ flows:
     fn test_flow_options_with_path() {
         let flow_options = FlowOptions {
             path: Some(PathBuf::from("/test/flows/*.toml")),
-            cache: None,
+            ..FlowOptions::default()
         };
 
         assert!(flow_options.path.is_some());
@@ -1964,10 +2201,7 @@ flows:
 
     #[test]
     fn test_flow_options_without_path() {
-        let flow_options = FlowOptions {
-            path: None,
-            cache: None,
-        };
+        let flow_options = FlowOptions::default();
 
         assert!(flow_options.path.is_none());
     }
@@ -1976,7 +2210,7 @@ flows:
     fn test_flow_options_serialization() {
         let flow_options = FlowOptions {
             path: Some(PathBuf::from("/serialize/flows/*.toml")),
-            cache: None,
+            ..FlowOptions::default()
         };
 
         let serialized = serde_json::to_string(&flow_options).unwrap();
@@ -2060,6 +2294,7 @@ flows:
             flows: FlowOptions {
                 path: None,
                 cache: None,
+                system: false,
             },
             resources: None,
             http_server: Some(HttpServerOptions {
@@ -2076,7 +2311,9 @@ flows:
             retry: None,
             telemetry: None,
             shutdown_timeout: default_shutdown_timeout(),
+            host: default_host(),
             ai_budget: None,
+            credentials: None,
         };
 
         assert!(app_config.http_server.is_some());
@@ -2183,6 +2420,7 @@ flows:
             flows: FlowOptions {
                 path: None,
                 cache: None,
+                system: false,
             },
             resources: None,
             http_server: None,
@@ -2200,7 +2438,9 @@ flows:
                 metrics_export_interval: Duration::from_secs(60),
             }),
             shutdown_timeout: default_shutdown_timeout(),
+            host: default_host(),
             ai_budget: None,
+            credentials: None,
         };
 
         assert!(app_config.telemetry.is_some());

@@ -1,7 +1,5 @@
 <script lang="ts">
-	import Inspector from '$lib/Inspector.svelte';
-	import StatusDot from '$lib/StatusDot.svelte';
-	import StateMessage from '$lib/StateMessage.svelte';
+	import { Inspector, Loading, StateMessage, StatusDot } from '@connve/ui';
 	import { cluster } from '$lib/clusterStatus.svelte';
 	import { m } from '$lib/paraglide/messages.js';
 	import { pageTitle } from '$lib/pageTitle';
@@ -30,9 +28,7 @@
 
 <div class="flex min-h-0 flex-1 flex-col overflow-y-auto px-6 pb-6">
 	{#if !cluster.loaded}
-		<div class="flex justify-center py-12">
-			<span class="loading loading-spinner loading-lg text-primary"></span>
-		</div>
+		<Loading />
 	{:else if !cluster.status}
 		<StateMessage
 			tone="oops"
@@ -46,14 +42,7 @@
 					<tr>
 						<th>{m.pods_column_pod()}</th>
 						<th>{m.pods_column_status()}</th>
-						<th>
-							<span
-								class="tooltip tooltip-bottom before:normal-case before:tracking-normal"
-								data-tip={m.pods_column_flows_tooltip()}
-							>
-								{m.pods_column_flows()}
-							</span>
-						</th>
+						<th>{m.pods_column_flows()}</th>
 					</tr>
 				</thead>
 				<tbody>

@@ -4,7 +4,9 @@
 #![deny(missing_docs)]
 
 use flowgen_core::task::context::TaskContext;
-use flowgen_core::task::meta::{Connection, Connector, Icon};
+use flowgen_core::task::meta::{
+    parses, Connection, Connector, CredentialsField, CredentialsForm, Icon,
+};
 use flowgen_core::task::runner::Runner;
 use flowgen_core::task::{Task, TaskError, TaskIo, TaskMeta};
 use std::sync::Arc;
@@ -19,6 +21,11 @@ pub const CONNECTOR: Connector = Connector {
     label: "Braze",
     icon: Icon::Png(include_bytes!("../icons/braze.png")),
     describe_credentials: None,
+    credentials: &[CredentialsForm {
+        label: "REST API key",
+        fields: &[CredentialsField::secret("api_key", "REST API key")],
+        check: parses::<braze::Credentials>,
+    }],
 };
 
 macro_rules! braze_task {

@@ -11,11 +11,10 @@ use std::path::{Path, PathBuf};
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Failed to read credentials file '{path:?}': {source}")]
+    #[error("Failed to read credentials: {source}")]
     ReadCredentials {
-        path: PathBuf,
         #[source]
-        source: std::io::Error,
+        source: flowgen_core::credentials::Error,
     },
     #[error("Failed to parse credentials file '{path:?}': {source}")]
     ParseCredentials {
@@ -36,8 +35,7 @@ impl Error {
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Credentials {
-    /// Registry username. For GHCR with a Personal Access Token, this is
-    /// the GitHub username; with a GitHub Actions token, it's the actor.
+    /// Registry username.
     pub username: String,
     /// Registry password or token.
     pub password: String,
@@ -56,13 +54,9 @@ pub async fn load_auth(
         None => return Ok(RegistryAuth::Anonymous),
     };
 
-    let content =
-        tokio::fs::read_to_string(path)
-            .await
-            .map_err(|source| Error::ReadCredentials {
-                path: path.to_path_buf(),
-                source,
-            })?;
+    let content = flowgen_core::credentials::read_async(path)
+        .await
+        .map_err(|source| Error::ReadCredentials { source })?;
 
     if let Ok(cfg) = serde_json::from_str::<DockerConfig>(&content) {
         if !cfg.auths.is_empty() {
@@ -141,6 +135,17 @@ fn decode_basic_auth(b64: &str) -> Option<(String, String)> {
     Some((user.to_string(), pass.to_string()))
 }
 
+/// Whether `content` is a Docker `config.json` with at least one registry, as [`load_auth`] reads it.
+pub(crate) fn check_docker_config(content: &str) -> Result<(), String> {
+    match serde_json::from_str::<DockerConfig>(content) {
+        Ok(config) if config.auths.is_empty() => {
+            Err("It lists no registry under `auths`".to_string())
+        }
+        Ok(_) => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 /// Docker `config.json`.
 #[derive(serde::Deserialize)]
 struct DockerConfig {
@@ -180,8 +185,10 @@ mod tests {
     #[test]
     fn error_display_read_credentials() {
         let err = Error::ReadCredentials {
-            path: PathBuf::from("/etc/missing.json"),
-            source: std::io::Error::new(std::io::ErrorKind::NotFound, "not found"),
+            source: flowgen_core::credentials::Error::ReadFile {
+                path: "/etc/missing.json".to_string(),
+                source: std::io::Error::new(std::io::ErrorKind::NotFound, "not found"),
+            },
         };
         assert!(err.to_string().contains("/etc/missing.json"));
         assert!(err.to_string().contains("Failed to read credentials"));

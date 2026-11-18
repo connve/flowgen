@@ -11,7 +11,6 @@ flow:
     tags: ["bigquery", "gcp", "load", "gcs", "example"]
   require_leader_election: true
   tasks:
-
     - generate:
         name: trigger
         interval: 1800s
@@ -22,7 +21,7 @@ flow:
         name: load_parquet_data
         operation: create
         project_id: my-gcp-project
-        credentials_path: /etc/gcp/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/gcp.json"
         job_type: load
         source_uris:
           - "gs://my-bucket/data/sales/*.parquet"

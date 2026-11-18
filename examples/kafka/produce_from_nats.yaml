@@ -9,10 +9,9 @@ flow:
     description: "Subscribes to a NATS JetStream stream and produces each event as a message to a Kafka topic."
     tags: ["kafka", "nats", "producer", "example"]
   tasks:
-
     - nats_jetstream_subscribe:
         name: consume_events
-        credentials_path: /etc/nats/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/nats.json"
         url: "{{env.NATS_URL}}"
         subject: pubsub.data.kafka
         stream:
@@ -31,7 +30,7 @@ flow:
     # generated so the message key always resolves to a unique value.
     - kafka_produce:
         name: produce_to_kafka
-        credentials_path: /etc/kafka/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/kafka.json"
         brokers: "localhost:9092"
         topic: my-topic
         message_key: "key-{{event.id}}"

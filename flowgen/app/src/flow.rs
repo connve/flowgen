@@ -97,11 +97,14 @@ pub enum DagError {
     /// A `depends_on` entry names a task further down the list, which could form a cycle.
     #[error("Task '{task}' depends on '{dependency}' which appears later in the list")]
     LaterDependency { task: String, dependency: String },
+    /// A source names a `depends_on`, though it takes no events.
+    #[error("Task '{task}' starts events and can't depend on other tasks")]
+    SourceDependency { task: String },
 }
 
 /// Resolves each task's parent indices from `depends_on`, or the previous
-/// pipeline task when unset. Registration-only tasks get no implicit parent,
-/// and the implicit-parent walk skips over them.
+/// pipeline task when unset. Sources and registration-only tasks get no
+/// implicit parent, and the implicit-parent walk skips over registration-only tasks.
 pub fn resolve_parents(tasks: &[TaskType]) -> Result<Vec<Vec<usize>>, DagError> {
     let mut name_to_idx: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for (idx, task_type) in tasks.iter().enumerate() {
@@ -115,6 +118,11 @@ pub fn resolve_parents(tasks: &[TaskType]) -> Result<Vec<Vec<usize>>, DagError> 
     let mut parent_indices: Vec<Vec<usize>> = Vec::with_capacity(tasks.len());
     for (idx, task_type) in tasks.iter().enumerate() {
         let parents = match task_type.depends_on() {
+            Some(deps) if task_type.is_source() && !deps.is_empty() => {
+                return Err(DagError::SourceDependency {
+                    task: task_type.name().to_string(),
+                });
+            }
             Some(deps) => {
                 let mut indices = Vec::with_capacity(deps.len());
                 for dep_name in deps {
@@ -137,7 +145,7 @@ pub fn resolve_parents(tasks: &[TaskType]) -> Result<Vec<Vec<usize>>, DagError> 
                 }
                 indices
             }
-            None if !task_type.has_pipeline_io() => vec![],
+            None if task_type.is_source() || !task_type.has_pipeline_io() => vec![],
             None => match (0..idx).rev().find(|&i| tasks[i].has_pipeline_io()) {
                 Some(i) => vec![i],
                 None => vec![],
@@ -1981,7 +1989,6 @@ mod tests {
                 arguments: Vec::new(),
                 template: Some(flowgen_core::resource::Source::Inline("body".to_string())),
                 messages: None,
-                headers: std::collections::HashMap::new(),
                 depends_on: None,
                 retry: None,
             })
@@ -2042,7 +2049,6 @@ mod tests {
                 arguments: Vec::new(),
                 template: Some(flowgen_core::resource::Source::Inline("body".to_string())),
                 messages: None,
-                headers: std::collections::HashMap::new(),
                 depends_on: None,
                 retry: None,
             })
@@ -2097,5 +2103,40 @@ mod tests {
             last.input_rx.is_some(),
             "last consumes — its parent is `first`, walked past `register`"
         );
+    }
+
+    fn generate(name: &str, depends_on: Option<Vec<String>>) -> crate::config::TaskType {
+        crate::config::TaskType::generate(flowgen_core::task::generate::Generate {
+            name: name.to_string(),
+            depends_on,
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn a_source_after_another_task_has_no_parent() {
+        let script = crate::config::TaskType::script(flowgen_core::task::script::Script {
+            name: "combined".to_string(),
+            depends_on: Some(vec!["fast".to_string(), "slow".to_string()]),
+            ..Default::default()
+        });
+
+        let parents =
+            resolve_parents(&[generate("fast", None), generate("slow", None), script]).unwrap();
+
+        assert_eq!(parents, vec![vec![], vec![], vec![0, 1]]);
+    }
+
+    #[test]
+    fn a_source_with_depends_on_fails_to_load() {
+        let tasks = [
+            generate("fast", None),
+            generate("slow", Some(vec!["fast".to_string()])),
+        ];
+
+        assert!(matches!(
+            resolve_parents(&tasks),
+            Err(DagError::SourceDependency { task }) if task == "slow"
+        ));
     }
 }

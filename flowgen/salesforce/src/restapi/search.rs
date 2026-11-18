@@ -23,6 +23,16 @@ const SOSL_RESERVED: &[char] = &[
 ///   credentials_path: /path/to/salesforce_creds.json
 ///   query: "FIND {{{event.data.search_term}}} IN ALL FIELDS RETURNING Account(Id, Name)"
 /// ```
+///
+/// The query can also be a resource file, rendered for each event:
+///
+/// ```yaml
+/// salesforce_restapi_search:
+///   name: find_accounts
+///   credentials_path: /path/to/salesforce_creds.json
+///   query:
+///     resource: salesforce/search.sosl
+/// ```
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
 #[serde(deny_unknown_fields)]
 pub struct Search {
@@ -30,8 +40,8 @@ pub struct Search {
     pub name: String,
     /// Path to Salesforce authentication credentials.
     pub credentials_path: PathBuf,
-    /// SOSL query string (supports Handlebars templating).
-    pub query: String,
+    /// SOSL query, inline or a resource file (supports Handlebars templating).
+    pub query: flowgen_core::resource::Source,
     /// Optional list of upstream task names this task depends on.
     #[serde(default)]
     pub depends_on: Option<Vec<String>>,
@@ -60,11 +70,12 @@ impl Operation for Search {
     async fn call(
         &self,
         client: &Self::Client,
-        _call: &Call<'_>,
+        call: &Call<'_>,
         emitter: &mut Emitter<'_>,
     ) -> Result<(), Error> {
+        let query = call.query(&self.query).await?;
         let response = client
-            .search(&escape_sosl_phrases(&self.query))
+            .search(&escape_sosl_phrases(&query))
             .await
             .map_err(|source| Error::Search {
                 source: Box::new(source),
@@ -194,7 +205,9 @@ mod tests {
         );
         assert_eq!(
             config.query,
-            "FIND {Acme} IN ALL FIELDS RETURNING Account(Id, Name)"
+            flowgen_core::resource::Source::Inline(
+                "FIND {Acme} IN ALL FIELDS RETURNING Account(Id, Name)".to_string()
+            )
         );
         assert!(config.depends_on.is_none());
         assert!(config.retry.is_none());
@@ -277,7 +290,26 @@ mod tests {
             "query": "FIND {{{event.data.search_term}}} IN ALL FIELDS RETURNING Account(Id, Name)"
         }"#;
         let config: Search = serde_json::from_str(json).unwrap();
-        assert!(config.query.contains("{{event.data.search_term}}"));
+        assert!(matches!(
+            config.query,
+            flowgen_core::resource::Source::Inline(query) if query.contains("{{event.data.search_term}}")
+        ));
+    }
+
+    #[test]
+    fn config_deser_with_a_query_resource() {
+        let json = r#"{
+            "name": "search",
+            "credentials_path": "/creds.json",
+            "query": {"resource": "salesforce/search.sosl"}
+        }"#;
+        let config: Search = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            config.query,
+            flowgen_core::resource::Source::Resource {
+                resource: "salesforce/search.sosl".to_string()
+            }
+        );
     }
 
     #[test]

@@ -47,7 +47,7 @@ flow:
     - salesforce_restapi_sobject:
         name: get_record
         operation: get
-        credentials_path: /etc/sfdc/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
         sobject_type: "{{event.data.sobject_type}}"
         record_id: "{{event.data.record_id}}"
         fields: "{{event.data.fields}}"
@@ -79,7 +79,7 @@ flow:
     - salesforce_restapi_sobject:
         name: get_record
         operation: get
-        credentials_path: /etc/sfdc/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
         sobject_type: "{{event.data.sobject_type}}"
         record_id: "{{event.data.record_id}}"
         fields: "{{event.data.fields}}"
@@ -110,7 +110,7 @@ flow:
     - salesforce_restapi_sobject:
         name: upsert_record
         operation: upsert
-        credentials_path: /etc/sfdc/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
         sobject_type: "{{event.data.sobject_type}}"
         external_id_field: "{{event.data.external_id_field}}"
         external_id_value: "{{event.data.external_id_value}}"
@@ -147,7 +147,7 @@ flow:
     - salesforce_restapi_sobject:
         name: upsert_record
         operation: upsert
-        credentials_path: /etc/sfdc/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
         sobject_type: "{{event.data.sobject_type}}"
         external_id_field: "{{event.data.external_id_field}}"
         external_id_value: "{{event.data.external_id_value}}"
@@ -177,7 +177,7 @@ flow:
 
     - salesforce_restapi_search:
         name: sosl_search
-        credentials_path: /etc/sfdc/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
         query: 'FIND {"{{event.data.search_term}}"} IN ALL FIELDS RETURNING Account(Id, Name, Industry), Contact(Id, FirstName, LastName, Email)'
 ```
 
@@ -200,7 +200,7 @@ flow:
 
     - salesforce_restapi_search:
         name: sosl_search
-        credentials_path: /etc/sfdc/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
         query: 'FIND {"{{event.data.search_term}}"} IN ALL FIELDS RETURNING Account(Id, Name, Industry), Contact(Id, FirstName, LastName, Email)'
 ```
 
@@ -222,7 +222,7 @@ LLM agents connect to the MCP endpoint and discover all registered tools via the
 
 | File | Purpose | Contents |
 |---|---|---|
-| `/etc/sfdc/credentials.json` | Salesforce REST API | `client_id`, `client_secret`, `username`, `password`, `login_url` |
+| `{{env.FLOWGEN_CREDENTIALS}}/salesforce.json` | Salesforce REST API | `client_id`, `client_secret`, `username`, `password`, `login_url` |
 | `/etc/mcp/api-keys.json` | MCP server (optional) | `api_keys` array |
 
 See [Credentials](/docs/flowgen/concepts/credentials) for format details.

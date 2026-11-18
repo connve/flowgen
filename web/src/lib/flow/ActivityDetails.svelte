@@ -1,5 +1,5 @@
 <script lang="ts" module>
-	import StatusDot from '$lib/StatusDot.svelte';
+	import { StatusDot } from '@connve/ui';
 	import { levelLabel, levelVariant, type ActivityLevel } from '$lib/logRecord';
 	import { formatDuration } from '$lib/toolRuns.svelte';
 
@@ -35,22 +35,16 @@
 </script>
 
 <script lang="ts">
-	import InspectorSection from '$lib/InspectorSection.svelte';
+	import { InspectorSection } from '@connve/ui';
 	import { formatAbsolute, formatRelative } from '$lib/time';
 	import { m } from '$lib/paraglide/messages.js';
 
 	let { activity }: { activity: Activity } = $props();
 </script>
 
-<!-- The record's level, processor and duration, for the inspector's subtitle. -->
+<!-- The record's level, for the inspector's subtitle. -->
 {#snippet activitySummary(activity: Activity)}
 	<StatusDot variant={levelVariant(activity.level)} label={levelLabel(activity.level)} />
-	{#if activity.task_type}
-		<span class="truncate">· {activity.task_type}</span>
-	{/if}
-	{#if activity.duration_ms !== undefined}
-		<span class="tabular-nums">· {formatDuration(activity.duration_ms)}</span>
-	{/if}
 {/snippet}
 
 <div class="space-y-3">
@@ -59,6 +53,14 @@
 		<dd class="tabular-nums">{formatAbsolute(activity.ts_ms)}</dd>
 		<dt class="text-base-content/50">{m.activity_field_when()}</dt>
 		<dd>{formatRelative(activity.ts_ms)}</dd>
+		{#if activity.task_type}
+			<dt class="text-base-content/50">{m.activity_field_processor()}</dt>
+			<dd class="[overflow-wrap:anywhere]">{activity.task_type}</dd>
+		{/if}
+		{#if activity.duration_ms !== undefined}
+			<dt class="text-base-content/50">{m.activity_field_duration()}</dt>
+			<dd class="tabular-nums">{formatDuration(activity.duration_ms)}</dd>
+		{/if}
 		{#if activity.event_id}
 			<dt class="text-base-content/50">{m.activity_field_event()}</dt>
 			<dd class="[overflow-wrap:anywhere]">{activity.event_id}</dd>

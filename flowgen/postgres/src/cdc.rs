@@ -1,7 +1,7 @@
 //! The `postgres_cdc` task: change data capture from a publication, read
 //! through logical replication (pgoutput).
 
-use crate::client::{connection_config, read_credentials, Error as ClientError};
+use crate::client::{connection_config, load_credentials, Error as ClientError};
 use crate::config::Credentials;
 use flowgen_core::config::ConfigExt;
 use flowgen_core::delivery::{Delivered, Delivery};
@@ -576,7 +576,8 @@ async fn connect(
     credentials: &Credentials,
     replication: bool,
 ) -> Result<tokio_postgres::Client, Error> {
-    let (mut connection_config, tls) = connection_config(credentials, config.connection_timeout)?;
+    let (mut connection_config, tls) =
+        connection_config(credentials, config.connection_timeout).await?;
     if replication {
         connection_config.replication_mode(ReplicationMode::Logical);
     }
@@ -1051,7 +1052,7 @@ impl flowgen_core::task::runner::Runner for Processor {
             .map_err(|source| Error::ConfigRender { source })?;
         validate_name("slot", &config.slot)?;
         validate_name("publication", &config.publication)?;
-        let credentials = read_credentials(&config.credentials_path)?;
+        let credentials = load_credentials(&config.credentials_path).await?;
         let client = connect(&config, &credentials, true).await?;
         let flushed = self.open_slot(&config, &credentials, &client).await?;
         let stream = start_replication(&client, &config, flushed).await?;

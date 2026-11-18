@@ -8,7 +8,7 @@ Reads and writes Klaviyo email templates.
 - klaviyo_templates:
     name: save_template
     operation: upsert
-    credentials_path: /etc/klaviyo/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/klaviyo.json"
     payload:
       from_event: true
 ```

@@ -48,9 +48,8 @@ flows:
 Full configuration with all sections:
 
 ```yaml
-# Distributed cache (NATS KV). Falls back to in-memory if disabled or unavailable.
+# Cache shared by every replica (NATS KV). Without it, a local redb file.
 cache:
-  enabled: true
   type: nats
   credentials_path: /etc/nats/credentials.json
   url: "{{env.NATS_URL}}"
@@ -67,16 +66,12 @@ flows:
   # Cache-backed flow loading (for git-synced flows):
   # cache:
   #   enabled: true
-  #   prefix: "flows."
-  #   db_name: flowgen_system
 
 # External resource files (SQL, templates, scripts).
 resources:
   path: /etc/flowgen/resources/
   # cache:
   #   enabled: true
-  #   prefix: "resources."
-  #   db_name: flowgen_system
 
 # OpenTelemetry metrics, traces, and logs.
 # telemetry:
@@ -101,7 +96,7 @@ http_server:
 #   path: "/mcp/v1"
 ```
 
-Without cache configured, flowgen uses an in-memory cache (single-node). See [Caching](/docs/flowgen/concepts/caching) for details.
+Without cache configured, flowgen keeps the cache in a local redb file at `.flowgen/state.redb` (single-node). See [Caching](/docs/flowgen/concepts/caching) for details.
 
 ## Running
 
@@ -110,6 +105,8 @@ flowgen --config config.yaml
 ```
 
 Flowgen discovers all YAML files in the configured flows directory and starts processing them.
+
+Without `--config`, flowgen runs on the workspace in `FLOWGEN_HOME`, or `~/flowgen`. The first run creates it as a git repository with `flows/` and `resources/`. The web UI, HTTP server, MCP server and AI gateway start on `127.0.0.1`, so only this machine reaches them, and the web UI opens in the browser at `http://127.0.0.1:8080/flowgen/`. The cache is a redb file in the workspace's `.flowgen/` folder, which git ignores. `APP_` environment variables change any setting, for example `APP_WEB__PORT=9000`.
 
 ## What happens under the hood
 

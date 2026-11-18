@@ -228,44 +228,47 @@ impl Executor {
             Err(e) => return Err(e),
         }
 
-        // Lease exists - get current state with revision.
-        let (current_value, current_revision) =
-            match self.cache.get_with_revision(lease_name).await? {
-                Some(entry) => entry,
-                None => {
-                    // No value but key exists - this is a DELETE tombstone.
-                    // Get the tombstone's revision and overwrite it.
-                    if let Some(tombstone_revision) = self.cache.get_revision(lease_name).await? {
-                        tracing::debug!(
-                            lease_name = %lease_name,
-                            tombstone_revision = %tombstone_revision,
-                            "Overwriting DELETE tombstone with new lease"
-                        );
-                        let new_revision = self
-                            .cache
-                            .update(
-                                lease_name,
-                                Bytes::from(value),
-                                tombstone_revision,
-                                Some(self.config.lease_duration.as_secs()),
-                            )
-                            .await?;
-                        return Ok(LeaseResult::Acquired {
-                            revision: new_revision,
-                            generation: metadata.generation,
-                        });
-                    } else {
-                        // Race condition: create() saw a key (tombstone or value), but now
-                        // it's completely gone. Another pod likely deleted or TTL expired it.
-                        // Retry from the beginning to attempt fresh acquisition.
-                        tracing::debug!(
-                            lease_name = %lease_name,
-                            "Key disappeared between create and get, retrying acquisition"
-                        );
-                        return Err(crate::cache::CacheError::NotFound);
-                    }
-                }
-            };
+        // Lease exists - get current state with revision. The revision is read before
+        // the value, so a lease another pod takes between the two reads fails the
+        // tombstone overwrite instead of being overwritten.
+        let latest_revision = self.cache.get_revision(lease_name).await?;
+        let (current_value, current_revision) = match (
+            self.cache.get_with_revision(lease_name).await?,
+            latest_revision,
+        ) {
+            (Some(entry), _) => entry,
+            (None, Some(tombstone_revision)) => {
+                // No value but key exists - this is a DELETE tombstone.
+                tracing::debug!(
+                    lease_name = %lease_name,
+                    tombstone_revision = %tombstone_revision,
+                    "Overwriting DELETE tombstone with new lease"
+                );
+                let new_revision = self
+                    .cache
+                    .update(
+                        lease_name,
+                        Bytes::from(value),
+                        tombstone_revision,
+                        Some(self.config.lease_duration.as_secs()),
+                    )
+                    .await?;
+                return Ok(LeaseResult::Acquired {
+                    revision: new_revision,
+                    generation: metadata.generation,
+                });
+            }
+            (None, None) => {
+                // Race condition: create() saw a key (tombstone or value), but now
+                // it's completely gone. Another pod likely deleted or TTL expired it.
+                // Retry from the beginning to attempt fresh acquisition.
+                tracing::debug!(
+                    lease_name = %lease_name,
+                    "Key disappeared between create and get, retrying acquisition"
+                );
+                return Err(crate::cache::CacheError::NotFound);
+            }
+        };
 
         let current_metadata: LeaseMetadata = serde_json::from_slice(&current_value)
             .map_err(|e| crate::cache::CacheError::GetFailed(Box::new(e)))?;

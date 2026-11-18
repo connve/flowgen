@@ -55,8 +55,12 @@ pub fn router(readiness: ReadinessCheck) -> Router {
 }
 
 /// Starts the health server on `port`. Blocks until the server exits.
-pub async fn start_health_server(port: u16, readiness: ReadinessCheck) -> Result<(), Error> {
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
+pub async fn start_health_server(
+    host: &str,
+    port: u16,
+    readiness: ReadinessCheck,
+) -> Result<(), Error> {
+    let listener = tokio::net::TcpListener::bind((host, port))
         .await
         .map_err(|source| Error::BindListener { port, source })?;
 

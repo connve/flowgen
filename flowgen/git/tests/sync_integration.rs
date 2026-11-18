@@ -153,11 +153,11 @@ fn test_task_context() -> Arc<flowgen_core::task::context::TaskContext> {
     )
 }
 
-/// Runs `git_sync` once against the given config and collects every
-/// event that flows downstream within the deadline. Shares its
-/// `TaskContext` across invocations when passed in — that's how the
-/// HEAD-commit cache-skip test observes the second run seeing no
-/// events.
+/// Runs `git_sync` once against the given config, collects every event
+/// that flows downstream within the deadline and completes them as a
+/// succeeding leaf would. Shares its `TaskContext` across invocations
+/// when passed in — that's how the HEAD-commit cache-skip test observes
+/// the second run seeing no events.
 async fn run_once(
     config: Arc<GitSync>,
     task_context: Arc<flowgen_core::task::context::TaskContext>,
@@ -207,18 +207,36 @@ async fn run_once(
         }
     }
 
+    for event in &events {
+        if let Some(completion) = &event.completion_tx {
+            completion.signal_completion(None);
+        }
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
     drop(trigger_tx);
     handle.abort();
     events
 }
 
-fn base_config(url: &str, clone_path: PathBuf) -> GitSync {
+/// The sorted paths of the snapshot `event` carries.
+fn paths_of(event: &Event) -> Vec<String> {
+    let data = event.data_as_json().unwrap();
+    let mut paths: Vec<String> = data["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|file| file["path"].as_str().unwrap().to_string())
+        .collect();
+    paths.sort();
+    paths
+}
+
+fn base_config(url: &str) -> GitSync {
     GitSync {
         name: "sync".to_string(),
-        repository_url: url.to_string(),
-        branch: "main".to_string(),
+        repository: url.to_string(),
+        branch: Some("main".to_string()),
         path: None,
-        clone_path: Some(clone_path),
         credentials_path: None,
         force_pull: false,
         depends_on: None,
@@ -231,7 +249,7 @@ fn base_config(url: &str, clone_path: PathBuf) -> GitSync {
 }
 
 #[tokio::test]
-async fn git_sync_emits_one_event_per_file_with_head_commit() {
+async fn git_sync_emits_one_snapshot_of_every_file_at_the_head_commit() {
     let repo = TestRepo::new();
     let commit = commit_files(
         repo.path(),
@@ -243,35 +261,12 @@ async fn git_sync_emits_one_event_per_file_with_head_commit() {
         "initial",
     );
 
-    let clone_dir = tempfile::tempdir().expect("clone tempdir");
-    let config = Arc::new(base_config(
-        &repo.file_url(),
-        clone_dir.path().to_path_buf(),
-    ));
+    let config = Arc::new(base_config(&repo.file_url()));
     let events = run_once(config, test_task_context()).await;
 
+    assert_eq!(events.len(), 1, "one snapshot per sync");
     assert_eq!(
-        events.len(),
-        3,
-        "expected one event per file in the working tree, got {}",
-        events.len(),
-    );
-
-    let mut paths: Vec<String> = events
-        .iter()
-        .map(|e| {
-            e.data_as_json()
-                .unwrap()
-                .get("path")
-                .unwrap()
-                .as_str()
-                .unwrap()
-                .to_string()
-        })
-        .collect();
-    paths.sort();
-    assert_eq!(
-        paths,
+        paths_of(&events[0]),
         vec![
             "README.md".to_string(),
             "flows/a.yaml".to_string(),
@@ -279,16 +274,11 @@ async fn git_sync_emits_one_event_per_file_with_head_commit() {
         ],
         "every committed file must surface with its repo-relative path",
     );
-
-    for event in &events {
-        let data = event.data_as_json().unwrap();
-        assert_eq!(
-            data.get("commit").unwrap().as_str().unwrap(),
-            commit,
-            "each file event must carry HEAD commit",
-        );
+    let data = events[0].data_as_json().unwrap();
+    assert_eq!(data["commit"].as_str().unwrap(), commit);
+    for file in data["files"].as_array().unwrap() {
         assert!(
-            !data.get("content").unwrap().as_str().unwrap().is_empty(),
+            !file["content"].as_str().unwrap().is_empty(),
             "content must round-trip through the walker",
         );
     }
@@ -308,29 +298,30 @@ async fn git_sync_only_emits_files_under_the_configured_path() {
         "initial",
     );
 
-    let clone_dir = tempfile::tempdir().expect("clone tempdir");
-    let mut config = base_config(&repo.file_url(), clone_dir.path().to_path_buf());
+    let mut config = base_config(&repo.file_url());
     config.path = Some("flows".to_string());
     let events = run_once(Arc::new(config), test_task_context()).await;
 
-    let mut paths: Vec<String> = events
-        .iter()
-        .map(|e| {
-            e.data_as_json()
-                .unwrap()
-                .get("path")
-                .unwrap()
-                .as_str()
-                .unwrap()
-                .to_string()
-        })
-        .collect();
-    paths.sort();
     assert_eq!(
-        paths,
+        paths_of(&events[0]),
         vec!["a.yaml".to_string(), "nested/b.yaml".to_string()],
         "paths must be relative to `path:` and exclude siblings",
     );
+}
+
+#[tokio::test]
+async fn git_sync_fails_when_path_is_not_a_folder_in_the_repository() {
+    let repo = TestRepo::new();
+    commit_files(repo.path(), &[("flows/a.yaml", "name: a\n")], "initial");
+
+    for path in ["missing", "flows/a.yaml"] {
+        let mut config = base_config(&repo.file_url());
+        config.path = Some(path.to_string());
+        let events = run_once(Arc::new(config), test_task_context()).await;
+
+        assert_eq!(events.len(), 1, "{path}");
+        assert!(events[0].is_error(), "{path} must fail, not emit no files");
+    }
 }
 
 #[tokio::test]
@@ -338,11 +329,7 @@ async fn git_sync_skips_the_file_walk_when_head_matches_last_sync() {
     let repo = TestRepo::new();
     commit_files(repo.path(), &[("flows/a.yaml", "name: a\n")], "initial");
 
-    let clone_dir = tempfile::tempdir().expect("clone tempdir");
-    let config = Arc::new(base_config(
-        &repo.file_url(),
-        clone_dir.path().to_path_buf(),
-    ));
+    let config = Arc::new(base_config(&repo.file_url()));
     // Share the TaskContext so the two invocations see the same cache.
     let ctx = test_task_context();
 
@@ -362,8 +349,7 @@ async fn git_sync_force_pull_reemits_even_when_head_is_unchanged() {
     let repo = TestRepo::new();
     commit_files(repo.path(), &[("flows/a.yaml", "name: a\n")], "initial");
 
-    let clone_dir = tempfile::tempdir().expect("clone tempdir");
-    let mut cfg = base_config(&repo.file_url(), clone_dir.path().to_path_buf());
+    let mut cfg = base_config(&repo.file_url());
     cfg.force_pull = true;
     let config = Arc::new(cfg);
     let ctx = test_task_context();
@@ -384,11 +370,7 @@ async fn git_sync_reemits_with_new_commit_when_upstream_advances() {
     let repo = TestRepo::new();
     let first_commit = commit_files(repo.path(), &[("flows/a.yaml", "name: a\n")], "initial");
 
-    let clone_dir = tempfile::tempdir().expect("clone tempdir");
-    let config = Arc::new(base_config(
-        &repo.file_url(),
-        clone_dir.path().to_path_buf(),
-    ));
+    let config = Arc::new(base_config(&repo.file_url()));
     let ctx = test_task_context();
 
     let first_run = run_once(Arc::clone(&config), Arc::clone(&ctx)).await;
@@ -414,32 +396,22 @@ async fn git_sync_reemits_with_new_commit_when_upstream_advances() {
 
     let second_run = run_once(config, ctx).await;
     assert_eq!(
-        second_run.len(),
-        2,
+        paths_of(&second_run[0]),
+        vec!["flows/a.yaml".to_string(), "flows/b.yaml".to_string()],
         "second run must re-emit every file at the new commit",
     );
-    for event in &second_run {
-        assert_eq!(
-            event
-                .data_as_json()
-                .unwrap()
-                .get("commit")
-                .unwrap()
-                .as_str()
-                .unwrap(),
-            second_commit,
-            "new events must carry the advanced commit hash",
-        );
-    }
+    assert_eq!(
+        second_run[0].data_as_json().unwrap()["commit"]
+            .as_str()
+            .unwrap(),
+        second_commit,
+        "the snapshot must carry the advanced commit hash",
+    );
 }
 
 #[tokio::test]
 async fn git_sync_rejects_ssh_url_before_touching_the_network() {
-    let clone_dir = tempfile::tempdir().expect("clone tempdir");
-    let config = Arc::new(base_config(
-        "git@github.com:org/repo.git",
-        clone_dir.path().to_path_buf(),
-    ));
+    let config = Arc::new(base_config("git@github.com:org/repo.git"));
     let events = run_once(config, test_task_context()).await;
 
     // The processor rejects SSH inside init, so nothing should flow
@@ -454,9 +426,8 @@ async fn git_sync_rejects_ssh_url_before_touching_the_network() {
 #[tokio::test]
 async fn git_sync_forwards_a_failure_downstream_once_retries_run_out() {
     let missing = tempfile::tempdir().expect("tempdir");
-    let clone_dir = tempfile::tempdir().expect("clone tempdir");
     let url = format!("file://{}/missing", missing.path().display());
-    let config = Arc::new(base_config(&url, clone_dir.path().to_path_buf()));
+    let config = Arc::new(base_config(&url));
 
     let events = run_once(config, test_task_context()).await;
 

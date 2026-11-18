@@ -1,11 +1,11 @@
-//! The `git_push` task: commits the files of each event and pushes them over
-//! smart HTTP.
+//! The `git_push` task: commits the files of each event onto a branch,
+//! pushed over smart HTTP or moved in a repository on this machine.
 
 /// Commit building and the receive-pack exchange.
 pub mod client;
 
 use crate::remote::{load_credentials, Credentials};
-use client::{Expected, FileChange, Push};
+use client::{Commit, Expected, FileChange, Push};
 use flowgen_core::config::ConfigExt;
 use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
 use flowgen_core::task::TaskConfig;
@@ -17,9 +17,8 @@ use std::time::Duration;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{error, warn};
 
-fn default_branch() -> String {
-    "main".to_string()
-}
+/// The branch a push to a remote repository lands on without `branch`.
+const DEFAULT_BRANCH: &str = "main";
 
 fn default_timeout() -> Option<Duration> {
     Some(Duration::from_secs(120))
@@ -42,7 +41,7 @@ fn default_connect_timeout() -> Option<Duration> {
 /// ```yaml
 /// - git_push:
 ///     name: commit_changes
-///     repository_url: "https://git.example.com/team/configs.git"
+///     repository: "https://git.example.com/team/configs.git"
 ///     path: "configs/"
 ///     credentials_path: /etc/git/credentials.json
 ///     author:
@@ -57,31 +56,36 @@ pub struct GitPush {
     ///
     /// Example: `name: commit_changes`
     pub name: String,
-    /// Repository URL. With `credentials_path` it must be HTTPS, or HTTP to
-    /// a loopback host; SSH is not supported.
+    /// The repository: a URL, pushed to over HTTPS (or HTTP to a loopback
+    /// host), or a path on this machine with `branch` checked out, where the
+    /// commit moves the branch and updates the checked-out files. SSH is not
+    /// supported.
     ///
-    /// Example: `repository_url: "https://git.example.com/team/configs.git"`
-    pub repository_url: String,
-    /// Branch to push to. Defaults to `main`.
+    /// Example: `repository: "https://git.example.com/team/configs.git"`
+    pub repository: String,
+    /// Branch to push to. Defaults to `main` for a URL and to the checked-out
+    /// branch for a path.
     ///
     /// Example: `branch: release`
-    #[serde(default = "default_branch")]
-    pub branch: String,
+    #[serde(default)]
+    pub branch: Option<String>,
     /// Directory within the repository that file paths are relative to.
     ///
     /// Example: `path: "configs/"`
     #[serde(default)]
     pub path: Option<String>,
     /// JSON file with `{token, username?}`; the token is sent with every
-    /// request to the git server.
+    /// request to the git server. Empty means none.
     ///
     /// Example: `credentials_path: /etc/git/credentials.json`
-    #[serde(default)]
+    #[serde(default, deserialize_with = "flowgen_core::config::optional_path")]
     pub credentials_path: Option<PathBuf>,
-    /// Commit author.
+    /// Commit author. Required for a URL; for a path it defaults to the git
+    /// user of this machine. An author with an empty name is unset.
     ///
     /// Example: `author: {name: "{{event.data.author.name}}", email: "{{event.data.author.email}}"}`
-    pub author: Author,
+    #[serde(default)]
+    pub author: Option<Author>,
     /// Committer. Defaults to the author. When commits are signed, the
     /// account that holds the signing key on the git host.
     ///
@@ -92,7 +96,7 @@ pub struct GitPush {
     /// `git commit -S` does with `gpg.format=ssh`.
     ///
     /// Example: `signing_key_path: /etc/git/signing_key`
-    #[serde(default)]
+    #[serde(default, deserialize_with = "flowgen_core::config::optional_path")]
     pub signing_key_path: Option<PathBuf>,
     /// Commit message.
     ///
@@ -141,6 +145,57 @@ pub struct Author {
 
 impl ConfigExt for GitPush {}
 
+/// Where a push lands.
+pub enum Destination<'a> {
+    /// A git server, by URL, with the commit's author.
+    Remote(&'a str, &'a Author),
+    /// A repository on this machine, by path.
+    Local(&'a Path),
+}
+
+impl GitPush {
+    /// Whether the repository or credentials hold a template, so where the
+    /// push lands is known only once rendered.
+    pub fn templated(&self) -> bool {
+        use crate::remote::is_template;
+        is_template(&self.repository)
+            || self
+                .credentials_path
+                .as_ref()
+                .is_some_and(|path| is_template(&path.to_string_lossy()))
+    }
+
+    /// The commit author, unless its name is empty.
+    pub fn author(&self) -> Option<&Author> {
+        self.author
+            .as_ref()
+            .filter(|author| !author.name.is_empty())
+    }
+
+    /// The repository this task commits to: a remote one needs an author and
+    /// a local one takes no credentials.
+    pub fn destination(&self) -> Result<Destination<'_>, ConfigError> {
+        match (crate::remote::is_url(&self.repository), self.author()) {
+            _ if self.repository.is_empty() => Err(ConfigError::Repository),
+            (true, Some(author)) => Ok(Destination::Remote(&self.repository, author)),
+            (true, None) => Err(ConfigError::MissingAuthor),
+            (false, _) if self.credentials_path.is_some() => Err(ConfigError::LocalCredentials),
+            (false, _) => Ok(Destination::Local(Path::new(&self.repository))),
+        }
+    }
+}
+
+/// An invalid git push config.
+#[derive(thiserror::Error, Debug)]
+pub enum ConfigError {
+    #[error("Set repository to a URL or a path")]
+    Repository,
+    #[error("A repository on this machine is committed to directly and takes no credentials_path")]
+    LocalCredentials,
+    #[error("A push to a remote repository needs an author")]
+    MissingAuthor,
+}
+
 /// Errors from the git push processor.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
@@ -148,12 +203,13 @@ pub enum Error {
     #[error(transparent)]
     Push(#[from] client::Error),
     #[error(transparent)]
+    Config(#[from] ConfigError),
+    #[error(transparent)]
     Credentials(#[from] flowgen_core::credentials::Error),
-    #[error("Failed to read the signing key {path}: {source}")]
+    #[error("Failed to read the signing key: {source}")]
     ReadSigningKey {
-        path: PathBuf,
         #[source]
-        source: std::io::Error,
+        source: flowgen_core::credentials::Error,
     },
     #[error("The signing key {path} is not an OpenSSH Ed25519 private key: {source}")]
     InvalidSigningKey {
@@ -223,6 +279,9 @@ impl Error {
                 source,
                 Push::InvalidPath { .. }
                     | Push::Conflict { .. }
+                    | Push::NotCheckedOut { .. }
+                    | Push::DetachedHead
+                    | Push::OpenRepository { .. }
                     | Push::NothingToPush
                     | Push::BranchMissing { .. }
                     | Push::Url(_)
@@ -237,7 +296,10 @@ impl Error {
                     | Push::ServerError { .. }
                     | Push::Sign { .. }
             ),
-            Error::Input { .. } | Error::NotJson { .. } | Error::RenderConfig { .. } => true,
+            Error::Input { .. }
+            | Error::NotJson { .. }
+            | Error::RenderConfig { .. }
+            | Error::Config(_) => true,
             _ => false,
         }
     }
@@ -245,12 +307,9 @@ impl Error {
 
 /// Reads an unencrypted OpenSSH Ed25519 private key.
 async fn load_signing_key(path: &Path) -> Result<ssh_key::PrivateKey, Error> {
-    let pem = tokio::fs::read_to_string(path)
+    let pem = flowgen_core::credentials::read_async(path)
         .await
-        .map_err(|source| Error::ReadSigningKey {
-            path: path.to_path_buf(),
-            source,
-        })?;
+        .map_err(|source| Error::ReadSigningKey { source })?;
     let pem = SecretString::from(pem);
     let key = ssh_key::PrivateKey::from_openssh(pem.expose_secret()).map_err(|source| {
         Error::InvalidSigningKey {
@@ -378,26 +437,46 @@ impl flowgen_core::task::runner::Handler for EventHandler {
                     },
                 })
                 .collect();
-            let push = Push {
-                repository_url: config.repository_url,
-                branch: config.branch,
-                path: config.path,
-                credentials: self.credentials.clone(),
-                committer: config.committer.map(|committer| client::Author {
-                    name: committer.name,
-                    email: committer.email,
-                }),
-                signing_key: self.signing_key.clone(),
-                http: self.http.clone(),
-                timeout: config.timeout,
+            let identity = |author: &Author| client::Author {
+                name: author.name.clone(),
+                email: author.email.clone(),
             };
-            let author = client::Author {
-                name: config.author.name,
-                email: config.author.email,
-            };
-            let pushed = {
-                let _pushing = self.pushing.lock().await;
-                push.push(changes, author, config.message).await?
+            let committer = config.committer.as_ref().map(identity);
+            let pushed = match config.destination()? {
+                Destination::Remote(url, author) => {
+                    let author = identity(author);
+                    let branch = match &config.branch {
+                        Some(branch) => branch.clone(),
+                        None => DEFAULT_BRANCH.to_string(),
+                    };
+                    let push = Push {
+                        repository_url: url.to_string(),
+                        branch,
+                        path: config.path.clone(),
+                        credentials: self.credentials.clone(),
+                        committer,
+                        signing_key: self.signing_key.clone(),
+                        http: self.http.clone(),
+                        timeout: config.timeout,
+                    };
+                    let _pushing = self.pushing.lock().await;
+                    push.push(changes, author, config.message.clone()).await?
+                }
+                Destination::Local(path) => {
+                    let commit = Commit {
+                        repository_path: path.to_path_buf(),
+                        branch: config.branch.clone(),
+                        path: config.path.clone(),
+                        committer,
+                        signing_key: self.signing_key.clone(),
+                        timeout: config.timeout,
+                    };
+                    let author = config.author().map(identity);
+                    let _pushing = self.pushing.lock().await;
+                    commit
+                        .commit(changes, author, config.message.clone())
+                        .await?
+                }
             };
 
             let mut files = Vec::with_capacity(pushed.files.len());
@@ -464,8 +543,12 @@ impl flowgen_core::task::runner::Runner for Processor {
     type EventHandler = EventHandler;
 
     async fn init(&self) -> Result<EventHandler, Error> {
-        let credentials = load_credentials(self.config.credentials_path.as_deref()).await?;
-        let signing_key = match &self.config.signing_key_path {
+        let rendered = self
+            .config
+            .render(&serde_json::Map::new())
+            .map_err(|source| Error::RenderConfig { source })?;
+        let credentials = load_credentials(rendered.credentials_path.as_deref()).await?;
+        let signing_key = match &rendered.signing_key_path {
             Some(path) => Some(Arc::new(load_signing_key(path).await?)),
             None => None,
         };
@@ -592,28 +675,69 @@ mod tests {
     use super::*;
 
     #[test]
-    fn branch_defaults_to_main_and_unknown_fields_are_rejected() {
+    fn branch_is_optional_and_unknown_fields_are_rejected() {
         let config: GitPush = serde_json::from_str(
             r#"{
                 "name": "push",
-                "repository_url": "https://git.example.com/a.git",
+                "repository": "https://git.example.com/a.git",
                 "author": {"name": "a", "email": "a@example.com"},
                 "message": "m"
             }"#,
         )
         .unwrap();
-        assert_eq!(config.branch, "main");
+        assert_eq!(config.branch, None);
 
         let unknown = serde_json::from_str::<GitPush>(
             r#"{
                 "name": "push",
-                "repository_url": "https://git.example.com/a.git",
+                "repository": "https://git.example.com/a.git",
                 "author": {"name": "a", "email": "a@example.com"},
                 "message": "m",
                 "brnach": "dev"
             }"#,
         );
         assert!(unknown.is_err());
+    }
+
+    #[test]
+    fn a_url_is_pushed_to_with_an_author_and_a_path_is_committed_to() {
+        let config = |fields: &str| {
+            serde_json::from_str::<GitPush>(&format!(
+                r#"{{"name": "push", "message": "m"{fields}}}"#
+            ))
+            .unwrap()
+        };
+        let url = r#", "repository": "https://git.example.com/a.git""#;
+        let author = r#", "author": {"name": "a", "email": "a@example.com"}"#;
+        let unset = r#", "author": {"name": "", "email": ""}"#;
+        assert!(matches!(
+            config(r#", "repository": ".""#).destination(),
+            Ok(Destination::Local(_))
+        ));
+        assert!(matches!(
+            config(&format!("{url}{author}")).destination(),
+            Ok(Destination::Remote(_, _))
+        ));
+        assert!(matches!(
+            config(url).destination(),
+            Err(ConfigError::MissingAuthor)
+        ));
+        assert!(matches!(
+            config(&format!("{url}{unset}")).destination(),
+            Err(ConfigError::MissingAuthor)
+        ));
+        assert!(matches!(
+            config(r#", "repository": """#).destination(),
+            Err(ConfigError::Repository)
+        ));
+        assert!(matches!(
+            config(r#", "repository": ".", "credentials_path": "git.json""#).destination(),
+            Err(ConfigError::LocalCredentials)
+        ));
+        assert!(matches!(
+            config(r#", "repository": ".", "credentials_path": """#).destination(),
+            Ok(Destination::Local(_))
+        ));
     }
 
     #[test]
@@ -696,6 +820,53 @@ mod tests {
             load_signing_key(&dir.path().join("missing")).await,
             Err(Error::ReadSigningKey { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn the_signing_key_path_is_rendered_and_an_empty_one_is_unset() {
+        use flowgen_core::task::runner::Runner;
+        let dir = tempfile::TempDir::new().unwrap();
+        let key = keygen(dir.path(), "ed25519", &["-t", "ed25519", "-N", ""]);
+        std::env::set_var("GIT_PUSH_TEST_SIGNING_KEY", &key);
+        let task_manager = Arc::new(
+            flowgen_core::task::manager::TaskManagerBuilder::new()
+                .build()
+                .unwrap(),
+        );
+        let cache = Arc::new(flowgen_core::cache::memory::MemoryCache::new())
+            as Arc<dyn flowgen_core::cache::Cache>;
+        let context = Arc::new(
+            flowgen_core::task::context::TaskContextBuilder::new()
+                .flow_name("a".to_string())
+                .task_manager(task_manager)
+                .cache(cache)
+                .build()
+                .unwrap(),
+        );
+        let signing_key = |path: &'static str| {
+            let context = Arc::clone(&context);
+            async move {
+                let config: GitPush = serde_json::from_str(&format!(
+                    r#"{{"name": "push", "repository": ".", "message": "m", "signing_key_path": "{path}"}}"#
+                ))
+                .unwrap();
+                let (_, rx) = tokio::sync::mpsc::channel(1);
+                let processor = ProcessorBuilder::new()
+                    .config(Arc::new(config))
+                    .receiver(rx)
+                    .task_type("git_push")
+                    .task_context(context)
+                    .build()
+                    .await
+                    .unwrap();
+                processor.init().await.unwrap().signing_key
+            }
+        };
+
+        assert!(signing_key("{{env.GIT_PUSH_TEST_SIGNING_KEY}}")
+            .await
+            .is_some());
+        assert!(signing_key("").await.is_none());
     }
 
     #[test]

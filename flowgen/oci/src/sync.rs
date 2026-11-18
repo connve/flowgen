@@ -1,9 +1,8 @@
-//! The `oci_sync` task: pulls a manifest from a registry and emits one event
-//! per layer.
-//!
-//! Each layer is emitted as `{path, content, digest, artifact_digest}`, the
-//! same shape as `git_sync` plus the digests.
+//! The `oci_sync` task: pulls an artifact from a registry or a local layout
+//! and emits one event with all its files, `{digest, files}`, the shape
+//! `git_sync` emits with the manifest digest for the commit.
 
+use base64::Engine;
 use flowgen_core::config::ConfigExt;
 use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
 use flowgen_core::task::TaskConfig;
@@ -13,14 +12,13 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tracing::{error, info};
+use tracing::{debug, error};
 
 /// OCI artifact sync processor configuration.
 ///
 /// Pulls an OCI artifact (manifest + layers) from a registry on each trigger
-/// event and emits one downstream event per layer with the file content.
-/// Each emitted event matches the [`FileEvent`] shape so the same downstream
-/// pipeline can ingest output from either `oci_sync` or `git_sync`.
+/// event and emits one [`Snapshot`] with every file, the shape `git_sync`
+/// emits, so the same downstream pipeline can ingest output from either.
 ///
 /// # Example
 ///
@@ -43,8 +41,9 @@ pub struct OciSync {
     /// Secret payload) with multiple `auths` entries keyed by registry
     /// host. For the latter, the entry matching the artifact's registry
     /// host is picked automatically; this lets the same secret used as
-    /// the pod's `imagePullSecrets` also authenticate `oci_sync`.
-    #[serde(default)]
+    /// the pod's `imagePullSecrets` also authenticate `oci_sync`. Empty means
+    /// none.
+    #[serde(default, deserialize_with = "flowgen_core::config::optional_path")]
     pub credentials_path: Option<PathBuf>,
     /// Bypass the manifest-digest cache and re-pull every tick. Use when
     /// downstream cache was mutated out of band and needs re-seeding.
@@ -101,36 +100,37 @@ fn sanitize_artifact_ref(artifact: &str) -> String {
     artifact.replace(['/', ':', '@'], "-")
 }
 
-/// File event emitted for each layer in the pulled artifact, in the shape
-/// `git_sync` emits.
+/// The event `oci_sync` emits: every file of one pull of the artifact, in
+/// the shape `git_sync` emits.
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct FileEvent {
-    /// File path inside the artifact, derived from the layer's
-    /// `org.opencontainers.image.title` annotation.
-    pub path: String,
-    /// Layer content as UTF-8.
-    pub content: String,
-    /// Layer blob digest.
+pub struct Snapshot {
+    /// The digest of the artifact's manifest.
     pub digest: String,
-    /// Whole-artifact manifest digest (same across all events for one pull).
-    pub artifact_digest: String,
+    /// The files of the artifact.
+    pub files: Vec<File>,
 }
 
-/// Meta attached to `EventData::Bytes` layer events so downstream tasks
-/// can still route by path and digest even when the payload is binary.
+/// A file of a [`Snapshot`].
 #[derive(Debug, Clone, serde::Serialize)]
-struct BinaryLayerMeta {
-    path: String,
-    digest: String,
-    artifact_digest: String,
+pub struct File {
+    /// File path inside the artifact, from the layer's
+    /// `org.opencontainers.image.title` annotation or its tar entry.
+    pub path: String,
+    /// Content as UTF-8; absent for a binary file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    /// Content of a binary file, base64-encoded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_base64: Option<String>,
+    /// Digest of the layer holding the file.
+    pub digest: String,
 }
 
-/// Intermediate carrier before per-layer UTF-8 fallback picks JSON or Bytes.
+/// A file read from a layer, before it is decoded as text or kept as binary.
 struct PendingFileEvent {
     path: String,
     content: Vec<u8>,
     digest: String,
-    artifact_digest: String,
 }
 
 /// Errors that can occur during OCI sync processing.
@@ -150,6 +150,23 @@ pub enum Error {
         reference: String,
         #[source]
         source: oci_client::errors::OciDistributionError,
+    },
+    #[error(transparent)]
+    Layout(#[from] crate::layout::Error),
+    #[error("No artifact is tagged '{reference}' yet")]
+    Untagged { reference: String },
+    #[error("Artifact '{reference}' holds no files")]
+    Empty { reference: String },
+    #[error("The manifest of '{reference}' is not an OCI image manifest: {source}")]
+    InvalidManifest {
+        reference: String,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("Reading the layout did not complete: {source}")]
+    LayoutTask {
+        #[source]
+        source: tokio::task::JoinError,
     },
     #[error("Layer content is not valid UTF-8: digest={digest}, source={source}")]
     InvalidLayerEncoding {
@@ -402,12 +419,123 @@ fn extract_tar<R: std::io::Read>(
     Ok(out)
 }
 
+/// Where the artifact is pulled from.
+enum Source {
+    Registry {
+        client: Client,
+        reference: Reference,
+        auth: RegistryAuth,
+    },
+    Layout {
+        layout: crate::layout::Layout,
+        tag: String,
+    },
+}
+
+impl Source {
+    /// Runs a read of the layout on a blocking thread.
+    async fn on_layout<T: Send + 'static>(
+        layout: &crate::layout::Layout,
+        read: impl FnOnce(crate::layout::Layout) -> Result<T, Error> + Send + 'static,
+    ) -> Result<T, Error> {
+        let layout = layout.clone();
+        tokio::task::spawn_blocking(move || read(layout))
+            .await
+            .map_err(|source| Error::LayoutTask { source })?
+    }
+
+    /// The digest the artifact's tag points at, without its content.
+    async fn digest(&self, artifact: &str) -> Result<String, Error> {
+        match self {
+            Source::Registry {
+                client,
+                reference,
+                auth,
+            } => client
+                .fetch_manifest_digest(reference, auth)
+                .await
+                .map_err(|source| Error::Pull {
+                    reference: artifact.to_string(),
+                    source,
+                }),
+            Source::Layout { layout, tag } => {
+                let (tag, artifact) = (tag.clone(), artifact.to_string());
+                Self::on_layout(layout, move |layout| match layout.resolve(&tag)? {
+                    Some(digest) => Ok(digest),
+                    None => Err(Error::Untagged {
+                        reference: artifact,
+                    }),
+                })
+                .await
+            }
+        }
+    }
+
+    /// The artifact's manifest and its digest.
+    async fn manifest(
+        &self,
+        artifact: &str,
+    ) -> Result<(oci_client::manifest::OciImageManifest, String), Error> {
+        match self {
+            Source::Registry {
+                client,
+                reference,
+                auth,
+            } => client
+                .pull_manifest_and_config(reference, auth)
+                .await
+                .map(|(manifest, digest, _config)| (manifest, digest))
+                .map_err(|source| Error::Pull {
+                    reference: artifact.to_string(),
+                    source,
+                }),
+            Source::Layout { layout, .. } => {
+                let digest = self.digest(artifact).await?;
+                let read = digest.clone();
+                let blob =
+                    Self::on_layout(layout, move |layout| Ok(layout.read_blob(&read)?)).await?;
+                let manifest =
+                    serde_json::from_slice(&blob).map_err(|source| Error::InvalidManifest {
+                        reference: artifact.to_string(),
+                        source,
+                    })?;
+                Ok((manifest, digest))
+            }
+        }
+    }
+
+    /// The content of the blob `layer` describes.
+    async fn blob(
+        &self,
+        artifact: &str,
+        layer: &oci_client::manifest::OciDescriptor,
+    ) -> Result<Vec<u8>, Error> {
+        match self {
+            Source::Registry {
+                client, reference, ..
+            } => {
+                let mut content = Vec::new();
+                client
+                    .pull_blob(reference, layer, &mut content)
+                    .await
+                    .map_err(|source| Error::Pull {
+                        reference: artifact.to_string(),
+                        source,
+                    })?;
+                Ok(content)
+            }
+            Source::Layout { layout, .. } => {
+                let digest = layer.digest.clone();
+                Self::on_layout(layout, move |layout| Ok(layout.read_blob(&digest)?)).await
+            }
+        }
+    }
+}
+
 /// Event handler for OCI sync operations.
 pub struct EventHandler {
     config: Arc<OciSync>,
-    client: Client,
-    reference: Reference,
-    auth: RegistryAuth,
+    source: Source,
     tx: Option<Sender<Event>>,
     task_id: usize,
     task_type: &'static str,
@@ -425,7 +553,10 @@ impl flowgen_core::task::runner::Handler for EventHandler {
     fn is_retryable(&self, error: &Error) -> bool {
         match error {
             Error::Registry(source) => !source.is_permanent(),
+            Error::Layout(source) => !source.is_permanent(),
+            Error::InvalidManifest { .. } => false,
             Error::InvalidReference { .. }
+            | Error::Empty { .. }
             | Error::InvalidLayerEncoding { .. }
             | Error::FileTooLarge { .. }
             | Error::ArtifactTooLarge { .. } => false,
@@ -473,19 +604,15 @@ impl flowgen_core::task::runner::Handler for EventHandler {
             let head_digest = if self.config.force_pull {
                 None
             } else {
-                let digest = self
-                    .client
-                    .fetch_manifest_digest(&self.reference, &self.auth)
-                    .await
-                    .map_err(|source| Error::Pull {
-                        reference: self.config.artifact.clone(),
-                        source,
-                    })?;
-                if cached_digest.as_deref() == Some(digest.as_str()) {
-                    info!(
+                let digest = match self.source.digest(&self.config.artifact).await {
+                    Err(Error::Untagged { .. }) => None,
+                    found => Some(found?),
+                };
+                if digest.is_none() || cached_digest == digest {
+                    debug!(
                         artifact = %self.config.artifact,
-                        digest = %digest,
-                        "OCI manifest digest unchanged since last pull, skipping layer fetch"
+                        digest = ?digest,
+                        "OCI artifact unchanged or not released yet, skipping layer fetch"
                     );
                     if let Some(arc) = completion_tx_arc.as_ref() {
                         let upstream_leaf_share = self.task_context.leaf_count.max(1);
@@ -495,17 +622,10 @@ impl flowgen_core::task::runner::Handler for EventHandler {
                     }
                     return Ok(());
                 }
-                Some(digest)
+                digest
             };
 
-            let (manifest, manifest_digest, _config_blob) = self
-                .client
-                .pull_manifest_and_config(&self.reference, &self.auth)
-                .await
-                .map_err(|source| Error::Pull {
-                    reference: self.config.artifact.clone(),
-                    source,
-                })?;
+            let (manifest, manifest_digest) = self.source.manifest(&self.config.artifact).await?;
 
             let layers = manifest.layers;
 
@@ -526,14 +646,7 @@ impl flowgen_core::task::runner::Handler for EventHandler {
                     .and_then(|ann| ann.get("org.opencontainers.image.title"))
                     .cloned();
 
-                let mut buf = Vec::new();
-                self.client
-                    .pull_blob(&self.reference, layer, &mut buf)
-                    .await
-                    .map_err(|source| Error::Pull {
-                        reference: self.config.artifact.clone(),
-                        source,
-                    })?;
+                let buf = self.source.blob(&self.config.artifact, layer).await?;
 
                 let format = detect_layer_format(&layer.media_type);
                 let extracted = extract_layer_files(
@@ -560,7 +673,6 @@ impl flowgen_core::task::runner::Handler for EventHandler {
                                 path: resolved_path.clone(),
                                 content,
                                 digest: layer.digest.clone(),
-                                artifact_digest: manifest_digest.clone(),
                             };
                             if is_oras {
                                 file_events.push(pending);
@@ -600,103 +712,89 @@ impl flowgen_core::task::runner::Handler for EventHandler {
             }
 
             file_events.extend(docker_state.into_values());
+            if file_events.is_empty() {
+                return Err(Error::Empty {
+                    reference: self.config.artifact.clone(),
+                });
+            }
 
-            let total = file_events.len();
-            for (index, pending) in file_events.into_iter().enumerate() {
-                let PendingFileEvent {
-                    path,
-                    content,
-                    digest,
-                    artifact_digest,
-                } = pending;
+            let files = file_events
+                .into_iter()
+                .map(
+                    |PendingFileEvent {
+                         path,
+                         content,
+                         digest,
+                     }| {
+                        match String::from_utf8(content) {
+                            Ok(text) => File {
+                                path,
+                                content: Some(text),
+                                content_base64: None,
+                                digest,
+                            },
+                            Err(binary) => File {
+                                path,
+                                content: None,
+                                content_base64: Some(
+                                    base64::engine::general_purpose::STANDARD
+                                        .encode(binary.into_bytes()),
+                                ),
+                                digest,
+                            },
+                        }
+                    },
+                )
+                .collect();
+            let snapshot = Snapshot {
+                digest: manifest_digest.clone(),
+                files,
+            };
+            let data =
+                serde_json::to_value(&snapshot).map_err(|source| Error::SerdeJson { source })?;
+            let mut e = EventBuilder::new()
+                .data(EventData::Json(data))
+                .subject(self.config.name.clone())
+                .task_id(self.task_id)
+                .task_type(self.task_type)
+                .build()
+                .map_err(|source| Error::EventBuilder { source })?;
 
-                let (data, meta) = match String::from_utf8(content) {
-                    Ok(text) => {
-                        let file_event = FileEvent {
-                            path,
-                            content: text,
-                            digest,
-                            artifact_digest,
-                        };
-                        let data = EventData::Json(
-                            serde_json::to_value(&file_event)
-                                .map_err(|source| Error::SerdeJson { source })?,
+            let digest = match head_digest {
+                Some(digest) => digest,
+                None => manifest_digest,
+            };
+            let save_cursor = {
+                let cache = Arc::clone(cache);
+                let artifact = self.config.artifact.clone();
+                async move {
+                    if let Err(e) = cache.put(&cache_key, digest.clone().into(), None).await {
+                        error!(
+                            artifact = %artifact,
+                            digest = %digest,
+                            error = %e,
+                            "Failed to persist OCI manifest digest, next tick will re-pull"
                         );
-                        (data, None)
                     }
-                    Err(err) => {
-                        // Binary layer: surface path + digests in meta so
-                        // downstream tasks can still route by key.
-                        let bytes = bytes::Bytes::from(err.into_bytes());
-                        let meta_struct = BinaryLayerMeta {
-                            path,
-                            digest,
-                            artifact_digest,
-                        };
-                        let meta_value = serde_json::to_value(&meta_struct)
-                            .map_err(|source| Error::SerdeJson { source })?;
-                        let meta_map = match meta_value {
-                            serde_json::Value::Object(map) => Some(map),
-                            _ => Some(serde_json::Map::new()),
-                        };
-                        (EventData::Bytes(bytes), meta_map)
-                    }
-                };
-
-                let mut builder = EventBuilder::new()
-                    .data(data)
-                    .subject(self.config.name.clone())
-                    .task_id(self.task_id)
-                    .task_type(self.task_type);
-                if let Some(meta_map) = meta {
-                    builder = builder.meta_merge(meta_map);
                 }
-                let mut e = builder
-                    .build()
-                    .map_err(|source| Error::EventBuilder { source })?;
-
-                if index == total - 1 {
+            };
+            let save_cursor = match completion_tx_arc.as_ref() {
+                Some(arc) => {
+                    arc.on_success(Box::pin(save_cursor));
                     match self.tx {
-                        None => {
-                            if let Some(arc) = completion_tx_arc.as_ref() {
-                                arc.signal_completion(e.data_as_json().ok());
-                            }
-                        }
-                        Some(_) => {
-                            e.completion_tx = completion_tx_arc.clone();
-                        }
+                        None => arc.signal_completion(e.data_as_json().ok()),
+                        Some(_) => e.completion_tx = Some(Arc::clone(arc)),
                     }
+                    None
                 }
+                None => Some(save_cursor),
+            };
 
-                e.send_with_logging(self.tx.as_ref())
-                    .await
-                    .map_err(|source| Error::SendMessage { source })?;
-            }
-
-            if total == 0 {
-                if let Some(arc) = completion_tx_arc.as_ref() {
-                    let upstream_leaf_share = self.task_context.leaf_count.max(1);
-                    for _ in 0..upstream_leaf_share {
-                        arc.signal_completion(None);
-                    }
-                }
-            }
-
-            // Persist the digest HEAD returned (falling back to the
-            // manifest digest on force_pull, where HEAD was skipped).
-            // Persist only after every layer event was sent — a mid-pull
-            // failure must re-emit the full batch on the next tick.
-            let digest_to_cache = head_digest.unwrap_or_else(|| manifest_digest.clone());
-            if let Err(e) = cache
-                .put(&cache_key, digest_to_cache.clone().into(), None)
+            e.send_with_logging(self.tx.as_ref())
                 .await
-            {
-                error!(
-                    artifact = %self.config.artifact,
-                    digest = %digest_to_cache,
-                    error = %e,
-                    "Failed to persist OCI manifest digest, next tick will re-pull"
-                );
+                .map_err(|source| Error::SendMessage { source })?;
+            if let Some(save_cursor) = save_cursor {
+                save_cursor.await;
             }
 
             Ok(())
@@ -722,34 +820,44 @@ impl flowgen_core::task::runner::Runner for Processor {
     type EventHandler = EventHandler;
 
     async fn init(&self) -> Result<EventHandler, Error> {
-        // Render the config at init time so operator-controlled fields such
-        // as `artifact` can reference environment variables via
-        // `{{env.VAR_NAME}}`. Event data is intentionally not in scope here —
-        // the artifact reference is static for the lifetime of the task.
         let config: OciSync = self
             .config
-            .render(&serde_json::json!({}))
+            .render(&serde_json::Map::new())
             .map_err(|source| Error::RenderConfig { source })?;
 
-        let reference: Reference =
-            config
-                .artifact
-                .parse()
-                .map_err(|source| Error::InvalidReference {
-                    reference: config.artifact.clone(),
-                    source,
-                })?;
-
-        let auth =
-            crate::registry::load_auth(config.credentials_path.as_deref(), reference.registry())
+        let source = match crate::layout::artifact(&config.artifact) {
+            Some(layout) => {
+                let (folder, tag) = layout?;
+                Source::Layout {
+                    layout: crate::layout::Layout::new(folder),
+                    tag,
+                }
+            }
+            None => {
+                let reference: Reference =
+                    config
+                        .artifact
+                        .parse()
+                        .map_err(|source| Error::InvalidReference {
+                            reference: config.artifact.clone(),
+                            source,
+                        })?;
+                let auth = crate::registry::load_auth(
+                    config.credentials_path.as_deref(),
+                    reference.registry(),
+                )
                 .await?;
-        let client = crate::registry::client(&reference);
+                Source::Registry {
+                    client: crate::registry::client(&reference),
+                    reference,
+                    auth,
+                }
+            }
+        };
 
         Ok(EventHandler {
             config: Arc::new(config),
-            client,
-            reference,
-            auth,
+            source,
             tx: self.tx.clone(),
             task_id: self.task_id,
             task_type: self.task_type,
@@ -1000,33 +1108,32 @@ mod tests {
     }
 
     #[test]
-    fn file_event_serialization() {
-        let fe = FileEvent {
-            path: "flows/main.yaml".to_string(),
-            content: "name: test".to_string(),
-            digest: "sha256:abc".to_string(),
-            artifact_digest: "sha256:def".to_string(),
+    fn a_snapshot_holds_text_as_content_and_binary_as_base64() {
+        let snapshot = Snapshot {
+            digest: "sha256:def".to_string(),
+            files: vec![
+                File {
+                    path: "flows/main.yaml".to_string(),
+                    content: Some("name: test".to_string()),
+                    content_base64: None,
+                    digest: "sha256:abc".to_string(),
+                },
+                File {
+                    path: "logo.png".to_string(),
+                    content: None,
+                    content_base64: Some("AAE=".to_string()),
+                    digest: "sha256:abc".to_string(),
+                },
+            ],
         };
-        let value = serde_json::to_value(&fe).unwrap();
-        assert_eq!(value["path"], "flows/main.yaml");
-        assert_eq!(value["content"], "name: test");
-        assert_eq!(value["digest"], "sha256:abc");
-        assert_eq!(value["artifact_digest"], "sha256:def");
-    }
-
-    #[test]
-    fn file_event_clone() {
-        let fe = FileEvent {
-            path: "a.yaml".to_string(),
-            content: "x".to_string(),
-            digest: "sha256:1".to_string(),
-            artifact_digest: "sha256:2".to_string(),
-        };
-        let cloned = fe.clone();
-        assert_eq!(fe.path, cloned.path);
-        assert_eq!(fe.content, cloned.content);
-        assert_eq!(fe.digest, cloned.digest);
-        assert_eq!(fe.artifact_digest, cloned.artifact_digest);
+        let value = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(value["digest"], "sha256:def");
+        assert_eq!(value["files"][0]["path"], "flows/main.yaml");
+        assert_eq!(value["files"][0]["content"], "name: test");
+        assert_eq!(value["files"][0]["digest"], "sha256:abc");
+        assert!(value["files"][0].get("content_base64").is_none());
+        assert_eq!(value["files"][1]["content_base64"], "AAE=");
+        assert!(value["files"][1].get("content").is_none());
     }
 
     fn test_task_context() -> Arc<flowgen_core::task::context::TaskContext> {
@@ -1367,5 +1474,140 @@ mod tests {
         let (path, content) = as_file(&result[0]).expect("raw layer emits File entry");
         assert!(path.is_none());
         assert_eq!(content, &[0xff, 0xfe, 0xfd]);
+    }
+
+    /// Runs one sync of `artifact` and returns the paths and contents it emits.
+    async fn sync_layout(
+        artifact: &str,
+        context: Arc<flowgen_core::task::context::TaskContext>,
+    ) -> Result<Vec<(String, String)>, Error> {
+        use flowgen_core::task::runner::{Handler, Runner};
+        let (_, rx) = tokio::sync::mpsc::channel(1);
+        let (tx, mut out) = tokio::sync::mpsc::channel(64);
+        let processor = ProcessorBuilder::new()
+            .config(Arc::new(OciSync {
+                name: "deploy".to_string(),
+                artifact: artifact.to_string(),
+                ..Default::default()
+            }))
+            .receiver(rx)
+            .sender(tx)
+            .task_type("oci_sync")
+            .task_context(context)
+            .build()
+            .await
+            .unwrap();
+        let handler = processor.init().await.unwrap();
+        let tick = EventBuilder::new()
+            .data(EventData::Json(serde_json::json!({})))
+            .subject("tick".to_string())
+            .task_id(0)
+            .task_type("generate")
+            .build()
+            .unwrap();
+        let handled = handler.handle(tick).await;
+        if let Err(error) = handled {
+            assert!(!handler.is_retryable(&error), "{error}");
+            return Err(error);
+        }
+        drop(handler);
+        let mut files = Vec::new();
+        while let Ok(event) = out.try_recv() {
+            let data = event.data_as_json().unwrap();
+            for file in data["files"].as_array().unwrap() {
+                files.push((
+                    file["path"].as_str().unwrap().to_string(),
+                    file["content"].as_str().unwrap().to_string(),
+                ));
+            }
+        }
+        files.sort();
+        Ok(files)
+    }
+
+    #[tokio::test]
+    async fn an_artifact_without_files_is_a_permanent_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = crate::layout::Layout::new(dir.path().join("releases"));
+        let manifest =
+            serde_json::to_vec(&oci_client::manifest::OciImageManifest::default()).unwrap();
+        layout
+            .tag(
+                &manifest,
+                oci_client::manifest::OCI_IMAGE_MEDIA_TYPE,
+                &["latest".to_string()],
+            )
+            .unwrap();
+        let artifact = format!(
+            "{}{}:latest",
+            crate::layout::SCHEME,
+            dir.path().join("releases").display()
+        );
+
+        let error = sync_layout(&artifact, test_task_context())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, Error::Empty { .. }), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_release_pushed_to_a_layout_is_synced_once_per_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let repository = format!(
+            "{}{}",
+            crate::layout::SCHEME,
+            dir.path().join("releases").display()
+        );
+        let artifact = format!("{repository}:latest");
+        let context = test_task_context();
+
+        assert!(
+            sync_layout(&artifact, Arc::clone(&context))
+                .await
+                .unwrap()
+                .is_empty(),
+            "Nothing released yet"
+        );
+
+        let push = crate::push::client::Push {
+            repository,
+            credentials_path: None,
+            annotations: Default::default(),
+        };
+        let file = |path: &str, content: &str| crate::push::client::ArtifactFile {
+            path: path.to_string(),
+            content: content.as_bytes().to_vec(),
+        };
+        let tags = ["a1".to_string(), "latest".to_string()];
+        push.push(
+            vec![file("flows/a.yaml", "a"), file("resources/b.txt", "b")],
+            &tags,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            sync_layout(&artifact, Arc::clone(&context)).await.unwrap(),
+            vec![
+                ("flows/a.yaml".to_string(), "a".to_string()),
+                ("resources/b.txt".to_string(), "b".to_string())
+            ]
+        );
+        assert!(
+            sync_layout(&artifact, Arc::clone(&context))
+                .await
+                .unwrap()
+                .is_empty(),
+            "Same digest, no files"
+        );
+
+        push.push(vec![file("flows/a.yaml", "a2")], &tags)
+            .await
+            .unwrap();
+        assert_eq!(
+            sync_layout(&artifact, context).await.unwrap(),
+            vec![("flows/a.yaml".to_string(), "a2".to_string())]
+        );
     }
 }

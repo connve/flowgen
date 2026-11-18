@@ -1,5 +1,7 @@
 use flowgen_core::task::context::TaskContext;
-use flowgen_core::task::meta::{is_per_event, Connection, Connector, Icon};
+use flowgen_core::task::meta::{
+    is_per_event, parses, Connection, Connector, CredentialsField, CredentialsForm, Icon,
+};
 use flowgen_core::task::runner::Runner;
 use flowgen_core::task::{Task, TaskError, TaskIo, TaskMeta};
 use std::collections::BTreeSet;
@@ -19,6 +21,22 @@ pub const CONNECTOR: Connector = Connector {
     label: "Object Store",
     icon: Icon::Svg(include_str!("../icons/object-store.svg")),
     describe_credentials: None,
+    credentials: &[
+        CredentialsForm {
+            label: "Amazon S3 access key",
+            fields: &[
+                CredentialsField::text("aws_access_key_id", "Access key ID"),
+                CredentialsField::secret("aws_secret_access_key", "Secret access key"),
+                CredentialsField::secret("aws_session_token", "Session token").optional(),
+            ],
+            check: parses::<client::AwsCredentials>,
+        },
+        CredentialsForm {
+            label: "Google Cloud service account file",
+            fields: &[],
+            check: flowgen_core::credentials::check_service_account,
+        },
+    ],
 };
 
 /// The bucket a path is in, such as `s3://data`; `None` for a local path.
@@ -54,6 +72,30 @@ impl TaskMeta for config::Processor {
             false => Some(buckets.into_iter().collect::<Vec<_>>().join(" · ")),
         };
         vec![connection]
+    }
+
+    fn validate(&self) -> Result<(), TaskError> {
+        if self.s3.is_none() {
+            return Ok(());
+        }
+        for path in [&self.path, &self.source, &self.destination]
+            .into_iter()
+            .flatten()
+        {
+            let path = path.to_string_lossy();
+            match url::Url::parse(&path) {
+                _ if path.contains("{{") => {}
+                Ok(url) if matches!(url.scheme(), "s3" | "s3a") => {}
+                _ => {
+                    return Err(flowgen_core::config::ProviderOptionsMismatch {
+                        options: "s3",
+                        used: path.into_owned(),
+                    }
+                    .into())
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -140,5 +182,29 @@ mod tests {
         let connections = config.connections();
 
         assert_eq!(connections[0].target.as_deref(), Some("s3://data"));
+    }
+
+    #[test]
+    fn s3_options_apply_to_s3_paths_only() {
+        let config = |path: &str| -> config::Processor {
+            serde_json::from_value(serde_json::json!({
+                "name": "a",
+                "operation": "read",
+                "path": path,
+                "s3": {"region": "eu-west-1"},
+            }))
+            .unwrap()
+        };
+
+        assert!(config("s3://data/a.csv").validate().is_ok());
+        assert!(config("{{env.DATA_PATH}}").validate().is_ok());
+        assert!(config("{{event.data.path}}").validate().is_ok());
+        assert_eq!(
+            config("gs://data/a.csv")
+                .validate()
+                .unwrap_err()
+                .to_string(),
+            "`s3` options don't apply to gs://data/a.csv"
+        );
     }
 }

@@ -231,7 +231,7 @@ pub enum Error {
     #[error("BigQuery Storage Read client authentication error: {source}")]
     ClientAuth {
         #[source]
-        source: gcloud_auth::error::Error,
+        source: crate::CredentialsError,
     },
     #[error("BigQuery Storage Read client creation error: {source}")]
     ClientCreation {

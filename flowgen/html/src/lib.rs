@@ -19,6 +19,7 @@ pub const CONNECTOR: Connector = Connector {
     label: "HTML",
     icon: Icon::Svg(include_str!("../icons/html.svg")),
     describe_credentials: None,
+    credentials: &[],
 };
 
 impl TaskMeta for scrape::Scrape {

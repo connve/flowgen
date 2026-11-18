@@ -14,11 +14,10 @@ flow:
     tags: ["bigquery", "gcp", "example", "upsert"]
   require_leader_election: true
   tasks:
-
     # Consume one batch at a time from NATS; `delay` throttles between batches.
     - nats_jetstream_subscribe:
         name: consume_batch
-        credentials_path: /etc/nats/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/nats.json"
         url: "{{env.NATS_URL}}"
         subject: bigquery.upsert.orders
         stream:
@@ -53,7 +52,7 @@ flow:
     # because DML must always execute.
     - gcp_bigquery_query:
         name: upsert_batch
-        credentials_path: /etc/gcp/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/gcp.json"
         project_id: my-data-project-id
         job_project_id: my-billing-project-id
         query:

@@ -13,7 +13,6 @@ flow:
     tags: ["bigquery", "gcp", "query", "schema", "example"]
   require_leader_election: true
   tasks:
-
     # Runs once per start; safe to rerun because the query adds only what is absent.
     - generate:
         name: trigger
@@ -21,7 +20,7 @@ flow:
 
     - gcp_bigquery_query:
         name: add_missing_columns
-        credentials_path: /etc/gcp/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/gcp.json"
         project_id: my-project-id
         query:
           resource: "gcp/queries/add_missing_columns.sql"

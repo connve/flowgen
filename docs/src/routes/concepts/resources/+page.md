@@ -21,15 +21,15 @@ query:
 
 When a resource is referenced, flowgen loads it through the configured `ResourceLoader` and renders it as a Handlebars template against the current event (see [Templating](/docs/flowgen/concepts/templating)).
 
-## Backends
+## Where resources come from
 
-The `ResourceLoader` has three backends, configured at the worker level under `resources`:
+flowgen reads a resource from the first place that has it:
 
-| Backend | When to use | Key resolution |
-|---|---|---|
-| **Filesystem** (default) | Local development, mounted ConfigMaps in Kubernetes, simple deployments. | `resources.path = "/etc/flowgen/resources"` → key `queries/orders.sql` resolves to `/etc/flowgen/resources/queries/orders.sql`. |
-| **Cache** | Hot-reload across replicas, git-synced flows, multi-tenant workers. | `resources.cache.prefix = "resources"` → key `queries/orders.sql` resolves to cache key `resources.queries/orders.sql`. |
-| **Disabled** | Inline-only flows. | All `resource:` references fail with a clear error. Default when neither `path` nor `cache` is configured. |
+1. A file under `resources.path`.
+2. The cache, if `resources.cache.enabled` is on. It's the same cache your flows use: a local redb file, or NATS.
+3. flowgen's own resources, under `system/`.
+
+`flowgen` turns the cache on for you. With `--config`, set `resources.path`, `resources.cache` or both.
 
 ## Filesystem backend
 
@@ -59,11 +59,9 @@ Files are read on each task invocation — there is no in-memory caching. Edit a
 resources:
   cache:
     enabled: true
-    prefix: resources
-    db_name: flowgen_system
 ```
 
-Resource keys map to entries in the distributed cache (NATS JetStream KV). Every replica reads the same content, and updates propagate without restarting workers.
+Resource keys map to entries in the system bucket of the cache. Every replica reads the same content, and updates propagate without restarting workers.
 
 This is the recommended setup for:
 
@@ -77,8 +75,8 @@ The cache backend reuses the same cache configuration as the rest of flowgen (se
 
 The cache backend assumes someone is writing to `resources.*`. Canonical bootstrap flows do exactly that — they tick on an interval, fetch a directory tree containing both `flows/` and `resources/`, and reconcile them into the cache (puts for new and changed entries, deletes for entries the source no longer contains). One release cadence covers both flow YAML and resource changes:
 
-- [`examples/git/sync_workspace.yaml`](https://github.com/connve/flowgen/blob/main/examples/git/sync_workspace.yaml) — pulls from any HTTPS Git host.
-- [`examples/oci/sync_workspace.yaml`](https://github.com/connve/flowgen/blob/main/examples/oci/sync_workspace.yaml) — pulls from any OCI registry (GHCR, ECR, GAR, Artifactory, Harbor).
+- [`config/deploy_workspace.yaml`](https://github.com/connve/flowgen/blob/main/config/deploy_workspace.yaml) — deploys a release from an OCI Image Layout folder or any OCI registry (GHCR, ECR, GAR, Artifactory, Harbor).
+- The same flow with [`git_sync`](/docs/flowgen/git/sync) in place of `oci_sync` deploys from any HTTPS Git host. See [Loading flows from Git](/docs/flowgen/git/guides/loading-flows).
 
 ## Inline vs resource trade-offs
 
@@ -106,7 +104,7 @@ LIMIT 100
 
 The same templating rules from [Templating](/docs/flowgen/concepts/templating) apply: simple `{{ path }}` substitution, environment variables under `{{env.X}}`, and runtime errors for missing variables.
 
-For SQL specifically, prefer the task's `parameters` field over template substitution when the value is user-controlled — it produces a parameterised query and avoids injection. See the BigQuery and MSSQL pages for details.
+For SQL specifically, prefer the task's `parameters` field over template substitution when the value is user-controlled — it produces a parameterised query and avoids injection. Each database task's page shows its `parameters`.
 
 ## Errors
 

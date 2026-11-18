@@ -10,7 +10,6 @@ flow:
     tags: ["mssql", "query", "sql-server", "example"]
   require_leader_election: true
   tasks:
-
     # One-shot trigger, ten seconds after startup.
     - generate:
         name: trigger
@@ -20,7 +19,7 @@ flow:
     # Query customers as Arrow RecordBatch.
     - mssql_query:
         name: fetch_customers
-        credentials_path: /etc/mssql/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/mssql.json"
         query: "SELECT customer_id, customer_name, email, created_at FROM customers WHERE active = 1 ORDER BY created_at DESC"
 
     # Arrow → JSON for downstream JSON-shaped tasks.

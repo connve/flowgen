@@ -9,7 +9,6 @@ flow:
     tags: ["postgres", "query", "parameterized", "example"]
   require_leader_election: true
   tasks:
-
     # Tick every 5 minutes.
     - generate:
         name: generate_jobs
@@ -18,7 +17,7 @@ flow:
     # Parameterised query; parameters are bound as $1, $2.
     - postgres_query:
         name: fetch_orders
-        credentials_path: /etc/postgres/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/postgres.json"
         query: "SELECT id, customer_id, total, placed_at FROM orders WHERE status = $1 AND placed_at > now() - $2::interval ORDER BY placed_at"
         parameters:
           - "completed"

@@ -2,7 +2,7 @@
 
 Packs the files of an event into a single-layer OCI artifact and pushes it to a registry under one or more tags. The layer is a tar+gzip of the files at their paths, which is the layout [OCI Sync](/docs/flowgen/oci/sync) reads back.
 
-The input event carries `files`, each `{path, content}`; the output of [Git Push](/docs/flowgen/git/push) fits as it is. Paths must be relative, without `..`, and unique. The manifest uses the OCI empty config and the artifact type `application/vnd.connve.flowgen.files.v1`. Pushes from one task run one at a time.
+The input event carries `files`, each `{path, content}`; the output of [Git Push](/docs/flowgen/git/push) fits as it is. `files` must hold at least one file. Paths must be relative, without `..`, and unique. The manifest uses the OCI empty config and the artifact type `application/vnd.connve.flowgen.files.v1`. Pushes from one task run one at a time.
 
 ## Configuration
 
@@ -14,7 +14,7 @@ The input event carries `files`, each `{path, content}`; the output of [Git Push
     annotations:
       org.opencontainers.image.source: "{{env.GIT_REPOSITORY_URL}}"
       org.opencontainers.image.revision: "{{event.data.commit}}"
-    credentials_path: /etc/registry/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/registry.json"
 ```
 
 ### Fields
@@ -22,7 +22,7 @@ The input event carries `files`, each `{path, content}`; the output of [Git Push
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `name` | string | required | Task name. |
-| `repository` | string | required | Registry and repository without a tag, e.g. `registry.example.com/team/configs`. |
+| `repository` | string | required | Registry and repository without a tag, e.g. `registry.example.com/team/configs`, or an OCI Image Layout folder on the same machine, `oci-layout://<folder>`, created when missing. |
 | `tags` | list | required | Tags to push the artifact under, at least one. Supports templating. Every tag is checked before anything is pushed. |
 | `annotations` | map | | Manifest annotations. Supports templating. For example, `org.opencontainers.image.source` names the source repository, which some registries use to link the package to it, and `org.opencontainers.image.revision` the commit. Annotations are part of the manifest, so they change its digest. |
 | `credentials_path` | string | | Registry credentials, in either format [OCI Sync](/docs/flowgen/oci/sync) accepts. |
@@ -43,4 +43,4 @@ The input data, with `files` replaced by:
 ## Examples
 
 - [`examples/oci/push_artifact.yaml`](https://github.com/connve/flowgen/blob/main/examples/oci/push_artifact.yaml) publishes files posted to a webhook.
-- [`examples/authoring/release_workspace.yaml`](https://github.com/connve/flowgen/blob/main/examples/authoring/release_workspace.yaml) releases a workspace repository at each new commit, for deployments without CI.
+- [`config/release_workspace.yaml`](https://github.com/connve/flowgen/blob/main/config/release_workspace.yaml) releases each new commit of a workspace, for deployments without CI.

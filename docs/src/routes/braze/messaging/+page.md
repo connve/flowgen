@@ -8,7 +8,7 @@ Sends messages, campaigns, and Canvases through the Braze API.
 - braze_messaging:
     name: notify_customer
     operation: trigger_campaign
-    credentials_path: /etc/braze/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/braze.json"
     base_url: "{{env.BRAZE_REST_ENDPOINT}}"
     payload:
       campaign_id: "{{env.BRAZE_CAMPAIGN_ID}}"

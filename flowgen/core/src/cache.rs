@@ -4,8 +4,10 @@
 //! tasks that need to maintain state between runs, such as replay identifiers.
 
 pub mod memory;
+pub mod redb;
 
 pub use memory::MemoryCache;
+pub use redb::RedbCache;
 
 use async_trait::async_trait;
 use futures_util::stream::BoxStream;
@@ -30,6 +32,10 @@ pub enum CacheError {
     /// Cache store not initialized.
     #[error("Cache store not initialized")]
     StoreNotInitialized,
+
+    /// Failed to open the cache's storage.
+    #[error("Failed to open the cache: {0}")]
+    OpenFailed(#[source] Box<dyn std::error::Error + Send + Sync>),
 
     /// Failed to create key in cache.
     #[error("Failed to create key: {0}")]

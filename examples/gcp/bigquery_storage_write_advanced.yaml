@@ -12,11 +12,10 @@ flow:
     tags: ["bigquery", "gcp", "storage-write", "nats", "example"]
   require_leader_election: true
   tasks:
-
     # Concurrent NATS consumer with durable state.
     - nats_jetstream_subscribe:
         name: consume_events
-        credentials_path: /etc/nats/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/nats.json"
         url: "{{env.NATS_URL}}"
         subject: bigquery.events.>
         stream:
@@ -53,7 +52,7 @@ flow:
     # covers transient BigQuery API failures.
     - gcp_bigquery_storage_write:
         name: stream_enriched_events
-        credentials_path: /etc/gcp/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/gcp.json"
         project_id: my-project-id
         dataset_id: analytics
         table_id: enriched_events
@@ -64,7 +63,7 @@ flow:
     # Confirmation subject routes by event type.
     - nats_jetstream_publish:
         name: publish_confirmation
-        credentials_path: /etc/nats/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/nats.json"
         url: "{{env.NATS_URL}}"
         subject: "bigquery.confirmations.{{event.data.event_type}}"
         stream:

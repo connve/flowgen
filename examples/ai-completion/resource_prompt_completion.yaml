@@ -11,7 +11,6 @@ flow:
     description: "Webhook → LLM completion with system and user prompts loaded from resource files."
     tags: ["ai", "webhook", "example"]
   tasks:
-
     # POST /api/flowgen/workers/v1/analyze with the payload to analyse.
     - http_endpoint:
         name: receive_data
@@ -22,7 +21,7 @@ flow:
         name: analyze_data
         provider: anthropic
         model: claude-3-5-sonnet-20241022
-        credentials_path: /etc/anthropic/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/anthropic.json"
         system_prompt:
           resource: "ai-completion/prompts/analyst_system.md"
         prompt:

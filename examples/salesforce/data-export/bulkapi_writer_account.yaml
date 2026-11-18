@@ -18,10 +18,9 @@ flow:
     description: "Consumes Account query results from NATS, casts them to an Arrow schema, and fans out to an object-store archive and a BigQuery upsert table."
     tags: ["salesforce", "bulk-api", "bigquery", "object-store", "example"]
   tasks:
-
     - nats_jetstream_subscribe:
         name: start_subscription
-        credentials_path: /etc/nats/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/nats.json"
         url: "{{env.NATS_URL}}"
         subject: salesforce_bulkapi.query_jobs.account
         stream:
@@ -46,7 +45,7 @@ flow:
     - object_store:
         name: write_to_object_store
         operation: write
-        credentials_path: /etc/gcp/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/gcp.json"
         path: "{{env.GCS_BUCKET_PATH}}/salesforce/account"
         hive_partition_options:
           enabled: true
@@ -56,7 +55,7 @@ flow:
 
     - gcp_bigquery_storage_write:
         name: write_to_data_warehouse
-        credentials_path: /etc/gcp/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/gcp.json"
         project_id: "{{env.GCP_PROJECT_ID}}"
         dataset_id: salesforce
         table_id: account

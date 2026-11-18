@@ -30,7 +30,7 @@
 			return;
 		}
 		const key = edges.map((e) => e.id).join('|');
-		if (laidOutKey === key) return;
+		if (laidOutKey === key || width === 0 || height === 0) return;
 
 		const nodes = getNodes();
 		if (nodes.some((n) => !n.measured?.width || !n.measured?.height)) return;

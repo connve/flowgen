@@ -12,7 +12,6 @@ flow:
     description: "Receives orders over an HTTP webhook and tracks each one in Klaviyo as a Placed Order event with its value and items."
     tags: ["klaviyo", "events", "webhook", "example"]
   tasks:
-
     # POST /api/flowgen/workers/v1/klaviyo/orders
     - http_endpoint:
         name: receive_orders
@@ -37,6 +36,6 @@ flow:
     - klaviyo_events:
         name: track_order
         operation: create
-        credentials_path: /etc/klaviyo/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/klaviyo.json"
         payload:
           from_event: true

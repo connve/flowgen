@@ -12,5 +12,6 @@ export default defineConfig({
 			outdir: './src/lib/paraglide',
 			strategy: ['baseLocale']
 		})
-	]
+	],
+	optimizeDeps: { exclude: ['@connve/ui'] }
 });

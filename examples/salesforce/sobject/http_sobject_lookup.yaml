@@ -11,7 +11,6 @@ flow:
     description: "Accepts a record ID over an HTTP webhook and returns the matching Salesforce record via the REST API."
     tags: ["salesforce", "lookup", "http", "webhook", "example"]
   tasks:
-
     - http_endpoint:
         name: receive_request
         method: POST
@@ -20,7 +19,7 @@ flow:
     - salesforce_restapi_sobject:
         name: get_record
         operation: get
-        credentials_path: /etc/sfdc/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
         sobject_type: "{{event.data.sobject_type}}"
         record_id: "{{event.data.record_id}}"
         fields: "{{event.data.fields}}"

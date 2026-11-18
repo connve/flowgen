@@ -13,10 +13,9 @@ flow:
     description: "Consumes events from NATS and batch-upserts up to 200 Contact records into Salesforce via the Composite API with all-or-none transactional guarantees."
     tags: ["salesforce", "upsert", "nats", "composite-api", "example"]
   tasks:
-
     - nats_jetstream_subscribe:
         name: start_subscription
-        credentials_path: /etc/nats/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/nats.json"
         url: "{{env.NATS_URL}}"
         subject: crm.contacts.upsert
         stream:
@@ -34,7 +33,7 @@ flow:
     - salesforce_restapi_composite:
         name: upsert_contacts
         operation: upsert
-        credentials_path: /etc/sfdc/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
         sobject_type: Contact
         external_id_field: ExternalId__c
         all_or_none: true

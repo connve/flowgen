@@ -1,0 +1,33 @@
+# Flowgen Agent tool: validates draft files without running them.
+flow:
+  labels:
+    display_name: "Validate Files"
+    description: "Validates draft flow and resource files and returns every issue for Flowgen Agent."
+    tags: ["mcp", "agent", "flowgen"]
+  tasks:
+    - mcp_tool:
+        name: validate_files
+        description: "Validate flow (flows/...) and resource (resources/...) files. Returns issues; an empty list means valid."
+        input_schema:
+          type: object
+          properties:
+            files:
+              type: array
+              items:
+                type: object
+                properties:
+                  path:
+                    type: string
+                    description: "Path from the workspace root, e.g. flows/orders/sync.yaml."
+                  content:
+                    type: string
+                required: [path, content]
+          required: [files]
+
+    - http_request:
+        name: validate
+        endpoint: "{{env.FLOWGEN_URL}}/api/workspace/validate"
+        method: POST
+        payload:
+          from_event: true
+          send_as: json

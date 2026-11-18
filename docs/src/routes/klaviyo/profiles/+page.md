@@ -8,7 +8,7 @@ Reads and writes Klaviyo profiles.
 - klaviyo_profiles:
     name: save_profile
     operation: upsert
-    credentials_path: /etc/klaviyo/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/klaviyo.json"
     payload:
       email: "{{event.data.email}}"
       first_name: "{{event.data.first_name}}"

@@ -11,7 +11,6 @@ flow:
     tags: ["bigquery", "example"]
   require_leader_election: true
   tasks:
-
     - generate:
         name: trigger
         interval: 10s
@@ -20,7 +19,7 @@ flow:
     # Results arrive as Arrow RecordBatch.
     - gcp_bigquery_query:
         name: fetch_orders
-        credentials_path: /etc/gcp/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/gcp.json"
         project_id: my-project-id
         query: "SELECT id, customer_id, amount, order_date FROM `my-project-id.analytics.orders` WHERE order_date >= '2024-01-01' ORDER BY order_date DESC"
         max_results: 10000

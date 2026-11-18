@@ -46,7 +46,7 @@ flow:
 
     - nats_jetstream_subscribe:
         name: start_subscription
-        credentials_path: /etc/nats/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/nats.json"
         url: "{{env.NATS_URL}}"
         subject: crm.contacts.upsert
         stream:
@@ -64,7 +64,7 @@ flow:
     - salesforce_restapi_composite:
         name: upsert_contacts
         operation: upsert
-        credentials_path: /etc/sfdc/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
         sobject_type: Contact
         external_id_field: ExternalId__c
         all_or_none: true
@@ -114,7 +114,7 @@ flow:
 
     - nats_jetstream_subscribe:
         name: start_subscription
-        credentials_path: /etc/nats/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/nats.json"
         url: "{{env.NATS_URL}}"
         subject: salesforce.platform_events.order_status
         stream:
@@ -131,7 +131,7 @@ flow:
 
     - salesforce_pubsubapi_publish:
         name: publish_order_status
-        credentials_path: /etc/sfdc/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
         topic: /event/OrderStatus__e
         payload:
           from_event: true
@@ -146,7 +146,7 @@ Instead of `from_event: true`, you can map fields explicitly with template expre
 ```yaml
     - salesforce_pubsubapi_publish:
         name: publish_order_status
-        credentials_path: /etc/sfdc/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
         topic: /event/OrderStatus__e
         payload:
           Order_ID__c: "{{event.data.order_id}}"

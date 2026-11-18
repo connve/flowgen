@@ -9,7 +9,6 @@ flow:
     description: "Consumes a Kafka topic and publishes each record to a NATS JetStream subject."
     tags: ["kafka", "nats", "subscriber", "example"]
   tasks:
-
     - kafka_subscribe:
         name: consume_topic
         brokers: "localhost:9092"
@@ -19,7 +18,7 @@ flow:
 
     - nats_jetstream_publish:
         name: publish_to_nats
-        credentials_path: /etc/nats/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/nats.json"
         url: "{{env.NATS_URL}}"
         subject: "kafka.sample_events"
         stream:

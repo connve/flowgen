@@ -13,11 +13,10 @@ flow:
     tags: ["bigquery", "gcp", "upsert", "nats", "example"]
   require_leader_election: true
   tasks:
-
     # One batch at a time; `delay` throttles between batches.
     - nats_jetstream_subscribe:
         name: consume_batch
-        credentials_path: /etc/nats/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/nats.json"
         url: "{{env.NATS_URL}}"
         subject: bigquery.upsert.orders
         stream:
@@ -40,7 +39,7 @@ flow:
     # MERGE + UNNEST upsert. Whole JSON array passed as one param.
     - gcp_bigquery_query:
         name: upsert_batch
-        credentials_path: /etc/gcp/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/gcp.json"
         project_id: my-project-id
         query:
           resource: "gcp/queries/upsert_orders_batch.sql"

@@ -7,7 +7,7 @@ Emits each row change of the tables in a publication, read through logical repli
 ```yaml
 - postgres_cdc:
     name: watch_orders
-    credentials_path: /etc/postgres/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/postgres.json"
     publication: orders_pub
     slot: flowgen_orders
 ```
@@ -77,6 +77,6 @@ When the copy finishes, the task records it in the cache and does not copy again
 
 When the slot already exists but the cache holds no record of a finished copy, the task keeps the slot, copies the tables as they are at that moment, then streams the changes from the slot's position. This happens after a copy interrupted by a restart or failure, and when `initial_copy` is set on a flow whose slot already exists. Rows already emitted are emitted again, and rows changed since the slot's position arrive twice, in the copy and as changes; no change is lost.
 
-The record of a finished copy lives in the [cache](/docs/flowgen/concepts/configuration#cache). With the in-memory cache, used when no `cache` is configured, it is lost on restart, and every start copies the tables again.
+The record of a finished copy lives in the [cache](/docs/flowgen/concepts/configuration#cache).
 
 A slot serves one reader at a time; set [`require_leader_election: true`](/docs/flowgen/concepts/flows) on the flow when it runs on more than one replica.

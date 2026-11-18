@@ -12,7 +12,6 @@ flow:
     description: "Receives email templates over an HTTP webhook and saves each one in Klaviyo, updating the template with the same name or creating it."
     tags: ["klaviyo", "templates", "webhook", "example"]
   tasks:
-
     # POST /api/flowgen/workers/v1/klaviyo/templates
     - http_endpoint:
         name: receive_templates
@@ -34,6 +33,6 @@ flow:
     - klaviyo_templates:
         name: save_template
         operation: upsert
-        credentials_path: /etc/klaviyo/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/klaviyo.json"
         payload:
           from_event: true

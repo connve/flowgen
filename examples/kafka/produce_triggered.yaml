@@ -7,7 +7,6 @@ flow:
     description: "Generates periodic events and produces them to a Kafka topic."
     tags: ["kafka", "producer", "generate", "example"]
   tasks:
-
     - generate:
         name: trigger
         interval: 60s

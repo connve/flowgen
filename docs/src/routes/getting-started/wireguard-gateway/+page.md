@@ -1,6 +1,6 @@
 # WireGuard Gateway
 
-When flowgen needs to reach resources on a private network (e.g. an on-prem MSSQL server behind a VPN), the Helm chart can deploy a standalone WireGuard gateway pod. Flowgen pods connect to the gateway's ClusterIP Service instead of reaching through the tunnel directly.
+When flowgen needs to reach resources on a private network (e.g. a database or a corporate API behind a VPN), the Helm chart can deploy a standalone WireGuard gateway pod. Flowgen pods connect to the gateway's ClusterIP Service instead of reaching through the tunnel directly.
 
 ## Why a separate pod?
 
@@ -12,8 +12,8 @@ A standalone gateway pod holds a single VPN identity. Flowgen pods connect to th
 
 ```
 flowgen pod 0 ──┐
-flowgen pod 1 ──┼── ClusterIP Service ──► gateway pod ──► WireGuard tunnel ──► on-prem DB
-flowgen pod 2 ──┘       :1433               (socat)            (wg0)           10.0.0.5:1433
+flowgen pod 1 ──┼── ClusterIP Service ──► gateway pod ──► WireGuard tunnel ──► private host
+flowgen pod 2 ──┘       :8080               (socat)            (wg0)           10.0.0.5:8080
 ```
 
 The gateway pod runs three components:
@@ -49,7 +49,7 @@ stringData:
     PersistentKeepalive = 25
 ```
 
-Setting `MTU = 1420` prevents silent packet drops on large payloads (e.g. SQL result sets) caused by WireGuard encapsulation overhead.
+Setting `MTU = 1420` prevents silent packet drops on large payloads (e.g. big query results) caused by WireGuard encapsulation overhead.
 
 ### 2. Configure the gateway in values.yaml
 
@@ -60,10 +60,10 @@ wireguardGateway:
     - name: wg0
       secretName: wireguard-client-a
       portForwards:
-        - name: mssql
-          port: 1433
+        - name: orders-api
+          port: 8080
           targetHost: 10.0.0.5
-          targetPort: 1433
+          targetPort: 8080
 ```
 
 Each entry in `portForwards` starts a socat process that listens on `port` and forwards to `targetHost:targetPort` through the tunnel.
@@ -74,12 +74,10 @@ In your flow config, use the gateway Service DNS name instead of the private IP:
 
 ```yaml
 tasks:
-  - mssql_query:
+  - http_request:
       name: fetch_orders
-      host: "<release-name>-flowgen-wireguard-gateway"
-      port: 1433
-      database: production
-      query: { resource: orders.sql }
+      endpoint: "http://<release-name>-flowgen-wireguard-gateway:8080/orders"
+      method: GET
 ```
 
 The Service name follows the pattern `<release-name>-flowgen-wireguard-gateway`. If your Helm release is called `flowgen`, the host is `flowgen-wireguard-gateway`.
@@ -93,11 +91,11 @@ tunnels:
   - name: wg0
     secretName: wireguard-client-a
     portForwards:
-      - name: mssql
-        port: 1433
+      - name: orders-api
+        port: 8080
         targetHost: 10.0.0.5
-        targetPort: 1433
-      - name: postgres
+        targetPort: 8080
+      - name: inventory-db
         port: 5432
         targetHost: 10.0.0.6
         targetPort: 5432
@@ -107,15 +105,15 @@ If two remote services use the same port number, use `servicePort` to expose one
 
 ```yaml
 portForwards:
-  - name: mssql-a
-    port: 1433
+  - name: orders-api
+    port: 8080
     targetHost: 10.0.0.5
-    targetPort: 1433
-  - name: mssql-b
-    port: 1434
+    targetPort: 8080
+  - name: billing-api
+    port: 8081
     targetHost: 10.0.0.6
-    targetPort: 1433
-    servicePort: 1434
+    targetPort: 8080
+    servicePort: 8081
 ```
 
 ## Deployment details

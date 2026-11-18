@@ -3,21 +3,26 @@
 	import { afterNavigate, goto, invalidate } from '$app/navigation';
 	import Icon from '@iconify/svelte';
 	import Actor from '$lib/Actor.svelte';
-	import IconButton from '$lib/IconButton.svelte';
-	import Inspector from '$lib/Inspector.svelte';
-	import InspectorSection from '$lib/InspectorSection.svelte';
-	import StatusDot from '$lib/StatusDot.svelte';
-	import StateMessage from '$lib/StateMessage.svelte';
-	import { apiUrl, errorMessage, failure, type Change, type ChangeSummary } from '$lib/api';
+	import { IconButton, Inspector, InspectorSection, StateMessage, StatusDot } from '@connve/ui';
+	import {
+		approveChange,
+		editChange,
+		errorMessage,
+		isStatus,
+		proposeChange,
+		rejectChange,
+		type Change,
+		type ChangeSummary
+	} from '$lib/api';
+	import { deploymentsStream } from '$lib/urls';
 	import { auth } from '$lib/auth.svelte';
-	import { actor, ownLabel } from '$lib/changes';
+	import { actor, baseContent, editUrl, ownLabel } from '$lib/changes';
 	import { m } from '$lib/paraglide/messages.js';
 	import { pageTitle } from '$lib/pageTitle';
-	import { MINUTE, SECOND, formatAbsolute, formatRelative } from '$lib/time';
+	import { MINUTE, formatAbsolute, formatRelative } from '$lib/time';
 	import type { PageProps } from './$types';
 
-	// How often a change waiting for deployment is checked again, and when it counts as slow.
-	const DEPLOYMENT_POLL_MS = 5 * SECOND;
+	// When a change waiting for deployment counts as slow.
 	const DEPLOYMENT_SLOW_MS = 5 * MINUTE;
 
 	let { data }: PageProps = $props();
@@ -28,8 +33,8 @@
 	let decideError = $state<string | null>(null);
 	let now = $state(Date.now());
 
-	// Pending and failed changes can be approved, and one left publishing past
-	// the publish timeout can be retried.
+	// Pending and failed changes can be approved, and one left committing past
+	// the commit timeout can be retried.
 	let canApprove = $derived(
 		data.change != null &&
 			(data.change.status === 'pending' ||
@@ -48,19 +53,22 @@
 	let savingEdit = $state(false);
 	let editError = $state<string | null>(null);
 	let pendingCount = $derived(data.changes.filter((c) => c.status === 'pending').length);
+	const onTheWay = (deployment: ChangeSummary['deployment']) =>
+		deployment === 'waiting' || deployment === 'released';
 	let deploying = $derived(
-		data.change
-			? data.change.deployment === 'waiting'
-			: data.changes.some((c) => c.deployment === 'waiting')
+		data.change ? onTheWay(data.change.deployment) : data.changes.some((c) => onTheWay(c.deployment))
 	);
 
 	$effect(() => {
 		if (!deploying) return;
-		const timer = setInterval(() => {
-			now = Date.now();
-			void invalidate('app:changes');
-		}, DEPLOYMENT_POLL_MS);
-		return () => clearInterval(timer);
+		const deployments = new EventSource(deploymentsStream());
+		deployments.addEventListener('open', () => void invalidate('app:changes'));
+		deployments.addEventListener('deployment', () => void invalidate('app:changes'));
+		const clock = setInterval(() => (now = Date.now()), MINUTE);
+		return () => {
+			deployments.close();
+			clearInterval(clock);
+		};
 	});
 
 	afterNavigate(() => {
@@ -79,18 +87,45 @@
 		savingEdit = true;
 		editError = null;
 		try {
-			const res = await fetch(apiUrl(`api/changes/${encodeURIComponent(id)}`), {
-				method: 'PATCH',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ title: titleDraft, description: descriptionDraft })
-			});
-			if (!res.ok) throw await failure(res);
+			await editChange({ path: { id }, body: { title: titleDraft, description: descriptionDraft } });
 			editing = false;
 			await invalidate('app:changes');
 		} catch (err) {
 			editError = errorMessage(err, m.change_edit_failed());
 		} finally {
 			savingEdit = false;
+		}
+	}
+
+	let reverting = $state(false);
+	let revertError = $state<string | null>(null);
+
+	// A committed change is reverted by a new change restoring what each file
+	// held before it; a file changed since cannot be restored without losing
+	// that later edit, so the revert names it and stops.
+	async function revert(change: Change) {
+		reverting = true;
+		revertError = null;
+		try {
+			const current = await Promise.all(change.files.map((file) => baseContent(file.path)));
+			const changed = change.files
+				.filter((file, i) => (file.content ?? null) !== current[i])
+				.map((file) => file.path);
+			if (changed.length > 0) {
+				revertError = m.change_revert_changed_since({ paths: changed.join(', ') });
+				return;
+			}
+			const { data: created } = await proposeChange({
+				body: {
+					title: m.change_revert_title({ title: change.title }),
+					files: change.files.map((file) => ({ path: file.path, content: file.previous ?? null }))
+				}
+			});
+			await goto(`${base}/changes/${encodeURIComponent(created.id)}`);
+		} catch (err) {
+			revertError = errorMessage(err, m.change_revert_failed());
+		} finally {
+			reverting = false;
 		}
 	}
 
@@ -101,20 +136,14 @@
 		deciding = true;
 		decideError = null;
 		const fallback = action === 'approve' ? m.change_approve_failed() : m.change_reject_failed();
-		const reviewed = data.change?.updatedAt;
-		const query = action === 'approve' && reviewed != null ? `?updatedAt=${reviewed}` : '';
+		const updatedAt = data.change?.updatedAt ?? undefined;
 		try {
-			const res = await fetch(
-				apiUrl(`api/changes/${encodeURIComponent(id)}/${action}${query}`),
-				{ method: 'POST' }
-			);
-			if (!res.ok) {
-				const error = await failure(res);
-				if (res.status === 409) await invalidate('app:changes');
-				throw error;
-			}
+			await (action === 'approve'
+				? approveChange({ path: { id }, query: { updatedAt } })
+				: rejectChange({ path: { id } }));
 			await invalidate('app:changes');
 		} catch (err) {
+			if (isStatus(err, 409)) await invalidate('app:changes');
 			decideError = errorMessage(err, fallback);
 		} finally {
 			deciding = false;
@@ -123,21 +152,23 @@
 
 	type Variant = 'neutral' | 'success' | 'error' | 'warning';
 
-	// One status for the whole lifecycle: a tracked published change shows its deployment.
+	// One status for the whole lifecycle: a tracked committed change shows how far it got.
 	function badge(change: Pick<ChangeSummary, 'status' | 'deployment'>): { label: string; variant: Variant } {
 		switch (change.deployment) {
 			case 'waiting':
 				return { label: m.change_deployment_waiting(), variant: 'warning' };
+			case 'released':
+				return { label: m.change_deployment_released(), variant: 'warning' };
 			case 'deployed':
 				return { label: m.change_deployment_deployed(), variant: 'success' };
 		}
 		switch (change.status) {
 			case 'pending':
 				return { label: m.change_status_pending(), variant: 'warning' };
-			case 'publishing':
-				return { label: m.change_status_publishing(), variant: 'warning' };
-			case 'published':
-				return { label: m.change_status_published(), variant: 'success' };
+			case 'committing':
+				return { label: m.change_status_committing(), variant: 'warning' };
+			case 'committed':
+				return { label: m.change_status_committed(), variant: 'success' };
 			case 'failed':
 				return { label: m.change_status_failed(), variant: 'error' };
 			case 'rejected':
@@ -267,7 +298,7 @@
 					</div>
 					{#if canApprove}
 						<div class="flex items-center gap-2">
-							{#if change.status !== 'publishing'}
+							{#if change.status !== 'committing'}
 								<button
 									type="button"
 									class="btn btn-ghost btn-sm"
@@ -294,8 +325,26 @@
 								</button>
 							</div>
 						</div>
+					{:else if change.status === 'committed' && !change.template}
+						<button
+							type="button"
+							class="btn btn-ghost btn-sm gap-1.5"
+							disabled={reverting}
+							onclick={() => revert(change)}
+						>
+							{#if reverting}
+								<span class="loading loading-spinner loading-xs"></span>
+							{:else}
+								<Icon icon="tabler:arrow-back-up" class="h-4 w-4" />
+							{/if}
+							{m.change_revert()}
+						</button>
 					{/if}
 				</div>
+
+				{#if revertError}
+					<div class="rounded-lg border border-error/40 bg-error/5 p-3 text-sm">{revertError}</div>
+				{/if}
 
 				{#if decideError}
 					<div class="rounded-lg border border-error/40 bg-error/5 p-3 text-sm">{decideError}</div>
@@ -303,10 +352,10 @@
 				{#if change.error}
 					<div class="flex items-start gap-2 rounded-lg border border-error/40 bg-error/5 p-3 text-sm">
 						<Icon icon="tabler:alert-triangle" class="h-5 w-5 shrink-0 text-error" />
-						<span>{m.change_publish_failed({ error: change.error })}</span>
+						<span>{m.change_commit_failed({ error: change.error })}</span>
 					</div>
 				{/if}
-				{#if change.deployment === 'waiting' && change.decidedAt && now - change.decidedAt > DEPLOYMENT_SLOW_MS}
+				{#if onTheWay(change.deployment) && change.decidedAt && now - change.decidedAt > DEPLOYMENT_SLOW_MS}
 					<div class="flex items-center gap-2 rounded-lg border border-warning/40 bg-warning/5 p-3 text-sm">
 						<Icon icon="tabler:clock-exclamation" class="h-5 w-5 shrink-0 text-attention" />
 						<span>{m.change_deployment_slow()}</span>
@@ -315,7 +364,7 @@
 						</a>
 					</div>
 				{/if}
-				{#if change.status === 'published' && Object.keys(change.result ?? {}).length > 0}
+				{#if change.status === 'committed' && Object.keys(change.result ?? {}).length > 0}
 					<div class="rounded-lg bg-base-200/50 p-3 text-xs">
 						{#each Object.entries(change.result ?? {}) as [key, value] (key)}
 							<div class="flex gap-2">
@@ -350,6 +399,15 @@
 								<span class="text-xs text-error">{m.change_file_deleted()}</span>
 							{:else if file.previous == null}
 								<span class="text-xs text-primary">{m.change_file_new()}</span>
+							{/if}
+							{#if canEdit && file.content != null}
+								<a
+									href="{editUrl(base, file.path)}?change={encodeURIComponent(change.id)}"
+									class="btn btn-ghost btn-xs ml-auto gap-1"
+								>
+									<Icon icon="tabler:pencil" class="h-3.5 w-3.5" />
+									{m.common_edit()}
+								</a>
 							{/if}
 						</div>
 						<pre class="overflow-x-auto text-xs leading-5">{#each file.diff.split('\n') as line, i (i)}<div class="px-3 {lineClass(line)}">{line || ' '}</div>{/each}</pre>

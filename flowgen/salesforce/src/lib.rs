@@ -3,7 +3,10 @@
 //! and Tooling API operations.
 
 use flowgen_core::task::context::TaskContext;
-use flowgen_core::task::meta::{host, read_credentials, Connection, Connector, Icon};
+use flowgen_core::task::meta::{
+    host, parses, read_credentials, Connection, Connector, CredentialsField, CredentialsForm,
+    FieldKind, Icon,
+};
 use flowgen_core::task::runner::Runner;
 use flowgen_core::task::{Task, TaskError, TaskIo, TaskMeta};
 use std::path::Path;
@@ -40,6 +43,16 @@ pub const CONNECTOR: Connector = Connector {
     label: "Salesforce",
     icon: Icon::Svg(include_str!("../icons/salesforce.svg")),
     describe_credentials: Some(describe_credentials),
+    credentials: &[CredentialsForm {
+        label: "Client credentials",
+        fields: &[
+            CredentialsField::text("instance_url", "Instance URL").of(FieldKind::Url),
+            CredentialsField::text("client_id", "Consumer key"),
+            CredentialsField::secret("client_secret", "Consumer secret"),
+            CredentialsField::text("tenant_id", "Org ID, for Pub/Sub").optional(),
+        ],
+        check: parses::<salesforce_core::client::Credentials>,
+    }],
 };
 
 /// The host of the org the credentials log in to.

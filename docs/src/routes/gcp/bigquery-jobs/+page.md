@@ -17,7 +17,7 @@ Create, monitor, and manage BigQuery jobs. Used for load jobs from GCS.
 - gcp_bigquery_job:
     name: load_from_gcs
     operation: create
-    credentials_path: /etc/gcp/service-account.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/gcp.json"
     project_id: my-project
     source_uris:
       - "gs://my-bucket/data/*.parquet"

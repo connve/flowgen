@@ -8,26 +8,28 @@
 	import FlowDetails from '$lib/flow/FlowDetails.svelte';
 	import type { Activity } from '$lib/flow/ActivityDetails.svelte';
 	import CodeEditor from '$lib/CodeEditor.svelte';
-	import StatusDot from '$lib/StatusDot.svelte';
+	import FileActions from '$lib/FileActions.svelte';
+	import PathField from '$lib/PathField.svelte';
+	import { StatusDot } from '@connve/ui';
 	import { activitiesFor, releaseFlowSubscription } from '$lib/activityStore.svelte';
 	import {
-		apiUrl,
 		encodePath,
 		errorMessage,
-		failure,
+		validateWorkspaceFiles,
 		type AuthoringTarget,
 		type Change,
 		type ValidationIssue as Issue
 	} from '$lib/api';
 	import {
-		draftChange,
 		generatedTitle,
 		loadChange,
+		proposeFile,
 		stripFlowExtension,
 		targetOf
 	} from '$lib/changes';
 	import { m } from '$lib/paraglide/messages.js';
 	import { pageTitle } from '$lib/pageTitle';
+	import { formatSource } from '$lib/format';
 	import type { PageProps } from './$types';
 
 	let { data }: PageProps = $props();
@@ -48,12 +50,10 @@
 	// What the file opened with; edits beyond it are unsaved. A new object on
 	// every load, so `path` and `content` reset even when the values repeat.
 	let opened = $derived({
-		path: data.file ?? newFilePath(data.targets, data.kind, data.folder),
+		path: data.file ?? data.copy?.path ?? newFilePath(data.targets, data.kind, data.folder),
 		content: data.file
 			? (data.drafted ?? data.previous ?? '')
-			: data.kind === 'resource'
-				? ''
-				: NEW_FLOW
+			: (data.copy?.content ?? (data.kind === 'resource' ? '' : NEW_FLOW))
 	});
 	let path = $derived(opened.path);
 	let content = $derived(opened.content);
@@ -100,7 +100,6 @@
 	);
 	let label = $derived(isFlow ? displayName(content) : null);
 	let placeholder = $derived(isFlow ? m.editor_new_flow() : m.editor_new_resource());
-	let canDelete = $derived(data.file !== null && targetOf(data.targets, data.file) !== undefined);
 
 	// The safe answer has focus, so Enter keeps the edits.
 	$effect(() => {
@@ -117,7 +116,15 @@
 		}
 	}
 
-	// Where a new file starts: the given folder, else the first target's folder.
+	// The name a new file is saved under when none is given; a flow's display name replaces it.
+	const UNTITLED = 'untitled';
+
+	// The name of `kind` saved without one.
+	function untitled(kind: 'flow' | 'resource'): string {
+		return kind === 'resource' ? `${UNTITLED}.rhai` : `${UNTITLED}.yaml`;
+	}
+
+	// Where a new file starts, with no name yet: the given folder, else the first target's folder.
 	function newFilePath(
 		targets: AuthoringTarget[],
 		kind: 'flow' | 'resource',
@@ -126,8 +133,35 @@
 		const dir = kind === 'resource' ? 'resources/' : 'flows/';
 		if (folder) return `${dir}${folder}/`;
 		const first = targets[0];
-		return first ? startPath(first, dir) : dir;
+		const start = first ? startPath(first, dir) : dir;
+		return start.endsWith('/') ? start : `${start}/`;
 	}
+
+	// A file name from a display name: lowercase letters and digits joined by `_`.
+	function fileName(display: string | null): string {
+		if (!display) return '';
+		return display
+			.replace(/ł/g, 'l')
+			.replace(/Ł/g, 'L')
+			.normalize('NFD')
+			.replace(/[̀-ͯ]/g, '')
+			.toLowerCase()
+			.replace(/[^a-z0-9]+/g, '_')
+			.replace(/^_+|_+$/g, '');
+	}
+
+	// A new flow's file follows its display name until its name is edited by
+	// hand; a copy keeps the name it was given.
+	let nameEdited = $state(false);
+	$effect(() => {
+		if (data.file !== null || data.copy !== null || !isFlow || nameEdited) return;
+		const name = fileName(label);
+		if (!name) return;
+		const folder = path.slice(0, path.lastIndexOf('/') + 1);
+		const extension = path.match(/\.(yaml|yml|json)$/)?.[0] ?? '.yaml';
+		const next = `${folder}${name}${extension}`;
+		if (next !== path) path = next;
+	});
 
 	// Where a new file starts in `target`: its first prefix of the same kind.
 	function startPath(target: AuthoringTarget, current: string): string {
@@ -137,6 +171,7 @@
 
 	afterNavigate(() => {
 		leaving = false;
+		nameEdited = false;
 	});
 
 	onDestroy(() => {
@@ -162,6 +197,7 @@
 
 	// Returns whether the file has no issues.
 	async function validate(): Promise<boolean> {
+		if (path.endsWith('/')) path = `${path}${untitled(data.kind)}`;
 		const checked = { path, content };
 		validating = true;
 		let found: Issue[] = [];
@@ -176,13 +212,8 @@
 			found.push({ path: checked.path, message: m.editor_empty_file() });
 		}
 		try {
-			const res = await fetch(apiUrl('api/workspace/validate'), {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ files: [checked] })
-			});
-			if (!res.ok) throw await failure(res);
-			found = [...found, ...((await res.json()).issues ?? [])];
+			const { data: checkedFiles } = await validateWorkspaceFiles({ body: { files: [checked] } });
+			found = [...found, ...(checkedFiles.issues ?? [])];
 		} catch (err) {
 			const message = errorMessage(err, m.editor_validate_failed());
 			found = [...found, { path: checked.path, message }];
@@ -194,6 +225,8 @@
 	}
 
 	async function save() {
+		if (path.endsWith('/')) path = `${path}${untitled(data.kind)}`;
+		content = await formatSource(content, path);
 		const saved = { path, content };
 		const title = generatedTitle([{ ...saved, previous: updatesOpened ? data.previous : null }]);
 		if (!(await validate())) return;
@@ -203,34 +236,6 @@
 	async function remove(file: string) {
 		const deleted = { path: file, content: null };
 		await propose(generatedTitle([deleted]), deleted, { path, content });
-	}
-
-	function send(method: 'POST' | 'PATCH', url: string, body: object): Promise<Response> {
-		return fetch(apiUrl(url), {
-			method,
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify(body)
-		});
-	}
-
-	// Adds the file to a pending change; null when the change can no longer
-	// take it. A title the editor generated follows the files; one a person or
-	// agent wrote stays.
-	async function addToDraft(
-		id: string,
-		file: { path: string; content: string | null }
-	): Promise<Change | null> {
-		const url = `api/changes/${encodeURIComponent(id)}`;
-		const before = await loadChange(id);
-		const res = await send('POST', `${url}/files`, { files: [file] });
-		if (res.status === 403 || res.status === 409) return null;
-		if (!res.ok) throw await failure(res);
-		const after: Change = await res.json();
-		const title = generatedTitle(after.files);
-		if (before && before.title === generatedTitle(before.files) && title !== after.title) {
-			await send('PATCH', url, { title }).catch(() => undefined);
-		}
-		return after;
 	}
 
 	// Adds the file to the user's pending change in its target, or proposes a
@@ -243,13 +248,7 @@
 	) {
 		proposing = true;
 		try {
-			const draft = draftChange(data.pending, targetOf(data.targets, file.path)?.name);
-			let change = draft ? await addToDraft(draft.id, file) : null;
-			if (change === null) {
-				const res = await send('POST', 'api/changes', { title, files: [file] });
-				if (!res.ok) throw await failure(res);
-				change = (await res.json()) as Change;
-			}
+			const change = await proposeFile(file, data.targets, { title, draftId: data.draftId });
 			leaving = true;
 			goto(`${base}/changes/${encodeURIComponent(change.id)}`);
 		} catch (err) {
@@ -266,20 +265,22 @@
 </svelte:head>
 
 <section class="flex h-[calc(100vh-4rem)] min-w-0">
-<div class="flex min-w-0 flex-1 flex-col p-6">
+<div class="flex min-w-0 flex-1 flex-col p-4 md:p-6">
 	<div class="mb-4 shrink-0">
-		<div class="flex min-h-8 items-center justify-between gap-2">
-			<div class="min-w-0">
+		<div class="flex min-h-8 flex-wrap items-center justify-between gap-2">
+			<div class="min-w-0 flex-1 basis-40">
 				<div class="flex items-center gap-1 text-xs text-base-content/50">
 					{#if isFlow}
 						<a href="{base}/" class="hover:text-base-content">{m.editor_flows_breadcrumb()}</a>
 					{:else}
 						<a href="{base}/resources" class="hover:text-base-content">{m.resources_breadcrumb()}</a>
 					{/if}
-					{#each segments.slice(0, -1) as segment, i (i)}
-						<span class="opacity-60">/</span>
-						<span>{segment}</span>
-					{/each}
+					{#if data.file !== null}
+						{#each segments.slice(0, -1) as segment, i (i)}
+							<span class="opacity-60">/</span>
+							<span>{segment}</span>
+						{/each}
+					{/if}
 				</div>
 				<h1 class="truncate text-[0.9375rem] font-semibold">
 					{#if isFlow && label}
@@ -291,7 +292,7 @@
 					{/if}
 				</h1>
 			</div>
-			<div class="flex items-center gap-2">
+			<div class="flex flex-wrap items-center gap-2">
 				{#if issues !== null}
 					<span class="mr-2 text-sm text-base-content/70">
 						<StatusDot
@@ -299,6 +300,15 @@
 							label={issues.length === 0 ? m.editor_valid() : m.editor_issue_count({ count: issues.length })}
 						/>
 					</span>
+				{/if}
+				{#if data.file === null && data.kind === 'flow' && data.hubs.length > 0}
+					<a
+						href="{base}/new?kind=flow{data.folder ? `&folder=${encodePath(data.folder)}` : ''}"
+						class="btn btn-ghost btn-sm gap-1.5"
+					>
+						<Icon icon="tabler:layout-grid-add" class="h-4 w-4" />
+						{m.editor_templates()}
+					</a>
 				{/if}
 				<button type="button" class="btn btn-ghost btn-sm" disabled={validating} onclick={validate}>
 					{#if validating}
@@ -322,35 +332,12 @@
 				</div>
 				{#if !isNew && data.file}
 					{@const file = data.file}
-					<div class="dropdown dropdown-end">
-						<button
-							type="button"
-							tabindex="0"
-							class="flex h-8 w-8 items-center justify-center rounded-md text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content"
-							aria-label={m.editor_more_actions()}
-						>
-							<Icon icon="tabler:dots" class="h-5 w-5" />
-						</button>
-						<ul
-							tabindex="-1"
-							class="menu dropdown-content z-10 mt-1 w-56 rounded-md border border-base-200 bg-base-100 p-1 text-sm shadow-lg"
-						>
-							<li class={canDelete ? '' : 'menu-disabled'}>
-								<button
-									type="button"
-									class="text-error"
-									disabled={proposing || !canDelete}
-									onclick={() => remove(file)}
-								>
-									<Icon icon="tabler:trash" class="h-4 w-4" />
-									{m.common_delete()}
-								</button>
-								{#if !canDelete}
-									<span class="text-xs text-base-content/50">{m.editor_delete_read_only()}</span>
-								{/if}
-							</li>
-						</ul>
-					</div>
+					<FileActions
+						{file}
+						targets={data.targets}
+						disabled={proposing}
+						ondelete={() => remove(file)}
+					/>
 				{/if}
 			</div>
 		</div>
@@ -372,18 +359,12 @@
 				{/each}
 			</select>
 		{/if}
-		<label
-			class="input input-sm flex w-full max-w-xl items-center gap-2 border border-base-300 bg-base-100 outline-none focus-within:border-primary"
-		>
-			<Icon icon="tabler:file" class="h-4 w-4 opacity-50" />
-			<input
-				type="text"
-				class="font-mono"
-				aria-label={m.editor_path_label()}
-				bind:value={path}
-				placeholder="flows/orders/sync.yaml"
-			/>
-		</label>
+		<PathField
+			bind:path
+			label={m.editor_path_label()}
+			placeholder={isFlow ? UNTITLED : untitled('resource')}
+			onedit={() => (nameEdited = true)}
+		/>
 	</div>
 
 	<div class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-base-200 bg-base-100">
@@ -433,9 +414,6 @@
 	>
 		<div class="w-full max-w-sm space-y-4 rounded-xl bg-base-100 p-5 shadow-2xl">
 			<h2 class="text-[0.9375rem] font-semibold">{m.editor_discard_title()}</h2>
-			<p class="text-sm text-base-content/70">
-				{m.editor_discard_message({ path })}
-			</p>
 			<div class="flex justify-end gap-2">
 				<button
 					type="button"

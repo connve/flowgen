@@ -5,7 +5,7 @@
 //! that returns SSE streams for real-time progress and results.
 
 use flowgen_core::task::context::{Services, TaskContext};
-use flowgen_core::task::meta::{Connector, Icon};
+use flowgen_core::task::meta::{Connector, Icon, HTTP_CREDENTIALS};
 use flowgen_core::task::runner::Runner;
 use flowgen_core::task::{Task, TaskError, TaskIo, TaskMeta};
 use std::sync::Arc;
@@ -29,6 +29,7 @@ pub const CONNECTOR: Connector = Connector {
     label: "MCP",
     icon: Icon::Svg(include_str!("../icons/mcp.svg")),
     describe_credentials: None,
+    credentials: HTTP_CREDENTIALS,
 };
 
 /// A task that needs the MCP server, which the app config does not enable.

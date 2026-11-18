@@ -1,10 +1,19 @@
 <!doctype html>
-<html lang="en" data-theme="mytheme">
+<html lang="en">
 	<head>
 		<meta charset="utf-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
 		<meta name="text-scale" content="scale" />
 		<link rel="icon" type="image/png" href="%sveltekit.assets%/favicon.png" />
+		<script>
+			try {
+				var saved = localStorage.getItem('connve-theme');
+				var dark =
+					saved === 'dark' ||
+					(saved !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches);
+				document.documentElement.setAttribute('data-theme', dark ? 'connve-dark' : 'connve-light');
+			} catch (e) {}
+		</script>
 		%sveltekit.head%
 	</head>
 	<body data-sveltekit-preload-data="hover">

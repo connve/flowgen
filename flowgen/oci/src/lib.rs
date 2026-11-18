@@ -1,19 +1,23 @@
 //! OCI registry tasks.
 //!
-//! `oci_sync` pulls an artifact from an OCI registry (GHCR, ECR, GAR,
-//! Artifactory, Harbor, etc.) when its manifest digest changes and emits one
-//! event per file, in the same shape as `git_sync`.
+//! `oci_sync` pulls an artifact from an OCI registry or an `oci-layout://`
+//! folder when its manifest digest changes and emits one `{digest, files}`
+//! event.
 //!
 //! `oci_push` packs the files of an event into a single-layer tar+gzip
 //! artifact and pushes it to a registry under one or more tags, in the
 //! layout `oci_sync` reads back.
 
 use flowgen_core::task::context::TaskContext;
-use flowgen_core::task::meta::{Connection, Connector, Icon};
+use flowgen_core::task::meta::{
+    parses, Connection, Connector, CredentialsField, CredentialsForm, Icon,
+};
 use flowgen_core::task::runner::Runner;
 use flowgen_core::task::{Task, TaskError, TaskIo, TaskMeta};
 use std::sync::Arc;
 
+/// Artifacts in an OCI Image Layout folder on this machine.
+pub mod layout;
 pub mod push;
 /// Registry credentials and client setup shared by both tasks.
 pub mod registry;
@@ -25,6 +29,21 @@ pub const CONNECTOR: Connector = Connector {
     label: "OCI",
     icon: Icon::Svg(include_str!("../icons/oci.svg")),
     describe_credentials: None,
+    credentials: &[
+        CredentialsForm {
+            label: "Username and password",
+            fields: &[
+                CredentialsField::text("username", "Username"),
+                CredentialsField::secret("password", "Password or token"),
+            ],
+            check: parses::<registry::Credentials>,
+        },
+        CredentialsForm {
+            label: "Registry auth file (config.json)",
+            fields: &[],
+            check: registry::check_docker_config,
+        },
+    ],
 };
 
 impl TaskMeta for push::OciPush {

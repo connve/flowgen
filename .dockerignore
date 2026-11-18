@@ -8,8 +8,15 @@ docker
 /examples
 /vendor
 /local
-/docs
+/docs/*
+!/docs/src
+/docs/src/*
+!/docs/src/routes
 **/*.md
+
+# Embedded in the binary: the docs pages and the system resources.
+!docs/src/routes/**/+page.md
+!config/resources/**
 
 # web (SvelteKit) — build outputs & deps, keep sources for embed
 /web/node_modules

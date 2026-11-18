@@ -16,10 +16,7 @@ use axum::{
     routing::post,
     Router,
 };
-use flowgen_core::http_server::{
-    headers_satisfy, record_headers_rejected_activity, DispatchState, Dispatcher, HasFlowName,
-    HttpServer,
-};
+use flowgen_core::http_server::{DispatchState, Dispatcher, HasFlowName, HttpServer};
 use flowgen_core::registry::{Content, ProgressEvent, ResponseRegistry, ToolResult};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -159,9 +156,6 @@ pub struct ToolRegistration {
     /// the per-request completion channel so the response is delivered only
     /// after every leaf has signalled.
     pub leaf_count: usize,
-    /// Headers a caller must present, with matching values, for this tool
-    /// to be listed or called. Empty means every caller can reach it.
-    pub headers: std::collections::HashMap<String, String>,
     /// Cancelled once the task that registered the tool stops reading.
     pub cancellation_token: tokio_util::sync::CancellationToken,
 }
@@ -209,9 +203,6 @@ pub struct ResourceRegistration {
     /// Loader used to resolve template `Source::Resource` content at read
     /// time. Concrete resources ignore this; templates need it.
     pub resource_loader: Option<flowgen_core::resource::ResourceLoader>,
-    /// Headers a caller must present, with matching values, for this
-    /// resource to be listed or read. Empty means every caller can reach it.
-    pub headers: std::collections::HashMap<String, String>,
     /// Cancelled once the task that registered the resource stops reading.
     pub cancellation_token: tokio_util::sync::CancellationToken,
 }
@@ -270,7 +261,6 @@ pub struct PromptRegistration {
     pub arguments: Vec<PromptArgument>,
     pub messages: Vec<PromptMessage>,
     pub resource_loader: Option<flowgen_core::resource::ResourceLoader>,
-    pub headers: std::collections::HashMap<String, String>,
     /// Cancelled once the task that registered the prompt stops reading.
     pub cancellation_token: tokio_util::sync::CancellationToken,
 }
@@ -305,6 +295,8 @@ pub struct McpExtras {
     /// Long-lived SSE sessions keyed by `Mcp-Session-Id`. Populated by
     /// the GET endpoint; drained by lazy cleanup when a broadcast fails.
     pub sessions: Arc<dashmap::DashMap<String, tokio::sync::mpsc::Sender<String>>>,
+    /// Loads each toolset's [`INSTRUCTIONS_FILE`] for `initialize`.
+    pub resource_loader: Option<flowgen_core::resource::ResourceLoader>,
 }
 
 /// Dispatcher for MCP traffic.
@@ -331,12 +323,14 @@ impl Dispatcher for McpDispatcher {
 }
 
 /// Constructs an MCP server with default extras (empty response registry,
-/// optional global credentials, optional auth provider).
+/// optional global credentials, optional auth provider) and the loader of
+/// the toolsets' instructions.
 pub fn new_mcp_server(
     path: String,
     credentials: Option<super::config::Credentials>,
     auth_provider: Option<Arc<dyn flowgen_core::auth::AuthProvider>>,
     resource_uri_scheme: String,
+    resource_loader: Option<flowgen_core::resource::ResourceLoader>,
 ) -> McpServer {
     let extras = McpExtras {
         response_registry: Arc::new(ResponseRegistry::new()),
@@ -346,6 +340,7 @@ pub fn new_mcp_server(
         resource_templates: Arc::new(dashmap::DashMap::new()),
         prompts: Arc::new(dashmap::DashMap::new()),
         sessions: Arc::new(dashmap::DashMap::new()),
+        resource_loader,
     };
     McpServer::new_with_extras(path, extras).with_auth_provider(auth_provider)
 }
@@ -393,7 +388,8 @@ impl Toolset {
     }
 }
 
-/// Registers a tool under its name, which must suit model APIs and be unique on the server.
+/// Registers a tool under its name, which must suit model APIs and be unique
+/// on the server. Broadcasts `notifications/tools/list_changed` on success.
 pub fn register_tool(
     server: &McpServer,
     name: String,
@@ -402,7 +398,12 @@ pub fn register_tool(
     validate_name(&name)?;
     server
         .try_register(name.clone(), registration)
-        .map_err(|_| Error::ToolNameCollision { name })
+        .map_err(|_| Error::ToolNameCollision { name })?;
+    broadcast_notification(
+        &server.extras().sessions,
+        "notifications/tools/list_changed",
+    );
+    Ok(())
 }
 
 /// Registers a concrete resource keyed by URI. Broadcasts
@@ -484,8 +485,11 @@ pub fn register_prompt(
 /// table that lost at least one entry so subscribed MCP clients refresh
 /// their cached lists.
 pub fn deregister_flow_all(server: &McpServer, flow_name: &str) {
-    server.deregister_flow(flow_name);
+    let tools_removed = server.deregister_flow(flow_name);
     let extras = server.extras();
+    if tools_removed > 0 {
+        broadcast_notification(&extras.sessions, "notifications/tools/list_changed");
+    }
 
     let resources_removed = retain_and_count(&extras.resources, |reg| reg.flow_name != flow_name);
     let templates_removed =
@@ -587,6 +591,9 @@ struct InitializeResult {
     capabilities: ServerCapabilities,
     #[serde(rename = "serverInfo")]
     server_info: ServerInfo,
+    /// How to use the toolset, which clients may add to the model's system prompt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instructions: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -818,12 +825,18 @@ const SESSION_CHANNEL_CAPACITY: usize = 32;
 /// ID is returned in the `Mcp-Session-Id` header per MCP spec.
 async fn handle_mcp_sse(
     State(state): State<DispatchState<ToolRegistration, McpExtras>>,
+    headers: HeaderMap,
 ) -> Response {
-    let session_id = uuid::Uuid::now_v7().to_string();
-    // UUID v7 is ASCII-only, so this conversion cannot fail. If it ever
-    // does, the client has no way to route subsequent POSTs to this
-    // session, so we surface the error rather than emitting a stream
-    // the client cannot use.
+    if let Err(status) = validate_auth(&state, &headers, None) {
+        return status.into_response();
+    }
+    let session_id = match headers
+        .get(MCP_SESSION_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+    {
+        Some(session_id) => session_id.to_string(),
+        None => uuid::Uuid::now_v7().to_string(),
+    };
     let session_header = match axum::http::HeaderValue::from_str(&session_id) {
         Ok(value) => value,
         Err(source) => {
@@ -837,7 +850,21 @@ async fn handle_mcp_sse(
     };
 
     let (tx, rx) = tokio::sync::mpsc::channel::<String>(SESSION_CHANNEL_CAPACITY);
-    state.extras.sessions.insert(session_id, tx);
+    match state.extras.sessions.entry(session_id) {
+        dashmap::mapref::entry::Entry::Occupied(open) if !open.get().is_closed() => {
+            return (
+                StatusCode::CONFLICT,
+                "The session already has an open stream",
+            )
+                .into_response();
+        }
+        dashmap::mapref::entry::Entry::Occupied(mut closed) => {
+            closed.insert(tx);
+        }
+        dashmap::mapref::entry::Entry::Vacant(vacant) => {
+            vacant.insert(tx);
+        }
+    }
 
     let stream = ReceiverStream::new(rx).map(Ok::<_, std::convert::Infallible>);
     let body = Body::from_stream(stream);
@@ -898,7 +925,7 @@ async fn dispatch(
     }
 
     match request.method.as_str() {
-        "initialize" => handle_initialize(request),
+        "initialize" => handle_initialize(state, request, toolset).await,
         "tools/list" => handle_tools_list(state, headers, request, toolset),
         "tools/call" => handle_tools_call(state, headers, request, toolset).await,
         "resources/list" => handle_resources_list(state, headers, request, toolset),
@@ -919,13 +946,40 @@ async fn dispatch(
     }
 }
 
-fn handle_initialize(request: JsonRpcRequest) -> Response {
+/// The resource of a folder holding how to use its toolset: `<folder>/instructions.md`.
+pub const INSTRUCTIONS_FILE: &str = "instructions.md";
+
+/// The [`INSTRUCTIONS_FILE`] resource of the toolset's folder; none for the endpoint of every flow.
+async fn instructions(
+    state: &DispatchState<ToolRegistration, McpExtras>,
+    toolset: &Toolset,
+) -> Option<String> {
+    let (Some(loader), Some(folder)) = (&state.extras.resource_loader, &toolset.0) else {
+        return None;
+    };
+    let key = format!("{folder}/{INSTRUCTIONS_FILE}");
+    match loader.load(&key).await {
+        Ok(text) => Some(text.trim().to_string()),
+        Err(
+            flowgen_core::resource::Error::ResourceNotFound { .. }
+            | flowgen_core::resource::Error::InvalidKey { .. },
+        ) => None,
+        Err(error) => {
+            warn!(error = %error, key = %key, "Failed to load the toolset's instructions");
+            None
+        }
+    }
+}
+
+async fn handle_initialize(
+    state: &DispatchState<ToolRegistration, McpExtras>,
+    request: JsonRpcRequest,
+    toolset: &Toolset,
+) -> Response {
     let result = InitializeResult {
         protocol_version: MCP_PROTOCOL_VERSION,
         capabilities: ServerCapabilities {
-            tools: ToolsCapability {
-                list_changed: false,
-            },
+            tools: ToolsCapability { list_changed: true },
             resources: ResourcesCapability {
                 subscribe: false,
                 list_changed: true,
@@ -937,8 +991,15 @@ fn handle_initialize(request: JsonRpcRequest) -> Response {
             name: "flowgen",
             version: env!("CARGO_PKG_VERSION"),
         },
+        instructions: instructions(state, toolset).await,
     };
-    json_rpc_response(request.id, result)
+    let mut response = json_rpc_response(request.id, result);
+    if let Ok(session_id) = axum::http::HeaderValue::from_str(&uuid::Uuid::now_v7().to_string()) {
+        response
+            .headers_mut()
+            .insert(MCP_SESSION_ID_HEADER, session_id);
+    }
+    response
 }
 
 fn handle_tools_list(
@@ -954,10 +1015,7 @@ fn handle_tools_list(
     let entries: Vec<_> = state
         .table
         .iter()
-        .filter(|entry| {
-            toolset.contains(&entry.value().flow_name)
-                && headers_satisfy(headers, &entry.value().headers)
-        })
+        .filter(|entry| toolset.contains(&entry.value().flow_name))
         .map(|entry| {
             let reg = entry.value();
             (
@@ -998,10 +1056,7 @@ fn handle_resources_list(
         .extras
         .resources
         .iter()
-        .filter(|entry| {
-            toolset.contains(&entry.value().flow_name)
-                && headers_satisfy(headers, &entry.value().headers)
-        })
+        .filter(|entry| toolset.contains(&entry.value().flow_name))
         .map(|entry| {
             let reg = entry.value();
             (
@@ -1038,10 +1093,7 @@ fn handle_resource_templates_list(
         .extras
         .resource_templates
         .iter()
-        .filter(|entry| {
-            toolset.contains(&entry.value().flow_name)
-                && headers_satisfy(headers, &entry.value().headers)
-        })
+        .filter(|entry| toolset.contains(&entry.value().flow_name))
         .map(|entry| {
             let reg = entry.value();
             (
@@ -1094,17 +1146,6 @@ async fn handle_resources_read(
         .get(&params.uri)
         .filter(|entry| toolset.contains(&entry.flow_name))
     {
-        if !headers_satisfy(headers, &entry.headers) {
-            record_headers_rejected_activity(&entry.flow_name, &entry.name, 0, "mcp_resource");
-            return json_rpc_error_response(
-                request.id,
-                -32602,
-                Error::UnknownResourceUri {
-                    uri: params.uri.clone(),
-                }
-                .to_string(),
-            );
-        }
         let reg = entry.value();
         let text = match &reg.body {
             ResourceBody::Concrete(content) => content.clone(),
@@ -1121,37 +1162,16 @@ async fn handle_resources_read(
         return resource_read_response(request.id, &reg.uri, &reg.mime_type, text);
     }
 
-    // Slow path: match against every resource-template pattern in one pass,
-    // remembering the first URI match whose headers rejected it so a
-    // headers-only miss can still be attributed to a flow below.
-    let mut matched = None;
-    let mut uri_matched_but_rejected = None;
-    for entry in state
+    // Slow path: the first resource-template pattern that matches the URI.
+    let matched = state
         .extras
         .resource_templates
         .iter()
         .filter(|entry| toolset.contains(&entry.flow_name))
-    {
-        let Some(bindings) = match_uri_template(entry.key(), &params.uri) else {
-            continue;
-        };
-        if headers_satisfy(headers, &entry.value().headers) {
-            matched = Some((entry.value().clone(), bindings));
-            break;
-        }
-        if uri_matched_but_rejected.is_none() {
-            uri_matched_but_rejected = Some((entry.flow_name.clone(), entry.name.clone()));
-        }
-    }
-
-    // Headers filtered out every template match for this URI: log against
-    // the first URI-matching (but header-rejected) template so the
-    // rejection shows up in that flow's Activity panel too.
-    if matched.is_none() {
-        if let Some((flow_name, name)) = uri_matched_but_rejected {
-            record_headers_rejected_activity(&flow_name, &name, 0, "mcp_resource");
-        }
-    }
+        .find_map(|entry| {
+            match_uri_template(entry.key(), &params.uri)
+                .map(|bindings| (entry.value().clone(), bindings))
+        });
 
     let (reg, bindings) = match matched {
         Some(pair) => pair,
@@ -1236,10 +1256,7 @@ fn handle_prompts_list(
         .extras
         .prompts
         .iter()
-        .filter(|entry| {
-            toolset.contains(&entry.value().flow_name)
-                && headers_satisfy(headers, &entry.value().headers)
-        })
+        .filter(|entry| toolset.contains(&entry.value().flow_name))
         .map(|entry| {
             let reg = entry.value();
             (
@@ -1291,14 +1308,6 @@ async fn handle_prompts_get(
         .get(&params.name)
         .filter(|entry| toolset.contains(&entry.flow_name))
     {
-        Some(entry) if !headers_satisfy(headers, &entry.headers) => {
-            record_headers_rejected_activity(&entry.flow_name, &entry.name, 0, "mcp_prompt");
-            return json_rpc_error_response(
-                request.id,
-                -32602,
-                Error::UnknownPrompt { name: params.name }.to_string(),
-            );
-        }
         Some(entry) => entry.value().clone(),
         None => {
             return json_rpc_error_response(
@@ -1575,12 +1584,6 @@ async fn execute_tool_call(
             })
         }
     };
-    if !headers_satisfy(headers, &entry.headers) {
-        record_headers_rejected_activity(&entry.flow_name, &params.name, 0, "mcp_tool");
-        return Err(Error::UnknownTool {
-            name: params.name.clone(),
-        });
-    }
     let (tool_tx, ack_timeout, auth_required, leaf_count, flow_name) = (
         entry.tx.clone(),
         entry.ack_timeout,
@@ -2041,6 +2044,7 @@ mod tests {
             None,
             None,
             "flowgen".to_string(),
+            None,
         )
     }
 
@@ -2063,7 +2067,6 @@ mod tests {
             ack_timeout: None,
             auth_required: false,
             leaf_count: 1,
-            headers: std::collections::HashMap::new(),
             cancellation_token: tokio_util::sync::CancellationToken::new(),
         }
     }
@@ -2191,6 +2194,46 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("Unknown tool"));
+    }
+
+    #[tokio::test]
+    async fn a_toolset_initializes_with_the_instructions_of_its_folder() {
+        let loader = flowgen_core::resource::ResourceLoader::new(None).with_defaults(
+            [
+                ("b/instructions.md".to_string(), "Use b.\n".to_string()),
+                ("b/c/instructions.md".to_string(), "Use c.".to_string()),
+            ]
+            .into(),
+        );
+        let server = new_mcp_server(
+            DEFAULT_MCP_PATH.to_string(),
+            None,
+            None,
+            "flowgen".to_string(),
+            Some(loader),
+        );
+        let table = Arc::new(DashMap::new());
+        for (flow, name) in [
+            ("a/flow", "one"),
+            ("b/c/flow", "two"),
+            ("b/d/flow", "three"),
+        ] {
+            table.insert(name.to_string(), test_tool_registration(flow, name));
+        }
+        let state = build_test_state(&server, table);
+        let instructions = |folder: &'static str| {
+            let state = state.clone();
+            async move {
+                let body = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"});
+                send_to_toolset(state, folder, body).await["result"]["instructions"].clone()
+            }
+        };
+
+        assert_eq!(instructions("/b/c").await, "Use c.");
+        assert_eq!(instructions("/b").await, "Use b.");
+        assert_eq!(instructions("").await, serde_json::Value::Null);
+        assert_eq!(instructions("/a").await, serde_json::Value::Null);
+        assert_eq!(instructions("/b/..").await, serde_json::Value::Null);
     }
 
     #[test]
@@ -2733,6 +2776,7 @@ mod tests {
             Some(creds),
             None,
             "flowgen".to_string(),
+            None,
         );
         let table = Arc::new(DashMap::new());
         let reg = test_tool_registration("flow_a", "A tool");
@@ -2760,6 +2804,7 @@ mod tests {
             Some(creds),
             None,
             "flowgen".to_string(),
+            None,
         );
         let table = Arc::new(DashMap::new());
         let state = build_test_state(&server, table);
@@ -2834,7 +2879,6 @@ mod tests {
                 content: flowgen_core::resource::Source::Inline("hi".to_string()),
             }],
             resource_loader: None,
-            headers: std::collections::HashMap::new(),
             cancellation_token: tokio_util::sync::CancellationToken::new(),
         }
     }
@@ -2868,6 +2912,51 @@ mod tests {
         assert!(rx.recv().await.is_some());
         deregister_flow_all(&server, "f");
         assert!(rx.recv().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_tool_starting_or_stopping_tells_open_sessions() {
+        let server = test_server();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        server.extras().sessions.insert("session-1".to_string(), tx);
+
+        register_tool(&server, "t".to_string(), test_tool_registration("f", "d")).unwrap();
+        let started = rx.recv().await.unwrap();
+        deregister_flow_all(&server, "f");
+        let stopped = rx.recv().await.unwrap();
+
+        assert!(started.contains("notifications/tools/list_changed"));
+        assert!(stopped.contains("notifications/tools/list_changed"));
+    }
+
+    #[tokio::test]
+    async fn initialize_returns_a_session_id() {
+        let request: JsonRpcRequest = serde_json::from_value(serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize"
+        }))
+        .unwrap();
+        let state = build_test_state(&test_server(), Arc::new(DashMap::new()));
+
+        let response = handle_initialize(&state, request, &Toolset(None)).await;
+
+        assert!(response.headers().get(MCP_SESSION_ID_HEADER).is_some());
+    }
+
+    #[tokio::test]
+    async fn a_session_with_an_open_stream_gets_no_second_one() {
+        let server = test_server();
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        server.extras().sessions.insert("s".to_string(), tx);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            MCP_SESSION_ID_HEADER,
+            axum::http::HeaderValue::from_static("s"),
+        );
+        let state = build_test_state(&server, Arc::new(DashMap::new()));
+
+        let response = handle_mcp_sse(State(state), headers).await;
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
     }
 
     #[test]

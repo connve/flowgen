@@ -1,78 +1,42 @@
+---
+description: Why we built Flowgen, an open-source agentic data activation platform with human-in-the-loop. One binary, flows in YAML, agents propose and people approve.
+---
+
 # Why Flowgen
 
-## Capture the change. Stream it anywhere, in milliseconds.
+We like to say Flowgen is an agentic data activation platform with human-in-the-loop. Wow, that's long! All right, let's break it down.
 
-Flowgen is an open-source data activation engine. You define flows in YAML or code, run them on one node or many, and data moves between systems in milliseconds. Retries, leader election, backpressure, and circuit breakers are part of the runtime — not something you wire up per pipeline.
+First, how it started. We worked with many clients who had the same problem: they wanted to activate their data across processes and channels, and let their teams focus on business logic rather than technical plumbing. They already used ETL and reverse ETL tools, but those were heavy, expensive, hard to manage and built around a batch run every so often.
 
-## The problem we kept hitting
+We looked at open source, and while there were options, none we could pick without compromise: paywalls for basic features, complex architectures with workers and databases, or event streaming as an afterthought.
 
-We started Flowgen while running data pipelines at a consumer business with hundreds of millions of customer profiles. Three things kept getting in our way:
+So we decided to build it :) We chose Rust because it matches our principles: memory safety means fewer bugs, it's fast, and it's very expressive. It was also exciting to do. That's how our journey started in [2024](https://github.com/connve/flowgen/commit/fb26fde93836f4ffe8e52ef1cc5612a1c739c8d8).
 
-**Everything was batch.** Schedulers fired jobs once a day. Activation systems saw data that was already stale by the time it arrived. The business felt it; we couldn't fix it without rewriting the foundations.
+Fast forward to now: we just shipped 150+ releases, and we keep building the best data activation platform out there, because data is the key to every decision and action a business takes.
 
-**Reliability was DIY.** Retry with backoff, dead-letter paths, idempotency, deduplication, coordination across replicas — all hand-rolled, all slightly different per pipeline. The team spent more time rebuilding the same primitives than shipping flows.
+Here's what we like the most, in no particular order:
 
-**The modern alternatives weren't actually open.** The features we needed lived behind commercial licenses, and multi-node deployment was either an afterthought or a paid tier.
+- **It's lightweight.** One binary and no database. State sits in an embedded file on one machine, or in a distributed cache when you run many.
+- **It runs anywhere.** On a single machine or on Kubernetes. We run it on millions of events across several organizations, and it gets better with every release.
+- **Reliability is built in.** Backpressure and automatic retries with jitter, so you don't have to think about them.
+- **It's easy to operate.** You configure flows in YAML and put custom logic in embedded scripts.
+- **It has a UI.** Show your team what you're building, or debug your flows.
+- **It's enterprise ready.** A growing number of connectors to enterprise SaaS, single sign-on, and OpenTelemetry logs and metrics.
+- **It's built on Git.** Flows and resources live in a repository, so you manage everything the GitOps way. Trust us, you'll love it (we do).
+- **It's free.** MPL-2.0, no enterprise edition, no paywall, and we're committed to keeping it that way. CONNVE, the company behind Flowgen, offers managed versions and services, but the engine is yours to use. If you do, please tell us!
 
-## What Flowgen does
+So what's with "agentic, human-in-the-loop"? Everything is agentic these days, isn't it? We made sure we mean it:
 
-- **Streams by default, batches when you want.** Event-driven, scheduled, and streaming flows use the same model.
-- **Distributed from day one.** Run one replica or many. Leader election, distributed cache, and coordination are built into the runtime.
-- **Resiliency you don't write.** Retries with jitter, circuit breakers, backpressure, dead-letter routing, leader election — configured in YAML, applied uniformly.
-- **Real scripting, not a DSL.** Embedded [Rhai](https://rhai.rs) with direct access to the distributed cache, event metadata, and resource files.
-- **Columnar data stays columnar.** Arrow RecordBatch and Avro are first-class event payloads alongside JSON — no per-task serialization tax.
-- **Rust under the hood.** Memory safety, predictable performance, single binary to deploy.
-- **OpenTelemetry ready.** Traces, metrics, and logs flow into whatever you already run.
-- **Open source, no tiers.** MPL-2.0, built and maintained by [CONNVE](https://connve.com). Every connector, every feature, open. No paid edition.
+- **Agents build, people approve.** Flowgen Agent in the UI, or [the coding agent you already use](/docs/flowgen/getting-started/agent-setup), proposes changes to your data flows or resources. Nothing goes live until somebody approves it.
+- **MCP server.** Turn any flow, whether a query, an API call or a whole pipeline, into a tool your agents can run, on your rules, with your business context and one place for logs.
+- **AI Gateway.** One OpenAI- and Anthropic-compatible endpoint for your apps' model calls. Each request runs through a flow, so you can log, enrich or check it on the way.
+- **AI completions.** Call models from any flow: OpenAI, Anthropic, Gemini, Mistral, local models through Ollama, or any OpenAI-compatible endpoint.
+- **Agent sessions.** Chat with an agent or run MCP tools from the Flowgen UI, to test or simply to work with the platform.
 
-## Architecture
+Try it out and tell us what you think! We can't wait to hear from you.
 
-- **Flows** — YAML definitions containing a sequence of tasks. Event-driven, scheduled (cron/interval), or streaming.
-- **Tasks** — Subscribers that ingest data, and processors that transform, route, query, or write it. All tasks emit events to the next task in the flow.
-- **Events** — Data records flowing between tasks, carrying JSON, Arrow RecordBatch, or Avro payloads.
-- **Cache** — Distributed key-value store for state management, deduplication, and leader election. Pluggable backend, currently NATS JetStream.
+<div class="mt-8 h-12 w-12 overflow-hidden rounded-full">
+  <img src="https://connve.com/jakub-dulny.jpg" alt="Jakub Dulny" class="h-full w-full object-cover" style="object-position: center 15%; transform: scale(2)" />
+</div>
 
-```yaml
-flow:
-  tasks:
-    - http_endpoint:
-        name: ingest
-        endpoint: /events
-        method: POST
-        credentials_path: /etc/http/credentials.json
-
-    - script:
-        name: transform
-        code: |
-          let body = event.data;
-          #{
-            id: body.id,
-            type: body.event_type,
-            received_at: timestamp_now()
-          }
-
-    - nats_jetstream_publish:
-        name: publish
-        credentials_path: /etc/nats/credentials.json
-        url: "{{env.NATS_URL}}"
-        subject: events.normalized
-        stream:
-          name: events
-          subjects:
-            - events.>
-          create_or_update: true
-```
-
-## Integrations
-
-| Integration | Tasks |
-|---|---|
-| **NATS JetStream** | Subscriber, Publisher, KV Store |
-| **Salesforce** | PubSub API, REST API, Bulk API, Tooling API |
-| **Google Cloud** | BigQuery Query, Storage Read, Storage Write, Jobs |
-| **HTTP** | Webhook, Request |
-| **Object Store** | Read, Write, List, Move (S3, GCS, Azure, local) |
-| **MSSQL** | Query |
-| **AI** | Completion (multi-provider), AI Gateway (OpenAI-compatible), MCP Tools |
-| **Git** | Git Sync |
-| **Core** | Script (Rhai), Convert, Iterate, Buffer, Generate, Log |
+Jakub & the CONNVE team

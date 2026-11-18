@@ -126,7 +126,7 @@ A webhook can require both a shared bearer secret (`credentials_path`) **and** a
     name: secure_endpoint
     endpoint: /events
     method: POST
-    credentials_path: /etc/flowgen/credentials/service-token.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/service-token.json"
     auth:
       required: true
 ```

@@ -2,7 +2,7 @@
 
 Flowgen can pull flow definitions and resources from an OCI artifact registry (GHCR, ECR, GAR, Harbor, Artifactory, Docker Hub).
 
-- [OCI Sync](/docs/flowgen/oci/sync) — pulls an artifact from a registry and emits one event per layer.
+- [OCI Sync](/docs/flowgen/oci/sync) — pulls an artifact from a registry and emits one event with all its files.
 - [OCI Push](/docs/flowgen/oci/push) — pushes files to a registry as an artifact `oci_sync` reads back.
 
 ## Why OCI

@@ -549,23 +549,31 @@ impl Call<'_> {
         })
     }
 
-    /// The SOQL query to send: an inline query as rendered with the config,
-    /// a resource file rendered for the event, then `parameters` bound.
-    pub(crate) async fn soql(
+    /// The query to send: an inline query as rendered with the config, or a
+    /// resource file rendered for the event.
+    pub(crate) async fn query(
         &self,
         query: &flowgen_core::resource::Source,
-        parameters: Option<&HashMap<String, crate::soql::Parameter>>,
     ) -> Result<String, Error> {
-        let query = match query {
-            flowgen_core::resource::Source::Inline(query) => query.clone(),
+        match query {
+            flowgen_core::resource::Source::Inline(query) => Ok(query.clone()),
             source => source
                 .render(
                     self.task_context.resource_loader.as_ref(),
                     &flowgen_core::event::template_value(self.event, true)?,
                 )
                 .await
-                .map_err(|source| Error::ResourceLoad { source })?,
-        };
+                .map_err(|source| Error::ResourceLoad { source }),
+        }
+    }
+
+    /// The SOQL query to send, as [`Self::query`] gives it, with `parameters` bound.
+    pub(crate) async fn soql(
+        &self,
+        query: &flowgen_core::resource::Source,
+        parameters: Option<&HashMap<String, crate::soql::Parameter>>,
+    ) -> Result<String, Error> {
+        let query = self.query(query).await?;
         match parameters {
             Some(parameters) => {
                 crate::soql::bind(&query, parameters).map_err(|source| Error::Bind { source })

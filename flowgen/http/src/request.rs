@@ -14,10 +14,7 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
-use tokio::{
-    fs,
-    sync::mpsc::{Receiver, Sender},
-};
+use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::error;
 
 /// `http_request` task config; unknown fields are rejected by the transparent inner `Processor`.
@@ -74,11 +71,10 @@ pub enum Error {
         #[source]
         source: flowgen_core::event::Error,
     },
-    #[error("Error reading credentials file at {path}: {source}")]
+    #[error("Error reading credentials: {source}")]
     ReadHttpCredentials {
-        path: std::path::PathBuf,
         #[source]
-        source: std::io::Error,
+        source: flowgen_core::credentials::Error,
     },
     #[error("JSON error: {source}")]
     SerdeJson {
@@ -138,6 +134,8 @@ pub enum Error {
         status: u16,
         body: String,
     },
+    #[error("Credentials are only sent over HTTPS, or over HTTP to a loopback host: {endpoint}")]
+    InsecureEndpoint { endpoint: String },
 }
 
 impl Error {
@@ -151,9 +149,33 @@ impl Error {
             | Self::ConfigRender { .. }
             | Self::SerdeJson { .. }
             | Self::PayloadConfig
-            | Self::MissingEventData => false,
+            | Self::MissingEventData
+            | Self::InsecureEndpoint { .. } => false,
             _ => true,
         }
+    }
+}
+
+/// Whether `endpoint` is plain HTTP to a host other than this machine.
+fn is_clear_text(endpoint: &str) -> bool {
+    match reqwest::Url::parse(endpoint) {
+        Ok(url) => match (url.scheme(), url.host_str()) {
+            ("http", Some(host)) => !is_loopback(host),
+            _ => false,
+        },
+        Err(_) => false,
+    }
+}
+
+/// Whether `host`, as a URL spells it, names this machine.
+fn is_loopback(host: &str) -> bool {
+    match host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<std::net::IpAddr>()
+    {
+        Ok(ip) => ip.is_loopback(),
+        Err(_) => host.eq_ignore_ascii_case("localhost"),
     }
 }
 
@@ -270,6 +292,9 @@ impl flowgen_core::task::runner::Handler for EventHandler {
             }
 
             if let Some(credentials) = &self.credentials {
+                if is_clear_text(&endpoint) {
+                    return Err(Error::InsecureEndpoint { endpoint });
+                }
                 let header_value = credentials
                     .authorization_header_async()
                     .await
@@ -397,7 +422,6 @@ impl flowgen_core::task::runner::Runner for Processor {
 
     async fn init(&self) -> Result<EventHandler, Error> {
         let mut builder = reqwest::ClientBuilder::new()
-            .https_only(true)
             .gzip(true)
             .brotli(true)
             .deflate(true);
@@ -415,12 +439,9 @@ impl flowgen_core::task::runner::Runner for Processor {
 
         let credentials = match &self.config.credentials_path {
             Some(path) => {
-                let content = fs::read_to_string(path).await.map_err(|source| {
-                    Error::ReadHttpCredentials {
-                        path: path.clone(),
-                        source,
-                    }
-                })?;
+                let content = flowgen_core::credentials::read_async(path)
+                    .await
+                    .map_err(|source| Error::ReadHttpCredentials { source })?;
                 let creds: HttpCredentials =
                     serde_json::from_str(&content).map_err(|source| Error::SerdeJson { source })?;
                 Some(creds)
@@ -641,11 +662,12 @@ mod tests {
 
     #[test]
     fn test_error_read_credentials_structure() {
-        use std::path::PathBuf;
         let io_error = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
         let error = Error::ReadHttpCredentials {
-            path: PathBuf::from("/test/credentials.json"),
-            source: io_error,
+            source: flowgen_core::credentials::Error::ReadFile {
+                path: "/test/credentials.json".to_string(),
+                source: io_error,
+            },
         };
         assert!(matches!(error, Error::ReadHttpCredentials { .. }));
     }
@@ -713,6 +735,49 @@ mod tests {
         assert!(!status(404).is_retryable());
         assert!(status(429).is_retryable());
         assert!(status(503).is_retryable());
+    }
+
+    #[tokio::test]
+    async fn credentials_go_only_over_https_or_http_to_a_loopback_host() {
+        let send = |endpoint: &str| {
+            let handler = EventHandler {
+                client: Arc::new(reqwest::Client::new()),
+                config: Arc::new(crate::config::Processor {
+                    endpoint: endpoint.to_string(),
+                    ..Default::default()
+                }),
+                credentials: Some(HttpCredentials::bearer("token")),
+                tx: None,
+                task_id: 0,
+                task_type: "test",
+                task_context: create_mock_task_context(),
+            };
+            let event = EventBuilder::new()
+                .data(EventData::Json(Value::Null))
+                .subject("a".to_string())
+                .task_id(0)
+                .task_type("test")
+                .build()
+                .unwrap();
+            async move { flowgen_core::task::runner::Handler::handle(&handler, event).await }
+        };
+
+        for endpoint in ["http://api.example.com/a", "http://10.0.0.1/a"] {
+            let error = send(endpoint).await.unwrap_err();
+            assert!(
+                matches!(error, Error::InsecureEndpoint { .. }),
+                "{endpoint}: {error}"
+            );
+            assert!(!error.is_retryable());
+        }
+        for endpoint in [
+            "https://api.example.com/a",
+            "http://localhost:1/a",
+            "http://127.0.0.1:1/a",
+            "http://[::1]:1/a",
+        ] {
+            assert!(!is_clear_text(endpoint), "{endpoint}");
+        }
     }
 
     #[tokio::test]

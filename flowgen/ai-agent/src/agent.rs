@@ -7,7 +7,7 @@
 //! and the erased model also answers tool-use passthrough directly.
 
 use crate::budget::Spending;
-use crate::completion::{Credentials, Provider};
+use crate::completion::{Credentials, Provider, VertexAiOptions};
 use crate::tool_runs::{RecordRuns, ToolRuns};
 use futures_util::stream::Stream;
 use futures_util::StreamExt;
@@ -81,6 +81,11 @@ pub enum Error {
         #[source]
         source: rig_vertexai::client::VertexAiClientError,
     },
+    #[error("Invalid service account key: {source}")]
+    ServiceAccount {
+        #[source]
+        source: google_cloud_auth::build_errors::Error,
+    },
     #[error("Completion request failed: {source}")]
     CompletionRequest {
         #[source]
@@ -124,11 +129,14 @@ pub struct ClientBuilder {
     model: String,
     /// Optional API credentials.
     credentials: Option<Credentials>,
+    /// Optional Google Cloud service account key (`vertexai`).
+    service_account: Option<Value>,
+    /// Options of `vertexai`.
+    vertexai: VertexAiOptions,
     /// Optional custom endpoint URL.
     endpoint: Option<String>,
     /// Optional HTTP headers sent with every request (`provider: custom` /
-    /// Ollama only). Used, for example, to send `X-Flowgen-Client` when the
-    /// downstream endpoint is another flowgen `llm_proxy` scoped by `headers`.
+    /// Ollama only).
     headers: Option<std::collections::HashMap<String, String>>,
     /// Optional agent name (for logging and debugging).
     name: Option<String>,
@@ -165,6 +173,18 @@ impl ClientBuilder {
     /// Sets the API credentials.
     pub fn credentials(mut self, credentials: Credentials) -> Self {
         self.credentials = Some(credentials);
+        self
+    }
+
+    /// Sets the Google Cloud service account key (`vertexai`).
+    pub fn service_account(mut self, key: Value) -> Self {
+        self.service_account = Some(key);
+        self
+    }
+
+    /// Sets the options of `vertexai`.
+    pub fn vertexai(mut self, vertexai: VertexAiOptions) -> Self {
+        self.vertexai = vertexai;
         self
     }
 
@@ -318,17 +338,21 @@ impl ClientBuilder {
             Provider::Perplexity => Ok(perplexity::new(self.api_key()?).completion(model).into()),
             Provider::HuggingFace => Ok(huggingface::new(self.api_key()?).completion(model).into()),
             Provider::VertexAi => {
-                // Vertex AI uses Google Cloud Application Default Credentials (ADC).
-                // Project and location can be set via credentials fields or environment
-                // variables (GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_LOCATION).
                 let mut builder = rig_vertexai::VertexAi::builder();
-                if let Some(ref creds) = self.credentials {
-                    if let Some(ref project_id) = creds.project_id {
-                        builder = builder.with_project(project_id);
-                    }
-                    if let Some(ref region) = creds.region {
-                        builder = builder.with_location(region);
-                    }
+                if let Some(project_id) =
+                    self.vertexai_project(std::env::var("GOOGLE_CLOUD_PROJECT").ok())
+                {
+                    builder = builder.with_project(project_id);
+                }
+                if let Some(location) = &self.vertexai.location {
+                    builder = builder.with_location(location);
+                }
+                if let Some(key) = &self.service_account {
+                    let credentials =
+                        google_cloud_auth::credentials::service_account::Builder::new(key.clone())
+                            .build()
+                            .map_err(|source| Error::ServiceAccount { source })?;
+                    builder = builder.with_credentials(credentials);
                 }
                 let client = builder
                     .build()
@@ -336,6 +360,20 @@ impl ClientBuilder {
                 Ok(client.completion(model).into())
             }
             Provider::Ollama | Provider::Custom => self.openai_compatible_model(),
+        }
+    }
+
+    /// `vertexai.project_id`, else `env_project`, else the service account key's `project_id`.
+    fn vertexai_project(&self, env_project: Option<String>) -> Option<String> {
+        match (
+            &self.vertexai.project_id,
+            env_project,
+            &self.service_account,
+        ) {
+            (Some(project_id), _, _) => Some(project_id.clone()),
+            (None, Some(project_id), _) => Some(project_id),
+            (None, None, Some(key)) => key["project_id"].as_str().map(str::to_string),
+            (None, None, None) => None,
         }
     }
 
@@ -703,6 +741,36 @@ mod tests {
         assert!(retryable(http::StatusCode::TOO_MANY_REQUESTS));
         assert!(retryable(http::StatusCode::BAD_GATEWAY));
         assert!(!retryable(http::StatusCode::BAD_REQUEST));
+    }
+
+    #[test]
+    fn the_vertexai_project_falls_back_to_the_service_account_keys() {
+        let keyed = ClientBuilder::new(Provider::VertexAi, "gemini".to_string())
+            .service_account(serde_json::json!({"project_id": "from-key"}));
+        let explicit = ClientBuilder::new(Provider::VertexAi, "gemini".to_string())
+            .service_account(serde_json::json!({"project_id": "from-key"}))
+            .vertexai(VertexAiOptions {
+                project_id: Some("explicit".to_string()),
+                location: None,
+            });
+
+        assert_eq!(keyed.vertexai_project(None).as_deref(), Some("from-key"));
+        assert_eq!(
+            keyed
+                .vertexai_project(Some("from-env".to_string()))
+                .as_deref(),
+            Some("from-env")
+        );
+        assert_eq!(
+            explicit
+                .vertexai_project(Some("from-env".to_string()))
+                .as_deref(),
+            Some("explicit")
+        );
+        assert_eq!(
+            ClientBuilder::new(Provider::VertexAi, "gemini".to_string()).vertexai_project(None),
+            None
+        );
     }
 
     #[test]

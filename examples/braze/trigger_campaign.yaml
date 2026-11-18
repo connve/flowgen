@@ -15,7 +15,6 @@ flow:
     description: "Receives shipped orders over an HTTP webhook and triggers a Braze campaign for each customer, passing the order and tracking link as trigger properties."
     tags: ["braze", "messaging", "webhook", "example"]
   tasks:
-
     # POST /api/flowgen/workers/v1/braze/shipments
     - http_endpoint:
         name: receive_shipments
@@ -26,7 +25,7 @@ flow:
     - braze_messaging:
         name: notify_customer
         operation: trigger_campaign
-        credentials_path: /etc/braze/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/braze.json"
         base_url: "{{env.BRAZE_REST_ENDPOINT}}"
         payload:
           campaign_id: "{{env.BRAZE_SHIPPING_CAMPAIGN_ID}}"

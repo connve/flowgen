@@ -18,7 +18,125 @@ pub struct Connector {
     pub icon: Icon,
     /// Names the account a credentials file points to, from its non-secret fields.
     pub describe_credentials: Option<fn(&Path) -> Option<String>>,
+    /// The ways the web UI asks for its credentials file; none for a
+    /// connector without one.
+    pub credentials: &'static [CredentialsForm],
 }
+
+/// One way to fill a connector's credentials file in the web UI.
+#[derive(Clone, Copy, Debug)]
+pub struct CredentialsForm {
+    /// What the way is called, such as `API key` or `Service account file`.
+    pub label: &'static str,
+    /// The fields making up the file; none when the whole file is uploaded.
+    pub fields: &'static [CredentialsField],
+    /// Checks a file made this way, as the task reads it, such as [`parses`].
+    pub check: fn(&str) -> Result<(), String>,
+}
+
+/// Whether `content` reads as `T`, the type a task reads its credentials file as.
+pub fn parses<T: serde::de::DeserializeOwned>(content: &str) -> Result<(), String> {
+    match serde_json::from_str::<T>(content) {
+        Ok(_) => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+/// A value of a credentials file.
+#[derive(Clone, Copy, Debug)]
+pub struct CredentialsField {
+    /// Where it goes in the file, with `.` between nested keys, such as `basic_auth.username`.
+    pub key: &'static str,
+    /// What the form calls it, such as `Username`.
+    pub label: &'static str,
+    /// What it holds.
+    pub kind: FieldKind,
+    /// Whether the file needs it; an empty optional field is left out.
+    pub required: bool,
+}
+
+/// What a credentials field holds.
+#[derive(Clone, Copy, Debug)]
+pub enum FieldKind {
+    /// A line of text.
+    Text,
+    /// An `http` or `https` URL.
+    Url,
+    /// Text masked when typed, never shown again.
+    Secret,
+    /// A number.
+    Number,
+    /// Yes or no, starting at this value.
+    Boolean(bool),
+    /// One of these values.
+    Choice(&'static [&'static str]),
+    /// Several values, one per line.
+    List,
+}
+
+impl CredentialsField {
+    /// A required text field.
+    pub const fn text(key: &'static str, label: &'static str) -> Self {
+        Self {
+            key,
+            label,
+            kind: FieldKind::Text,
+            required: true,
+        }
+    }
+
+    /// A required secret field.
+    pub const fn secret(key: &'static str, label: &'static str) -> Self {
+        Self {
+            key,
+            label,
+            kind: FieldKind::Secret,
+            required: true,
+        }
+    }
+
+    /// The field, left out of the file when empty.
+    pub const fn optional(self) -> Self {
+        Self {
+            required: false,
+            ..self
+        }
+    }
+
+    /// The field holding `kind`.
+    pub const fn of(self, kind: FieldKind) -> Self {
+        Self { kind, ..self }
+    }
+}
+
+/// The credentials forms of an HTTP client: a bearer token, basic auth, or
+/// OAuth 2.0 client credentials.
+pub const HTTP_CREDENTIALS: &[CredentialsForm] = &[
+    CredentialsForm {
+        label: "Bearer token",
+        fields: &[CredentialsField::secret("bearer_auth", "Token")],
+        check: parses::<crate::credentials::HttpCredentials>,
+    },
+    CredentialsForm {
+        label: "Basic auth",
+        fields: &[
+            CredentialsField::text("basic_auth.username", "Username"),
+            CredentialsField::secret("basic_auth.password", "Password"),
+        ],
+        check: parses::<crate::credentials::HttpCredentials>,
+    },
+    CredentialsForm {
+        label: "OAuth 2.0 client credentials",
+        fields: &[
+            CredentialsField::text("oauth2_client_credentials.token_url", "Token URL")
+                .of(FieldKind::Url),
+            CredentialsField::text("oauth2_client_credentials.client_id", "Client ID"),
+            CredentialsField::secret("oauth2_client_credentials.client_secret", "Client secret"),
+            CredentialsField::text("oauth2_client_credentials.scope", "Scope").optional(),
+        ],
+        check: parses::<crate::credentials::HttpCredentials>,
+    },
+];
 
 /// A connector logo.
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
@@ -110,7 +228,7 @@ pub fn render_env(value: &str) -> Option<String> {
 
 /// Reads a credentials file as `T`; `None` when it cannot be read or parsed.
 pub fn read_credentials<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
-    let content = std::fs::read_to_string(path).ok()?;
+    let content = crate::credentials::read(path).ok()?;
     serde_json::from_str(&content).ok()
 }
 
@@ -147,6 +265,7 @@ pub const CONNECTOR: Connector = Connector {
     label: "Core",
     icon: Icon::Svg(include_str!("../../icons/core.svg")),
     describe_credentials: None,
+    credentials: &[],
 };
 
 /// The error a task returns, typed by the crate that owns the task.
@@ -166,6 +285,9 @@ pub trait TaskMeta {
 
     /// Registers its flow with a shared server: runs on every pod, never leader elected.
     const REGISTERS: bool = false;
+
+    /// Starts events and takes none, such as a subscriber or an endpoint; it has no parent task.
+    const SOURCE: bool = Self::RUNS_UNTIL_STOPPED || (Self::REGISTERS && Self::PIPELINE_IO);
 
     /// Starts without the startup jitter.
     const STARTS_AT_ONCE: bool = Self::REGISTERS;
@@ -234,6 +356,7 @@ impl TaskMeta for super::convert::Convert {
 }
 impl TaskMeta for super::generate::Generate {
     const STARTS_AT_ONCE: bool = true;
+    const SOURCE: bool = true;
 
     fn validate(&self) -> Result<(), TaskError> {
         Ok(super::generate::Generate::validate(self)?)

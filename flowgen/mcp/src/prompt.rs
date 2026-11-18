@@ -65,12 +65,6 @@ pub struct Prompt {
     /// as a Handlebars template. Mutually exclusive with `template`.
     #[serde(default)]
     pub messages: Option<Vec<Message>>,
-    /// HTTP headers a request must carry, with matching values, for this
-    /// prompt to be visible on `prompts/list` and usable at all. All
-    /// declared headers must match (AND). An empty map (the default) means
-    /// every caller can see and use it.
-    #[serde(default)]
-    pub headers: std::collections::HashMap<String, String>,
     /// Standard task wiring; prompt tasks rarely depend on anything.
     #[serde(default)]
     pub depends_on: Option<Vec<String>>,
@@ -295,7 +289,6 @@ impl Runner for Processor {
             arguments,
             messages,
             resource_loader: self.task_context.resource_loader.clone(),
-            headers: cfg.headers.clone(),
             cancellation_token: self.task_context.stop_reading.clone(),
         };
 
@@ -377,7 +370,6 @@ mod tests {
             arguments: vec![],
             template: None,
             messages: None,
-            headers: std::collections::HashMap::new(),
             depends_on: None,
             retry: None,
         }

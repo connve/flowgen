@@ -6,7 +6,7 @@
 use flowgen_core::config::ConfigExt;
 use flowgen_core::task::TaskConfig;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, path::PathBuf};
+use std::path::PathBuf;
 
 /// File extension for Avro format files.
 pub const DEFAULT_AVRO_EXTENSION: &str = "avro";
@@ -92,8 +92,8 @@ pub struct Processor {
     pub path: Option<PathBuf>,
     /// Optional path to credentials file (GCP service account JSON or AWS credentials JSON).
     pub credentials_path: Option<PathBuf>,
-    /// Additional client connection options.
-    pub client_options: Option<HashMap<String, String>>,
+    /// Options of `s3://` paths.
+    pub s3: Option<S3Options>,
 
     /// Number of records to process in each batch (read only).
     pub batch_size: Option<usize>,
@@ -161,6 +161,20 @@ pub enum WriteFormat {
     Bytes,
 }
 
+/// Options of `s3://` paths; unset ones other than `virtual_hosted_style_request` come from the `AWS_*` environment variables.
+#[derive(PartialEq, Eq, Hash, Default, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct S3Options {
+    /// AWS region, such as `eu-west-1`.
+    pub region: Option<String>,
+    /// Endpoint of an S3-compatible store, such as `http://localhost:9000`.
+    pub endpoint: Option<String>,
+    /// Bucket in the host name, `{bucket}.s3.{region}.amazonaws.com`; `false` puts it in the path. Defaults to `true`, or `false` when `endpoint` is set.
+    pub virtual_hosted_style_request: Option<bool>,
+    /// Whether an `http://` endpoint is allowed.
+    pub allow_http: Option<bool>,
+}
+
 /// Configuration for Hive-style directory partitioning.
 #[derive(PartialEq, Default, Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -185,19 +199,18 @@ pub enum HiveParitionKeys {
 mod tests {
     use super::*;
     use serde_json;
-    use std::collections::HashMap;
 
     #[test]
     fn test_read_config() {
-        let mut client_options = HashMap::new();
-        client_options.insert("region".to_string(), "us-west-2".to_string());
-
         let config = Processor {
             name: "test_reader".to_string(),
             operation: Operation::Read,
             path: Some(PathBuf::from("s3://my-bucket/data/")),
             credentials_path: Some(PathBuf::from("/path/to/creds.json")),
-            client_options: Some(client_options.clone()),
+            s3: Some(S3Options {
+                region: Some("us-west-2".to_string()),
+                ..Default::default()
+            }),
             batch_size: Some(500),
             has_header: Some(true),
             ..Default::default()

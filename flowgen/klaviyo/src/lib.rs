@@ -4,7 +4,9 @@
 //! the account of its `credentials_path`.
 
 use flowgen_core::task::context::TaskContext;
-use flowgen_core::task::meta::{Connection, Connector, Icon};
+use flowgen_core::task::meta::{
+    parses, Connection, Connector, CredentialsField, CredentialsForm, Icon,
+};
 use flowgen_core::task::runner::Runner;
 use flowgen_core::task::{Task, TaskError, TaskIo, TaskMeta};
 use std::sync::Arc;
@@ -22,6 +24,11 @@ pub const CONNECTOR: Connector = Connector {
     label: "Klaviyo",
     icon: Icon::Png(include_bytes!("../icons/klaviyo.png")),
     describe_credentials: None,
+    credentials: &[CredentialsForm {
+        label: "Private API key",
+        fields: &[CredentialsField::secret("api_key", "Private API key")],
+        check: parses::<klaviyo::Credentials>,
+    }],
 };
 
 macro_rules! klaviyo_task {

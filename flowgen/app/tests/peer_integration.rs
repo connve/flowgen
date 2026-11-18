@@ -227,20 +227,16 @@ async fn start_nats() -> (
 fn app_config_with_cache(url: String) -> flowgen::config::AppConfig {
     flowgen::config::AppConfig {
         cache: Some(flowgen::config::CacheOptions {
-            enabled: true,
             cache_type: flowgen::config::CacheType::Nats,
             credentials_path: None,
             url,
-            db_name: None,
+            path: std::path::PathBuf::from(".flowgen/state.redb"),
             runtime: flowgen::config::BucketOptions::default(),
             system: flowgen::config::SystemBucketOptions::default(),
             history: Some(64),
             tombstone_ttl: Some(Duration::from_secs(3600)),
         }),
-        flows: flowgen::config::FlowOptions {
-            path: None,
-            cache: None,
-        },
+        flows: flowgen::config::FlowOptions::default(),
         resources: None,
         http_server: None,
         mcp_server: None,
@@ -250,6 +246,8 @@ fn app_config_with_cache(url: String) -> flowgen::config::AppConfig {
         retry: None,
         telemetry: None,
         shutdown_timeout: flowgen::config::default_shutdown_timeout(),
+        host: flowgen::config::default_host(),
         ai_budget: None,
+        credentials: None,
     }
 }

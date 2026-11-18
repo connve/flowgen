@@ -4,18 +4,13 @@ Tasks that talk to external systems load credentials from a JSON file referenced
 
 ## Where credentials_path appears
 
-| Task family | Format | What it authenticates |
+Every task that reaches an external system takes a `credentials_path`, and each connector's page documents its format. The formats shared across connectors:
+
+| Used by | Format | What it authenticates |
 |---|---|---|
-| `http_request`, `ai_completion` (`mcp_servers`) | `HttpCredentials` (bearer / basic / OAuth 2.0 client credentials) | The outgoing HTTP request header. |
-| `http_endpoint` | `HttpCredentials` (bearer / basic) | Incoming requests, checked against the expected token. |
+| HTTP and MCP clients, such as `http_request` and `ai_completion` `mcp_servers` | `HttpCredentials` (bearer / basic / OAuth 2.0 client credentials) | The outgoing HTTP request header. |
+| HTTP servers, such as `http_endpoint` and `llm_proxy` | `HttpCredentials` (bearer / basic) | Incoming requests, checked against the expected token. |
 | `mcp_tool` | `Credentials` (`api_keys` list) | Incoming MCP calls, checked against the allowed keys. |
-| `nats_jetstream_*`, `nats_kv_store` | NATS credentials JSON | NATS server connection. |
-| `gcp_*` (BigQuery) | GCP service account JSON | Google Cloud APIs. |
-| `salesforce_*` | Salesforce credentials JSON | Salesforce REST / Pub/Sub / Bulk APIs. |
-| `mssql_query` | MSSQL credentials JSON | SQL Server connection. |
-| `postgres_query`, `postgres_write`, `postgres_cdc` | PostgreSQL credentials JSON | PostgreSQL connection. |
-| `object_store` | Cloud-specific credentials JSON | S3, GCS, or Azure. |
-| `git_sync` | Git credentials JSON (HTTPS token) | Git remote. |
 | `web.auth` | `client_secret`, `cookie_secret` | The web UI's OIDC login. |
 
 The format details live on each task's documentation page. This page covers what is shared.
@@ -57,7 +52,7 @@ Both fields are optional. If neither is set, no `Authorization` header is added.
 
 ### OAuth 2.0 client credentials
 
-For APIs that require short-lived access tokens (e.g. Salesforce Marketing Cloud hosted MCP), use the `oauth2_client_credentials` field instead of a static bearer token. Flowgen fetches a token from the token endpoint using the [client credentials grant type](https://datatracker.ietf.org/doc/html/rfc6749#section-4.4), caches it, and auto-refreshes when it expires:
+For APIs that require short-lived access tokens, such as many hosted MCP servers, use the `oauth2_client_credentials` field instead of a static bearer token. Flowgen fetches a token from the token endpoint using the [client credentials grant type](https://datatracker.ietf.org/doc/html/rfc6749#section-4.4), caches it, and auto-refreshes when it expires:
 
 ```json
 {
@@ -124,25 +119,15 @@ The two compose: a webhook can require a shared secret (via `credentials_path`) 
 
 Tasks that share the same `credentials_path` automatically share the same authenticated client. The runtime hashes credential fields to detect duplicates — no configuration needed.
 
-For example, if three flows each have a `salesforce_restapi_sobject` task pointing at the same credentials file, the first task to initialise performs the OAuth handshake. The other two wait and reuse the same session. This avoids hammering external services with redundant login calls and respects rate limits (e.g., Salesforce OAuth).
+For example, if three flows each call the same API with one credentials file, the first task to initialise performs the login. The other two wait and reuse the same session. This avoids hammering external services with redundant login calls and respects their rate limits.
 
-The key fields used for deduplication depend on the task family:
-
-| Task family | Identity fields |
-|---|---|
-| `salesforce_*` | `credentials_path` |
-| `gcp_*` (BigQuery) | `credentials_path` |
-| `mssql_query`, `postgres_query`, `postgres_write` | `credentials_path`, `max_connections`, `connection_timeout`, `query_timeout` |
-| `nats_jetstream_*`, `nats_kv_store` | `credentials_path`, `url` |
-| `object_store_*` | `path`, `credentials_path` |
-
-Tasks with different identity fields get separate clients. Two MSSQL tasks with the same credentials but different `max_connections` do not share a pool.
+Clients are shared by the credentials file and, where a task has them, the settings that shape the client: the server URL, or the pool size and timeouts of a database pool. Tasks with different settings get separate clients, so two database tasks with the same credentials but different `max_connections` do not share a pool.
 
 ## Connections in the web UI
 
-The **Connections** tab lists the external systems the loaded flows connect to, including `ai_completion` MCP servers. Each row is one connector and credentials file, so Salesforce tasks that share a credentials file are one connection.
+The **Connections** tab lists the external systems the loaded flows connect to, including `ai_completion` MCP servers. Each row is one connector and credentials file, so tasks of one connector that share a credentials file are one connection.
 
-- Next to the name, a row shows what the credentials file points to, read from its non-secret fields: a Salesforce org host, a service account email, an MSSQL or PostgreSQL server and database, MongoDB hosts, or a Braze REST endpoint.
+- Next to the name, a row shows what the credentials file points to, read from its non-secret fields, such as an instance host, a service account email, or a database server and database.
 - It also shows where its tasks connect, from their configs: hosts, brokers, repositories, buckets, or an AI provider and model.
 - Values set per event show as `per event`. An MCP server called with `on_behalf_of_user: true` shows as `on behalf of user`.
 - A `{{env.…}}` value shows what it renders to, with the same parts left out as a value written in the config. When the variable is unset, it shows as written.
@@ -151,9 +136,62 @@ The **Connections** tab lists the external systems the loaded flows connect to, 
 
 Tasks that receive calls, such as `http_endpoint` and `mcp_tool`, are not listed. `GET /api/connections` and `GET /api/connections/{id}` return the same data, and `GET /api/connectors` lists each connector with its task types.
 
+## Encrypted credentials in the workspace
+
+Credentials are named by their file in the `FLOWGEN_CREDENTIALS` folder: `{{env.FLOWGEN_CREDENTIALS}}/orders-api.json` is `orders-api`.
+
+In the Connections tab, a connection whose file flowgen does not find shows **No credentials**. For a file in the credentials folder, its details offer **Add credentials**, or **Replace credentials** once they are there, with a form for that connector: its fields, such as an API key or a host and password, or a file to upload, such as a service account file. The file is checked the way the connector's tasks read it before it is saved. A connector without a form takes the file as JSON.
+
+flowgen encrypts the credentials with [SOPS](https://github.com/getsops/sops) and age and proposes `credentials/<name>.yaml`, a Kubernetes Secret holding the one file `<name>.json`. It is committed like any [change](/docs/flowgen/concepts/authoring) once approved. The plaintext is never stored or shown again, and it never passes through a flow, an event, a log or a change.
+
+A task reads its credentials in this order:
+
+1. the file at `credentials_path`;
+2. the encrypted Secret `<name>.yaml` beside it;
+3. the system keychain, in a run without `--config`.
+
+Anything SOPS-encrypted is decrypted in memory, with the age key `credentials.identity_path` names, or `SOPS_AGE_KEY_FILE` without one. A path in another folder, or one that reads the event, such as `{{event.data.account}}.json`, has no credentials to add in the web UI.
+
+A change under `credentials/` is checked before it can be approved. Each file must be a Secret named after the file, encrypted with SOPS, with every value encrypted and exactly one file, `<name>.json`. A change that adds or removes credentials also rewrites `credentials/flowgen-credentials.yaml`, a ConfigMap listing them.
+
+```yaml
+# Encrypt for one age key and decrypt with it here.
+credentials:
+  recipients: ["age1…"]
+  identity_path: .flowgen/age.key
+  path: credentials
+```
+
+| Field | Default | Description |
+|---|---|---|
+| `recipients` | `[]` | age public keys each credential is encrypted for. |
+| `identity_path` | | age key file this instance decrypts with; its public key is a recipient too. |
+| `path` | required | The folder flows read credentials from. |
+
+**On this machine**, a workspace started by `flowgen` without `--config` creates its age key in `.flowgen/age.key`, outside git, and reads credentials from the workspace's `credentials/` folder. Its `.sops.yaml` encrypts for the same key, so `sops credentials/<name>.yaml` edits a credential too.
+
+**In a cluster**, Flux decrypts the Secrets (`decryption.provider: sops`) and flowgen holds only the public keys, so it can add credentials but not read them from git. The chart mounts the listed Secrets together, read-only, at `credentialsPath` (default `/etc/flowgen/credentials`), and sets `FLOWGEN_CREDENTIALS` to it:
+
+```yaml
+flowgen:
+  credentials: [orders-api, warehouse]
+```
+
+A HelmRelease can read that list from the ConfigMap flowgen keeps, which is labeled `reconcile.fluxcd.io/watch: Enabled` so a new list upgrades the release:
+
+```yaml
+valuesFrom:
+  - kind: ConfigMap
+    name: flowgen-credentials
+    valuesKey: values.yaml
+    optional: true
+```
+
+Adding or removing credentials changes the list, so the pods roll. A listed Secret that is not there yet is skipped. A new value for existing credentials reaches the mounted file without a restart, and the tasks read it the next time they start. Argo CD needs a SOPS plugin, such as KSOPS, to decrypt the Secrets.
+
 ## Operational notes
 
 - **File permissions** should be `0600` (read-write for the flowgen user only). Flowgen does not enforce this — the operator is responsible.
 - **Hot reload** is not supported. Credentials are read once at task initialisation. To rotate, restart the worker. OAuth 2.0 access tokens are an exception — they auto-refresh transparently when they expire.
 - **Errors at startup**: if the file is missing or malformed, the task retries its startup up to every 5 minutes until the file is fixed. Watch worker logs for `Failed to read credentials` or `Failed to parse credentials` messages.
-- **Never commit credential files to Git.** Pair with `git_sync` carefully: sync flow YAML, but mount credentials separately via a Kubernetes secret.
+- **Never commit unencrypted credentials to Git.** Commit them encrypted under `credentials/`, or mount them separately via a Kubernetes secret.

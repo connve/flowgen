@@ -5,34 +5,39 @@
 	import { goto } from '$app/navigation';
 	import { base } from '$app/paths';
 	import Icon from '@iconify/svelte';
-	import StateMessage from '$lib/StateMessage.svelte';
-	import { apiUrl, errorMessage, failure } from '$lib/api';
+	import {
+		CodingAgentsLink,
+		CopyButton,
+		FolderTree,
+		Inspector,
+		InspectorSection,
+		Loading,
+		SidePane,
+		StateMessage,
+		StatusDot,
+		buildTree,
+		isMobile
+	} from '@connve/ui';
+	import { agentsModels, errorMessage, listAgentTools } from '$lib/api';
+	import { AGENT_SETUP_URL, replyStream } from '$lib/urls';
 	import { m } from '$lib/paraglide/messages.js';
 	import { pageTitle } from '$lib/pageTitle';
-	import FolderTree from '$lib/FolderTree.svelte';
-	import SidePane from '$lib/SidePane.svelte';
-	import { isMobile } from '$lib/mobile';
 	import { formatRelative } from '$lib/time';
-	import CopyButton from '$lib/CopyButton.svelte';
 	import {
-		getConversation,
-		setConversationRead,
+		getSession,
+		setSessionRead,
 		startReply,
 		stopReply,
-		updateConversation,
-		deleteConversation,
-		type ConversationMessage,
-		type ConversationSummary,
+		updateSession,
+		deleteSession,
+		type SessionMessage,
+		type SessionSummary,
 		type ToolStep
-	} from '$lib/conversations';
-	import { agentConversations } from '$lib/agentConversations.svelte';
+	} from '$lib/sessions';
+	import { agentSessions } from '$lib/agentSessions.svelte';
 	import { connectorByName, connectorFor } from '$lib/connectors';
-	import { buildTree } from '$lib/tree';
 	import { encodePath, type AgentTool } from '$lib/api';
 	import { scale } from 'svelte/transition';
-	import Inspector from '$lib/Inspector.svelte';
-	import InspectorSection from '$lib/InspectorSection.svelte';
-	import StatusDot from '$lib/StatusDot.svelte';
 	import {
 		formatDuration,
 		releaseToolRuns,
@@ -43,10 +48,10 @@
 	import type { ActivityLevel } from '$lib/logRecord';
 
 	// `role` narrows to the two values the UI ever produces; the generated
-	// `ConversationMessage.role` is a bare `string` since the schema is shared
+	// `SessionMessage.role` is a bare `string` since the schema is shared
 	// with any future author, so this stays a local type rather than swapping
 	// in the generated one wholesale.
-	interface ChatMessage extends Omit<ConversationMessage, 'role'> {
+	interface ChatMessage extends Omit<SessionMessage, 'role'> {
 		role: 'user' | 'assistant';
 	}
 
@@ -138,7 +143,7 @@
 	});
 
 	// A saved model the agent no longer offers falls back to the same agent's
-	// first model, or the first one listed, so the conversation can go on.
+	// first model, or the first one listed, so the session can go on.
 	$effect(() => {
 		if (models.length === 0 || models.some((entry) => entry.id === model)) return;
 		const proxy = model.split('/')[0];
@@ -163,47 +168,47 @@
 	let error = $state<string | null>(null);
 	let scroller = $state<HTMLDivElement | null>(null);
 
-	// Conversation history, served from flowgen's system cache. Summaries only
+	// Session history, served from flowgen's system cache. Summaries only
 	// (no message bodies); the active one is fetched in full on demand. The URL
-	// is the source of truth for which conversation is open: `/agents/{id}`, or
+	// is the source of truth for which session is open: `/agents/{id}`, or
 	// `/agents` for a fresh unsaved chat.
-	let conversations = $derived(agentConversations.list);
+	let sessions = $derived(agentSessions.list);
 	let activeId = $derived(page.params.id ?? null);
 	let historyPaneOpen = $state(true);
 	// Id we've already loaded messages for, so the load effect doesn't refetch
 	// on unrelated state changes or clobber a chat we just minted an id for.
 	let loadedId = $state<string | null>(null);
-	// True while fetching a conversation's messages by id, so the chat area
+	// True while fetching a session's messages by id, so the chat area
 	// shows a spinner instead of an empty/flashing view on a slow load.
 	let convoLoading = $state(false);
-	// The conversation whose messages are on screen, so a reload of it keeps the draft.
+	// The session whose messages are on screen, so a reload of it keeps the draft.
 	let shownId: string | null = null;
 
-	// Title shown in the breadcrumb: the active conversation's, or a
+	// Title shown in the breadcrumb: the active session's, or a
 	// placeholder for a fresh chat.
 	let activeTitle = $derived(
 		activeId === null
-			? m.agents_new_conversation()
-			: (conversations.find((c) => c.id === activeId)?.title ?? m.agents_conversation_fallback_title())
+			? m.agents_new_session()
+			: (sessions.find((c) => c.id === activeId)?.title ?? m.agents_session_fallback_title())
 	);
 
 	// The folder the history list shows, with its subfolders; null shows all.
 	let selectedFolder = $state<string | null>(null);
 	let expandedFolders = $state(new Set<string>());
 	let folderTree = $derived(
-		buildTree<ConversationSummary>(
-			conversations.filter((c) => c.folder),
+		buildTree<SessionSummary>(
+			sessions.filter((c) => c.folder),
 			(c) => `${c.folder}/${c.id}`
 		)
 	);
-	let folders = $derived([...new Set(conversations.flatMap((c) => (c.folder ? [c.folder] : [])))].sort());
+	let folders = $derived([...new Set(sessions.flatMap((c) => (c.folder ? [c.folder] : [])))].sort());
 
 	$effect(() => {
 		const folder = selectedFolder;
-		if (folder !== null && !conversations.some((c) => inFolder(c, folder))) selectedFolder = null;
+		if (folder !== null && !sessions.some((c) => inFolder(c, folder))) selectedFolder = null;
 	});
 
-	function inFolder(c: ConversationSummary, folder: string | null): boolean {
+	function inFolder(c: SessionSummary, folder: string | null): boolean {
 		if (folder === null) return true;
 		return c.folder === folder || (c.folder ?? '').startsWith(folder + '/');
 	}
@@ -215,27 +220,27 @@
 		expandedFolders = next;
 	}
 
-	let filteredConversations = $derived(conversations.filter((c) => inFolder(c, selectedFolder)));
+	let filteredSessions = $derived(sessions.filter((c) => inFolder(c, selectedFolder)));
 
-	// `updatedAt` of the conversation on screen, as last loaded.
+	// `updatedAt` of the session on screen, as last loaded.
 	let loadedUpdatedAt = $state(0);
 
 	// A reply this page doesn't follow (another visit's, another pod's) or a
-	// flow can change the open conversation; reload it when the server has a
+	// flow can change the open session; reload it when the server has a
 	// newer copy.
 	$effect(() => {
-		const entry = conversations.find((c) => c.id === activeId);
+		const entry = sessions.find((c) => c.id === activeId);
 		if (following || convoLoading || !entry || loadedId !== activeId) return;
 		if (entry.updatedAt <= loadedUpdatedAt) return;
 		loadedId = null;
 	});
 
-	// Whenever the URL id changes, load that conversation's messages (or clear
+	// Whenever the URL id changes, load that session's messages (or clear
 	// to a fresh chat for `/agents`). Skips a reload of the id we already show.
 	$effect(() => {
 		const id = activeId;
 		if (id === loadedId) return;
-		// A new conversation moves to `/agents/{id}` once its reply starts; the
+		// A new session moves to `/agents/{id}` once its reply starts; the
 		// messages on screen are already the ones that reply writes.
 		if (id !== null && id === untrack(() => followingId)) {
 			loadedId = id;
@@ -253,9 +258,9 @@
 			return;
 		}
 		loadedId = id;
-		loadedUpdatedAt = untrack(() => conversations.find((c) => c.id === id)?.updatedAt ?? 0);
+		loadedUpdatedAt = untrack(() => sessions.find((c) => c.id === id)?.updatedAt ?? 0);
 		convoLoading = true;
-		getConversation(id)
+		getSession(id)
 			.then((c) => {
 				// Guard against a race: the URL may have changed again mid-fetch.
 				if (activeId !== c.id) return;
@@ -272,7 +277,7 @@
 				if (c.messages.at(-1)?.pending) followReply(c.id);
 			})
 			.catch((err) => {
-				if (activeId === id) error = errorMessage(err, m.agents_conversation_load_failed());
+				if (activeId === id) error = errorMessage(err, m.agents_session_load_failed());
 			})
 			.finally(() => {
 				if (activeId === id) convoLoading = false;
@@ -281,19 +286,19 @@
 
 	async function markRead(id: string) {
 		try {
-			await setConversationRead(id, true);
+			await setSessionRead(id, true);
 		} catch (err) {
-			console.error('Failed to mark the conversation read', err);
+			console.error('Failed to mark the session read', err);
 		}
 	}
 
-	// Leaves the conversation if it's open, so it isn't marked read again at once.
+	// Leaves the session if it's open, so it isn't marked read again at once.
 	async function markUnread(id: string) {
 		try {
-			await setConversationRead(id, false);
-			if (activeId === id) newConversation();
+			await setSessionRead(id, false);
+			if (activeId === id) newSession();
 		} catch (err) {
-			error = errorMessage(err, m.agents_conversation_mark_unread_failed());
+			error = errorMessage(err, m.agents_session_mark_unread_failed());
 		}
 	}
 
@@ -303,54 +308,54 @@
 		if (textareaEl) textareaEl.style.height = 'auto';
 	}
 
-	// On mobile the pane covers the chat, so it closes once a conversation is picked.
+	// On mobile the pane covers the chat, so it closes once a session is picked.
 	function closePaneOnMobile() {
 		if (isMobile()) historyPaneOpen = false;
 	}
 
-	function openConversation(id: string) {
+	function openSession(id: string) {
 		closePaneOnMobile();
 		inspected = null;
 		goto(`${base}/agents/${id}`);
 	}
 
-	function newConversation() {
+	function newSession() {
 		closePaneOnMobile();
 		inspected = null;
 		goto(`${base}/agents`);
 	}
 
-	// The conversation whose title is being edited in the history list.
+	// The session whose title is being edited in the history list.
 	let renaming = $state<string | null>(null);
 	let renameTitle = $state('');
-	// Renaming from the conversation's header edits the breadcrumb title.
+	// Renaming from the session's header edits the breadcrumb title.
 	let renameInHeader = $state(false);
 
-	function startRename(c: ConversationSummary, inHeader = false) {
+	function startRename(c: SessionSummary, inHeader = false) {
 		renameTitle = c.title;
 		renameInHeader = inHeader;
 		renaming = c.id;
 	}
 
-	let activeSummary = $derived(conversations.find((c) => c.id === activeId));
+	let activeSummary = $derived(sessions.find((c) => c.id === activeId));
 
 	async function saveRename(id: string) {
 		if (renaming !== id) return;
 		renaming = null;
 		const title = renameTitle.trim();
-		if (!title || title === conversations.find((c) => c.id === id)?.title) return;
+		if (!title || title === sessions.find((c) => c.id === id)?.title) return;
 		try {
-			await updateConversation(id, { title });
+			await updateSession(id, { title });
 		} catch (err) {
-			error = errorMessage(err, m.agents_conversation_rename_failed());
+			error = errorMessage(err, m.agents_session_rename_failed());
 		}
 	}
 
-	// The conversation being filed in a folder, and the folder typed for it.
-	let moving = $state<ConversationSummary | null>(null);
+	// The session being filed in a folder, and the folder typed for it.
+	let moving = $state<SessionSummary | null>(null);
 	let moveFolder = $state('');
 
-	function startMove(c: ConversationSummary) {
+	function startMove(c: SessionSummary) {
 		moveFolder = c.folder ?? selectedFolder ?? '';
 		moving = c;
 	}
@@ -365,9 +370,9 @@
 			.filter(Boolean)
 			.join('/');
 		try {
-			await updateConversation(c.id, { folder });
+			await updateSession(c.id, { folder });
 		} catch (err) {
-			error = errorMessage(err, m.agents_conversation_move_failed());
+			error = errorMessage(err, m.agents_session_move_failed());
 			return;
 		}
 		selectedFolder = folder || null;
@@ -378,13 +383,13 @@
 	}
 
 	function unreadIn(folder: string | null): number {
-		return conversations.filter((c) => c.unread && inFolder(c, folder)).length;
+		return sessions.filter((c) => c.unread && inFolder(c, folder)).length;
 	}
 
 	// The history row whose ⋮ menu is open, placed under its button. Fixed, so
 	// the scrolling list doesn't clip it.
 	let rowMenu = $state<{
-		c: ConversationSummary;
+		c: SessionSummary;
 		top: number;
 		right: number;
 		inHeader: boolean;
@@ -393,7 +398,7 @@
 	} | null>(null);
 	let rowMenuTrigger: HTMLElement | null = null;
 
-	function openRowMenu(event: MouseEvent, c: ConversationSummary, inHeader = false) {
+	function openRowMenu(event: MouseEvent, c: SessionSummary, inHeader = false) {
 		event.stopPropagation();
 		if (rowMenu?.c.id === c.id) {
 			rowMenu = null;
@@ -412,7 +417,7 @@
 		rowMenuTrigger?.focus();
 	}
 
-	function rowAction(action: (c: ConversationSummary, inHeader: boolean) => void) {
+	function rowAction(action: (c: SessionSummary, inHeader: boolean) => void) {
 		const menu = rowMenu;
 		closeRowMenu();
 		if (menu) action(menu.c, menu.inHeader);
@@ -450,24 +455,36 @@
 		node.select();
 	}
 
-	// The conversation waiting for the user to confirm its deletion.
-	let pendingDelete = $state<ConversationSummary | null>(null);
+	// The session waiting for the user to confirm its deletion.
+	let pendingDelete = $state<SessionSummary | null>(null);
 	let cancelDeleteButton = $state<HTMLButtonElement | null>(null);
 
-	// The safe answer has focus, so Enter keeps the conversation.
+	// The safe answer has focus, so Enter keeps the session.
 	$effect(() => {
 		cancelDeleteButton?.focus();
 	});
 
-	// Deletes a stored conversation. If it's the one on screen, navigate back to
+	// Deletes a stored session. If it's the one on screen, navigate back to
 	// a fresh chat so the view doesn't keep re-saving a deleted id.
-	async function removeConversation(id: string) {
+	async function removeSession(id: string) {
 		pendingDelete = null;
 		try {
-			await deleteConversation(id);
-			if (activeId === id) newConversation();
+			await deleteSession(id);
+			if (activeId === id) newSession();
 		} catch (err) {
-			error = errorMessage(err, m.agents_conversation_delete_failed());
+			error = errorMessage(err, m.agents_session_delete_failed());
+		}
+	}
+
+	const CODING_AGENTS_HIDDEN_KEY = 'flowgen-agents-coding-agents-hidden';
+	let codingAgentsHidden = $state(false);
+
+	function hideCodingAgents() {
+		codingAgentsHidden = true;
+		try {
+			localStorage.setItem(CODING_AGENTS_HIDDEN_KEY, '1');
+		} catch {
+			// Not remembered, but the link stays hidden for this visit.
 		}
 	}
 
@@ -505,9 +522,7 @@
 
 	async function loadTools() {
 		try {
-			const res = await fetch(apiUrl('api/agents/tools'));
-			if (!res.ok) throw await failure(res);
-			const found: AgentTool[] = await res.json();
+			const { data: found } = await listAgentTools();
 			tools = Object.fromEntries(found.map((tool) => [tool.name, tool]));
 		} catch (err) {
 			console.error('Failed to load agent tools', err);
@@ -559,6 +574,7 @@
 		try {
 			const pane = localStorage.getItem('flowgen-agents-history-pane');
 			if (pane !== null) historyPaneOpen = pane === '1';
+			codingAgentsHidden = localStorage.getItem(CODING_AGENTS_HIDDEN_KEY) === '1';
 		} catch {
 			// Storage can be unavailable; the pane starts open.
 		}
@@ -566,19 +582,17 @@
 		loadTools();
 
 		try {
-			const res = await fetch(apiUrl('api/agents/models'));
-			if (!res.ok) throw await failure(res);
-			const body = await res.json();
+			const { data: body } = await agentsModels();
 			models = (body.data ?? [])
 				// The built-in chat speaks OpenAI (`/chat/completions`); skip proxies
 				// that speak another protocol so they can't be picked and then fail.
-				.filter((entry: { protocol?: string }) => (entry.protocol ?? 'openai') === 'openai')
-				.map((entry: { id: string; display_name?: string; description?: string }) => ({
+				.filter((entry) => (entry.protocol ?? 'openai') === 'openai')
+				.map((entry) => ({
 					id: entry.id,
 					display_name: entry.display_name,
 					description: entry.description
 				}));
-			// The conversation-load effect may have already restored a saved
+			// The session-load effect may have already restored a saved
 			// model by the time this fetch resolves — don't clobber it.
 			if (models.length > 0) {
 				if (!model) model = models[0].id;
@@ -641,7 +655,7 @@
 	function followReply(id: string) {
 		following?.close();
 		followingId = id;
-		const source = new EventSource(apiUrl(`api/agents/conversations/${encodeURIComponent(id)}/reply`));
+		const source = new EventSource(replyStream(id));
 		following = source;
 		source.addEventListener('message', (e) => {
 			if (following !== source) return;
@@ -653,7 +667,7 @@
 			if (reply.pending !== true) stopFollowing();
 		});
 		// The reply runs on another pod, or the connection broke: the pending
-		// reply still updates through the conversation stream.
+		// reply still updates through the session stream.
 		source.onerror = () => {
 			if (following === source) stopFollowing();
 		};
@@ -662,7 +676,7 @@
 	onDestroy(() => following?.close());
 
 	// Stops the reply on the server (Esc or the Stop button), whichever pod
-	// runs it; with none running, the stored conversation is reloaded.
+	// runs it; with none running, the stored session is reloaded.
 	function stopGenerating() {
 		const id = followingId ?? activeId;
 		if (!id) return;
@@ -673,13 +687,13 @@
 			.catch((err) => (error = errorMessage(err, m.agents_chat_failed())));
 	}
 
-	// Which of the conversation's prompts the composer shows, counted from the
+	// Which of the session's prompts the composer shows, counted from the
 	// first; null while it holds the user's own draft.
 	let recalled = $state<number | null>(null);
 	let draft = '';
 
 	// Up on the composer's first line and Down on its last walk through the
-	// prompts sent in this conversation, like a shell history. With a modifier
+	// prompts sent in this session, like a shell history. With a modifier
 	// or while an input method composes, the keys keep their usual meaning.
 	function recallPrompt(event: KeyboardEvent): boolean {
 		if (event.shiftKey || event.altKey || event.metaKey || event.ctrlKey || event.isComposing) {
@@ -764,7 +778,7 @@
 	{#if count > 0}
 		<span class="ml-auto text-xs font-semibold text-base-content/70">
 			<span aria-hidden="true">{count}</span>
-			<span class="sr-only">{m.agents_conversations_unread_count({ count })}</span>
+			<span class="sr-only">{m.agents_sessions_unread_count({ count })}</span>
 		</span>
 	{/if}
 {/snippet}
@@ -772,7 +786,7 @@
 <section class="relative flex h-[calc(100vh-4rem)] min-w-0 overflow-hidden">
 	<SidePane
 		open={historyPaneOpen}
-		title={m.agents_conversations()}
+		title={m.agents_sessions()}
 		collapseLabel={m.agents_history_collapse()}
 		expandLabel={m.agents_history_expand()}
 		ontoggle={toggleHistoryPane}
@@ -786,7 +800,7 @@
 							tree={folderTree}
 							selected={selectedFolder}
 							expanded={expandedFolders}
-							allLabel={m.agents_all_conversations()}
+							allLabel={m.agents_all_sessions()}
 							allIcon="tabler:message-2"
 							expandLabel={() => m.resources_expand_folder()}
 							collapseLabel={() => m.resources_collapse_folder()}
@@ -803,13 +817,13 @@
 					class="min-h-0 flex-1 space-y-px overflow-y-auto text-sm"
 					onscroll={() => (rowMenu = null)}
 				>
-					{#each filteredConversations as c (c.id)}
+					{#each filteredSessions as c (c.id)}
 						<li class="group relative">
 							{#if renaming === c.id && !renameInHeader}
 								<input
 									type="text"
 									class="input input-sm w-full border border-primary bg-base-100 outline-none"
-									aria-label={m.agents_conversation_rename()}
+									aria-label={m.agents_session_rename()}
 									bind:value={renameTitle}
 									use:focusSelect
 									onkeydown={(e) => {
@@ -828,13 +842,13 @@
 								c.id
 									? 'bg-base-200 font-medium'
 									: 'hover:bg-base-200/60'}"
-								onclick={() => openConversation(c.id)}
+								onclick={() => openSession(c.id)}
 							>
 								{#if c.unread}
 									<span
 										class="absolute left-2.5 top-1/2 h-2 w-2 -translate-y-1/2 rounded-full bg-primary"
 										role="img"
-										aria-label={m.agents_conversation_unread()}
+										aria-label={m.agents_session_unread()}
 									></span>
 								{/if}
 								<span class="min-w-0 flex-1 truncate {c.unread ? 'font-semibold' : ''}">{c.title}</span>
@@ -852,7 +866,7 @@
 								<button
 									type="button"
 									class="flex h-7 w-7 items-center justify-center rounded-md text-base-content/60 transition-colors hover:bg-base-300/60 hover:text-base-content"
-									aria-label={m.agents_conversation_actions()}
+									aria-label={m.agents_session_actions()}
 									aria-haspopup="menu"
 									aria-expanded={rowMenu?.c.id === c.id}
 									onclick={(e) => openRowMenu(e, c)}
@@ -886,7 +900,7 @@
 				<input
 					type="text"
 					class="input input-sm w-full max-w-xl border border-primary bg-base-100 text-[0.9375rem] font-semibold outline-none"
-					aria-label={m.agents_conversation_rename()}
+					aria-label={m.agents_session_rename()}
 					bind:value={renameTitle}
 					use:focusSelect
 					onkeydown={(e) => {
@@ -908,7 +922,7 @@
 			<button
 				type="button"
 				class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content"
-				aria-label={m.agents_conversation_actions()}
+				aria-label={m.agents_session_actions()}
 				aria-haspopup="menu"
 				aria-expanded={rowMenu?.c.id === c.id}
 				onclick={(e) => openRowMenu(e, c, true)}
@@ -919,8 +933,8 @@
 		<button
 			type="button"
 			class="btn btn-primary btn-sm shrink-0 gap-1.5"
-			onclick={newConversation}
-			disabled={sending}
+			onclick={newSession}
+			disabled={sending || modelsLoading || modelsEmpty || modelsError !== null}
 		>
 			<Icon icon="tabler:plus" class="h-4 w-4" />
 			{m.common_new()}
@@ -1052,9 +1066,7 @@
 	{#if modelsLoading}
 		<!-- Hold the empty state until we know whether models exist, so the chat
 		     greeting doesn't flash before switching to "no models". -->
-		<div class="flex flex-1 items-center justify-center">
-			<span class="loading loading-spinner loading-lg text-primary"></span>
-		</div>
+		<Loading />
 	{:else if modelsError}
 		<div class="flex flex-1 items-center justify-center">
 			<StateMessage
@@ -1064,18 +1076,15 @@
 			/>
 		</div>
 	{:else if modelsEmpty}
-		<div class="flex flex-1 items-center justify-center">
-			<StateMessage
-				tone="notice"
-				title={m.agents_models_empty_title()}
-				message={m.agents_models_empty_message()}
-			/>
+		<div class="flex flex-1 flex-col items-center justify-center gap-8 px-6">
+			<StateMessage tone="notice" title={m.agents_models_empty_title()}>
+				<a href="{base}/new?kind=flow" class="btn btn-primary btn-sm">{m.agents_models_add()}</a>
+			</StateMessage>
+			<CodingAgentsLink href={AGENT_SETUP_URL} label={m.agents_connect_coding_agent()} />
 		</div>
 	{:else if convoLoading && messages.length === 0}
-		<!-- Loading a conversation by id — spinner instead of a flashing empty state. -->
-		<div class="flex flex-1 items-center justify-center">
-			<span class="loading loading-spinner loading-lg text-primary"></span>
-		</div>
+		<!-- Loading a session by id — spinner instead of a flashing empty state. -->
+		<Loading />
 	{:else if messages.length === 0}
 		<!-- Empty state: greeting + composer centred, like a landing prompt. -->
 		<div class="relative flex flex-1 flex-col items-center justify-center gap-7 overflow-hidden px-6">
@@ -1089,11 +1098,21 @@
 				{m.agents_greeting()}
 			</p>
 			<div class="relative w-full max-w-2xl">
+				{#if !codingAgentsHidden}
+					<div class="-mt-4 mb-3 flex justify-center">
+						<CodingAgentsLink
+							href={AGENT_SETUP_URL}
+							label={m.agents_connect_coding_agent()}
+							ondismiss={hideCodingAgents}
+							dismissLabel={m.agents_connect_coding_agent_dismiss()}
+						/>
+					</div>
+				{/if}
 				{@render composer()}
 			</div>
 		</div>
 	{:else}
-		<!-- Conversation: scrolling messages, composer pinned to the bottom. -->
+		<!-- Session: scrolling messages, composer pinned to the bottom. -->
 		<div
 			bind:this={scroller}
 			class="min-h-0 flex-1 overflow-y-auto px-6 pb-10 pt-6 [mask-image:linear-gradient(to_bottom,transparent,black_1.5rem,black_calc(100%-2.5rem),transparent)]"
@@ -1226,15 +1245,15 @@
 			style="top: {rowMenu.top}px; right: {rowMenu.right}px"
 			in:scale={{ duration: 120, start: 0.96 }}
 			role="menu"
-			aria-label={m.agents_conversation_actions()}
+			aria-label={m.agents_session_actions()}
 			tabindex="-1"
 			onkeydown={onRowMenuKeydown}
 			{@attach focusFirstItem}
 		>
-			{@render menuItem('tabler:folder', m.agents_conversation_move(), () => rowAction(startMove))}
-			{@render menuItem('tabler:pencil', m.agents_conversation_rename(), () => rowAction(startRename))}
+			{@render menuItem('tabler:folder', m.agents_session_move(), () => rowAction(startMove))}
+			{@render menuItem('tabler:pencil', m.agents_session_rename(), () => rowAction(startRename))}
 			{#if !c.unread}
-				{@render menuItem('tabler:mail', m.agents_conversation_mark_unread(), () =>
+				{@render menuItem('tabler:mail', m.agents_session_mark_unread(), () =>
 					rowAction((c) => markUnread(c.id))
 				)}
 			{/if}
@@ -1256,7 +1275,7 @@
 			class="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4"
 			role="dialog"
 			aria-modal="true"
-			aria-label={m.agents_conversation_move()}
+			aria-label={m.agents_session_move()}
 			tabindex="-1"
 			onclick={(e) => {
 				if (e.target === e.currentTarget) moving = null;
@@ -1274,12 +1293,12 @@
 					saveMove();
 				}}
 			>
-				<h2 class="text-[0.9375rem] font-semibold">{m.agents_conversation_move_title()}</h2>
+				<h2 class="text-[0.9375rem] font-semibold">{m.agents_session_move_title()}</h2>
 				<div class="space-y-1 text-sm">
 					<input
 						type="text"
 						class="input input-sm w-full border border-base-300 bg-base-100 outline-none focus:border-primary"
-						placeholder={m.agents_conversation_move_placeholder()}
+						placeholder={m.agents_session_move_placeholder()}
 						list="agents-folders"
 						bind:value={moveFolder}
 						use:focusSelect
@@ -1289,13 +1308,12 @@
 							<option value={folder}></option>
 						{/each}
 					</datalist>
-					<p class="text-xs opacity-60">{m.agents_conversation_move_hint()}</p>
 				</div>
 				<div class="flex justify-end gap-2">
 					<button type="button" class="btn btn-ghost btn-sm" onclick={() => (moving = null)}>
 						{m.common_cancel()}
 					</button>
-					<button type="submit" class="btn btn-primary btn-sm">{m.agents_conversation_move_confirm()}</button>
+					<button type="submit" class="btn btn-primary btn-sm">{m.agents_session_move_confirm()}</button>
 				</div>
 			</form>
 		</div>
@@ -1307,7 +1325,7 @@
 			class="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4"
 			role="dialog"
 			aria-modal="true"
-			aria-label={m.agents_conversation_delete()}
+			aria-label={m.agents_session_delete()}
 			tabindex="-1"
 			onclick={(e) => {
 				if (e.target === e.currentTarget) pendingDelete = null;
@@ -1319,8 +1337,7 @@
 			}}
 		>
 			<div class="w-full max-w-sm space-y-4 rounded-xl bg-base-100 p-5 shadow-2xl">
-				<h2 class="text-[0.9375rem] font-semibold">{m.agents_conversation_delete_title()}</h2>
-				<p class="text-sm text-base-content/70">{m.agents_conversation_delete_message()}</p>
+				<h2 class="text-[0.9375rem] font-semibold">{m.agents_session_delete_title()}</h2>
 				<div class="flex justify-end gap-2">
 					<button
 						type="button"
@@ -1333,7 +1350,7 @@
 					<button
 						type="button"
 						class="btn btn-error btn-sm"
-						onclick={() => removeConversation(target.id)}
+						onclick={() => removeSession(target.id)}
 					>
 						{m.common_delete()}
 					</button>
@@ -1508,26 +1525,20 @@
 	   data views. */
 	.hero-gradient {
 		filter: blur(80px);
-		opacity: 0.22;
-	}
-	:global(:root[data-theme='mydark']) .hero-gradient {
-		opacity: 0.28;
+		opacity: var(--state-glow-opacity);
 	}
 	.hero-blob {
 		position: absolute;
 		border-radius: 9999px;
-		mix-blend-mode: multiply;
+		mix-blend-mode: var(--state-glow-blend);
 		will-change: transform;
-	}
-	:global(:root[data-theme='mydark']) .hero-blob {
-		mix-blend-mode: screen;
 	}
 	.hero-blob-1 {
 		top: 5%;
 		left: 12%;
 		width: 30vw;
 		height: 30vw;
-		background: radial-gradient(circle, #00e168 0%, transparent 70%);
+		background: radial-gradient(circle, var(--brand-to) 0%, transparent 70%);
 		animation: blob-drift-1 18s ease-in-out infinite;
 	}
 	.hero-blob-2 {
@@ -1535,7 +1546,7 @@
 		right: 12%;
 		width: 28vw;
 		height: 28vw;
-		background: radial-gradient(circle, #00b4a6 0%, transparent 70%);
+		background: radial-gradient(circle, var(--brand-via) 0%, transparent 70%);
 		animation: blob-drift-2 22s ease-in-out infinite;
 	}
 	.hero-blob-3 {
@@ -1543,7 +1554,7 @@
 		left: 38%;
 		width: 26vw;
 		height: 26vw;
-		background: radial-gradient(circle, #006b55 0%, transparent 75%);
+		background: radial-gradient(circle, var(--brand-from) 0%, transparent 75%);
 		animation: blob-drift-3 26s ease-in-out infinite;
 	}
 	@keyframes blob-drift-1 {
@@ -1584,7 +1595,7 @@
 	}
 	/* Accent-gradient text clip, matching connve.com's shimmering headline word. */
 	.edge-word {
-		background: linear-gradient(120deg, #006b55 0%, #00b4a6 50%, #00e168 100%);
+		background: var(--gradient-brand);
 		background-size: 200% 200%;
 		-webkit-background-clip: text;
 		background-clip: text;
@@ -1611,7 +1622,7 @@
 	/* Live status label: brand-green gradient text, shimmering while a turn is
 	   in progress. Reuses the shared `edge-shimmer` keyframes. */
 	.chat-status-live {
-		background: linear-gradient(120deg, #006b55 0%, #00b4a6 50%, #00e168 100%);
+		background: var(--gradient-brand);
 		background-size: 200% 200%;
 		-webkit-background-clip: text;
 		background-clip: text;
@@ -1624,7 +1635,7 @@
 	   shimmers in lockstep with the text. Also gently pulses. Targeted via
 	   :global because it lands on the iconify element. */
 	:global(.chat-status-pulse) {
-		background: linear-gradient(120deg, #006b55 0%, #00b4a6 50%, #00e168 100%);
+		background: var(--gradient-brand);
 		background-size: 200% 200%;
 		animation:
 			edge-shimmer 2.5s ease-in-out infinite,

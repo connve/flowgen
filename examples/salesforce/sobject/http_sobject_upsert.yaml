@@ -11,7 +11,6 @@ flow:
     description: "Accepts record data over an HTTP webhook and upserts it into Salesforce by external ID via the REST API."
     tags: ["salesforce", "upsert", "http", "webhook", "example"]
   tasks:
-
     - http_endpoint:
         name: receive_request
         method: POST
@@ -20,7 +19,7 @@ flow:
     - salesforce_restapi_sobject:
         name: upsert_record
         operation: upsert
-        credentials_path: /etc/sfdc/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
         sobject_type: "{{event.data.sobject_type}}"
         external_id_field: "{{event.data.external_id_field}}"
         external_id_value: "{{event.data.external_id_value}}"

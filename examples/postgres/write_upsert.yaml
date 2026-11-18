@@ -10,7 +10,6 @@ flow:
     tags: ["postgres", "write", "upsert", "example"]
   require_leader_election: true
   tasks:
-
     # Tick every 5 minutes.
     - generate:
         name: tick
@@ -19,12 +18,12 @@ flow:
     # Orders changed since the last tick, as Arrow record batches.
     - postgres_query:
         name: changed_orders
-        credentials_path: /etc/postgres/source.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/postgres-source.json"
         query: "SELECT id, customer_id, total, status, updated_at FROM orders WHERE updated_at > now() - interval '5 minutes'"
 
     # Insert new orders and update existing ones by primary key.
     - postgres_write:
         name: save_orders
-        credentials_path: /etc/postgres/target.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/postgres-target.json"
         table: public.orders
         change_type: upsert

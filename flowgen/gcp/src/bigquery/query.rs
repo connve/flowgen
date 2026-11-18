@@ -338,7 +338,7 @@ pub enum Error {
     #[error("BigQuery client authentication error: {source}")]
     ClientAuth {
         #[source]
-        source: gcloud_auth::error::Error,
+        source: crate::CredentialsError,
     },
     #[error("BigQuery client creation error: {source}")]
     ClientCreation {

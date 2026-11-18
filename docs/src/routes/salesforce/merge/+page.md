@@ -7,7 +7,7 @@ Merges duplicate SObject records into a single master record via the Salesforce 
 ```yaml
 - salesforce_soapapi_merge:
     name: merge_accounts
-    credentials_path: /etc/salesforce/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
     sobject_type: Account
     master_record_id: "{{event.data.master_id}}"
     record_ids_to_merge:
@@ -52,7 +52,7 @@ flow:
           duplicate_id: "001000000000002"
     - salesforce_soapapi_merge:
         name: merge_accounts
-        credentials_path: /etc/salesforce/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
         sobject_type: Account
         master_record_id: "{{event.data.master_id}}"
         record_ids_to_merge:
@@ -66,7 +66,7 @@ flow:
 ```yaml
 - salesforce_soapapi_merge:
     name: merge_contacts
-    credentials_path: /etc/salesforce/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
     sobject_type: Contact
     master_record_id: "{{event.data.master_id}}"
     record_ids_to_merge:
@@ -90,7 +90,7 @@ flow:
         subject: salesforce.duplicates.>
     - salesforce_soapapi_merge:
         name: merge
-        credentials_path: /etc/salesforce/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
         sobject_type: "{{event.data.sobject_type}}"
         master_record_id: "{{event.data.master_id}}"
         record_ids_to_merge:

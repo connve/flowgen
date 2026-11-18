@@ -13,7 +13,6 @@ flow:
     description: "Answers webhook-submitted questions with an OpenAI completion grounded in static resource context."
     tags: ["ai", "rag", "openai", "example"]
   tasks:
-
     # POST /api/flowgen/workers/v1/ask_question with { "question": "..." }
     - http_endpoint:
         name: receive_question
@@ -25,7 +24,7 @@ flow:
         name: answer_with_rag
         provider: openai
         model: gpt-4-turbo
-        credentials_path: /etc/openai/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/openai.json"
         system_prompt:
           resource: "ai-completion/prompts/rag_system.md"
         prompt: "Question: {{event.data.question}}"

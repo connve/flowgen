@@ -1,14 +1,14 @@
-//! Agent replies the server writes into Agents conversations. A reply runs in
+//! Agent replies the server writes into Agents sessions. A reply runs in
 //! its own task, so it goes on when the browser leaves; browsers follow it
-//! while it runs and read the conversation once it ends. Each write replaces
-//! only the reply's message of the stored conversation, compare-and-swap, so
+//! while it runs and read the session once it ends. Each write replaces
+//! only the reply's message of the stored session, compare-and-swap, so
 //! a rename, a delete, a stop from another pod or a flow's write in the
 //! meantime is kept.
 
 use crate::web::{
-    conversation_key, conversation_owner, conversation_ttl, find_conversation, gateway_base_url,
-    gateway_headers, now_millis, reply_idle_timeout, reply_save_interval, valid_conversation_id,
-    wire_level, write_read_at, WebState,
+    find_session, gateway_base_url, gateway_headers, now_millis, reply_idle_timeout,
+    reply_save_interval, session_key, session_owner, session_ttl, valid_session_id, wire_level,
+    write_read_at, WebState,
 };
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -29,7 +29,7 @@ use tokio::time::{Instant, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-/// Longest conversation title taken from a first message.
+/// Longest session title taken from a first message.
 const TITLE_MAX: usize = 60;
 
 /// Longest error text from the AI gateway kept in a reply.
@@ -39,17 +39,17 @@ const GATEWAY_TEXT_MAX: usize = 300;
 /// so none includes its source.
 #[derive(thiserror::Error, Debug)]
 enum Error {
-    #[error("Conversation store unavailable")]
+    #[error("Session store unavailable")]
     Store {
         #[source]
         source: CacheError,
     },
-    #[error("Corrupt conversation")]
+    #[error("Corrupt session")]
     Corrupt {
         #[source]
         source: serde_json::Error,
     },
-    #[error("Failed to store conversation")]
+    #[error("Failed to store session")]
     Serialize {
         #[source]
         source: serde_json::Error,
@@ -103,28 +103,25 @@ fn detail(text: &str) -> String {
     }
 }
 
-/// The replies this pod is writing, by conversation key.
+/// The replies this pod is writing, by session key.
 #[derive(Default)]
 pub struct Replies {
     running: Mutex<HashMap<String, Running>>,
 }
 
 struct Running {
-    message: watch::Receiver<api::ConversationMessage>,
+    message: watch::Receiver<api::SessionMessage>,
     stop: CancellationToken,
 }
 
 impl Replies {
-    fn get(
-        &self,
-        key: &str,
-    ) -> Option<(watch::Receiver<api::ConversationMessage>, CancellationToken)> {
+    fn get(&self, key: &str) -> Option<(watch::Receiver<api::SessionMessage>, CancellationToken)> {
         let running = self.running.lock().ok()?;
         let reply = running.get(key)?;
         Some((reply.message.clone(), reply.stop.clone()))
     }
 
-    /// Registers a reply unless one is running for the conversation.
+    /// Registers a reply unless one is running for the session.
     fn claim(&self, key: &str, running: Running) -> bool {
         match self.running.lock() {
             Ok(mut replies) if !replies.contains_key(key) => {
@@ -142,18 +139,18 @@ impl Replies {
     }
 }
 
-/// Marks the pending replies of a conversation not saved for ten save
+/// Marks the pending replies of a session not saved for ten save
 /// intervals as interrupted, so they don't show as in progress after their
 /// pod went away.
-pub(crate) fn settle_interrupted(conversation: &mut api::Conversation, save_interval: Duration) {
+pub(crate) fn settle_interrupted(session: &mut api::Session, save_interval: Duration) {
     let stale_after = match i64::try_from(save_interval.as_millis()) {
         Ok(interval) => interval.saturating_mul(10),
         Err(_) => i64::MAX,
     };
-    if now_millis().saturating_sub(conversation.updated_at) <= stale_after {
+    if now_millis().saturating_sub(session.updated_at) <= stale_after {
         return;
     }
-    for message in &mut conversation.messages {
+    for message in &mut session.messages {
         if message.pending == Some(true) {
             message.pending = None;
             message.error = Some(Error::Interrupted.to_string());
@@ -161,7 +158,7 @@ pub(crate) fn settle_interrupted(conversation: &mut api::Conversation, save_inte
     }
 }
 
-/// A conversation title from its first message, cut on a word boundary.
+/// A session title from its first message, cut on a word boundary.
 fn title_of(message: &str) -> String {
     let text = message.split_whitespace().collect::<Vec<_>>().join(" ");
     if text.chars().count() <= TITLE_MAX {
@@ -205,20 +202,20 @@ fn respond(id: &str, error: Error) -> Response {
     (status, error.to_string()).into_response()
 }
 
-/// The storage key of conversation `id` as the caller sees it, if it exists.
+/// The storage key of session `id` as the caller sees it, if it exists.
 async fn stored_key(
     state: &WebState,
     owner: Option<&str>,
     id: &str,
 ) -> Result<Option<String>, Error> {
-    match find_conversation(state, owner, id).await {
+    match find_session(state, owner, id).await {
         Ok(Some((key, _))) => Ok(Some(key)),
         Ok(None) => Ok(None),
         Err(source) => Err(Error::Store { source }),
     }
 }
 
-/// `POST /api/agents/conversations/{id}/reply`.
+/// `POST /api/agents/sessions/{id}/reply`.
 pub(crate) async fn start_reply(
     State(state): State<Arc<WebState>>,
     Path(id): Path<String>,
@@ -226,8 +223,8 @@ pub(crate) async fn start_reply(
     session: Option<axum::Extension<Arc<flowgen_core::auth::UserSession>>>,
     Json(request): Json<api::ReplyRequest>,
 ) -> Response {
-    if !valid_conversation_id(&id) {
-        return (StatusCode::BAD_REQUEST, "Invalid conversation id").into_response();
+    if !valid_session_id(&id) {
+        return (StatusCode::BAD_REQUEST, "Invalid session id").into_response();
     }
     if request.content.trim().is_empty() {
         return (StatusCode::BAD_REQUEST, "The message is empty").into_response();
@@ -235,15 +232,15 @@ pub(crate) async fn start_reply(
     let Some(base) = gateway_base_url(&state) else {
         return unavailable("AI gateway is not configured");
     };
-    let owner = conversation_owner(user.as_ref());
+    let owner = session_owner(user.as_ref());
     let key = match stored_key(&state, owner.as_deref(), &id).await {
         Ok(Some(key)) => key,
-        Ok(None) => conversation_key(&state, owner.as_deref(), &id),
+        Ok(None) => session_key(&state, owner.as_deref(), &id),
         Err(error) => return respond(&id, error),
     };
 
     let now = now_millis();
-    let reply = api::ConversationMessage {
+    let reply = api::SessionMessage {
         role: "assistant".to_string(),
         content: String::new(),
         at: now,
@@ -263,9 +260,9 @@ pub(crate) async fn start_reply(
     }
     let save_interval = reply_save_interval(&state);
     let added = edit(&state, &key, |stored| {
-        let mut conversation = match stored {
-            Some(conversation) => conversation,
-            None => api::Conversation {
+        let mut session = match stored {
+            Some(session) => session,
+            None => api::Session {
                 id: id.clone(),
                 title: title_of(&request.content),
                 messages: Vec::new(),
@@ -276,16 +273,16 @@ pub(crate) async fn start_reply(
                 updated_at: 0,
             },
         };
-        settle_interrupted(&mut conversation, save_interval);
-        if conversation
+        settle_interrupted(&mut session, save_interval);
+        if session
             .messages
             .iter()
             .any(|message| message.pending == Some(true))
         {
             return Err(Error::InProgress);
         }
-        conversation.model = Some(request.model.clone());
-        conversation.messages.push(api::ConversationMessage {
+        session.model = Some(request.model.clone());
+        session.messages.push(api::SessionMessage {
             role: "user".to_string(),
             content: request.content.clone(),
             at: now,
@@ -294,10 +291,10 @@ pub(crate) async fn start_reply(
             error: None,
             stopped: None,
         });
-        let history = chat_messages(&conversation.messages);
-        conversation.messages.push(reply.clone());
-        conversation.updated_at = now;
-        Ok(Edit::Write(conversation, history))
+        let history = chat_messages(&session.messages);
+        session.messages.push(reply.clone());
+        session.updated_at = now;
+        Ok(Edit::Write(session, history))
     })
     .await;
     let history = match added {
@@ -308,7 +305,7 @@ pub(crate) async fn start_reply(
         }
     };
     if let Err(source) = write_read_at(&state, owner.as_deref(), &id, now).await {
-        warn!(id = %id, error = %source, "Failed to mark the conversation read");
+        warn!(id = %id, error = %source, "Failed to mark the session read");
     }
 
     let headers = gateway_headers(
@@ -335,16 +332,16 @@ pub(crate) async fn start_reply(
     StatusCode::ACCEPTED.into_response()
 }
 
-/// `GET /api/agents/conversations/{id}/reply`.
+/// `GET /api/agents/sessions/{id}/reply`.
 pub(crate) async fn follow_reply(
     State(state): State<Arc<WebState>>,
     Path(id): Path<String>,
     user: Option<axum::Extension<flowgen_core::auth::UserContext>>,
 ) -> Response {
-    if !valid_conversation_id(&id) {
-        return (StatusCode::BAD_REQUEST, "Invalid conversation id").into_response();
+    if !valid_session_id(&id) {
+        return (StatusCode::BAD_REQUEST, "Invalid session id").into_response();
     }
-    let owner = conversation_owner(user.as_ref());
+    let owner = session_owner(user.as_ref());
     let key = match stored_key(&state, owner.as_deref(), &id).await {
         Ok(Some(key)) => key,
         Ok(None) => return not_in_progress(),
@@ -364,7 +361,7 @@ pub(crate) async fn follow_reply(
 
 /// The reply as SSE events: its state now, then each change until it ends.
 fn message_events(
-    receiver: watch::Receiver<api::ConversationMessage>,
+    receiver: watch::Receiver<api::SessionMessage>,
 ) -> impl Stream<Item = Result<SseEvent, axum::Error>> {
     futures::stream::unfold(Some(receiver), |receiver| async move {
         let mut receiver = receiver?;
@@ -382,17 +379,17 @@ fn message_events(
     })
 }
 
-/// `DELETE /api/agents/conversations/{id}/reply`. A reply another pod is
+/// `DELETE /api/agents/sessions/{id}/reply`. A reply another pod is
 /// writing is marked stopped, and that pod stops at its next save.
 pub(crate) async fn stop_reply(
     State(state): State<Arc<WebState>>,
     Path(id): Path<String>,
     user: Option<axum::Extension<flowgen_core::auth::UserContext>>,
 ) -> Response {
-    if !valid_conversation_id(&id) {
-        return (StatusCode::BAD_REQUEST, "Invalid conversation id").into_response();
+    if !valid_session_id(&id) {
+        return (StatusCode::BAD_REQUEST, "Invalid session id").into_response();
     }
-    let owner = conversation_owner(user.as_ref());
+    let owner = session_owner(user.as_ref());
     let key = match stored_key(&state, owner.as_deref(), &id).await {
         Ok(Some(key)) => key,
         Ok(None) => return not_in_progress(),
@@ -403,15 +400,15 @@ pub(crate) async fn stop_reply(
         return StatusCode::NO_CONTENT.into_response();
     }
     let marked = edit(&state, &key, |stored| {
-        let Some(mut conversation) = stored else {
+        let Some(mut session) = stored else {
             return Ok(Edit::Keep(false));
         };
-        match conversation.messages.last_mut() {
+        match session.messages.last_mut() {
             Some(last) if last.pending == Some(true) => {
                 last.pending = None;
                 last.stopped = Some(true);
-                conversation.updated_at = now_millis();
-                Ok(Edit::Write(conversation, true))
+                session.updated_at = now_millis();
+                Ok(Edit::Write(session, true))
             }
             _ => Ok(Edit::Keep(false)),
         }
@@ -424,45 +421,46 @@ pub(crate) async fn stop_reply(
     }
 }
 
-/// What an edit does with the stored conversation.
+/// What an edit does with the stored session.
 enum Edit<T> {
-    Write(api::Conversation, T),
+    Write(api::Session, T),
     Keep(T),
 }
 
-/// Applies `change` to the conversation stored at `key` and writes it back,
-/// starting over when another writer changed it in the meantime.
+/// Applies `change` to the session stored at `key` and writes it back,
+/// starting over when another writer changed it in the meantime. The revision
+/// is read before the value, so a write between the two reads fails ours.
 async fn edit<T>(
     state: &WebState,
     key: &str,
-    mut change: impl FnMut(Option<api::Conversation>) -> Result<Edit<T>, Error>,
+    mut change: impl FnMut(Option<api::Session>) -> Result<Edit<T>, Error>,
 ) -> Result<T, Error> {
-    let cache = &state.conversation_cache;
+    let cache = &state.session_cache;
     loop {
-        let (stored, revision) = match cache.get_with_revision(key).await {
-            Ok(Some((bytes, revision))) => match serde_json::from_slice(&bytes) {
-                Ok(conversation) => (Some(conversation), Some(revision)),
-                Err(source) => return Err(Error::Corrupt { source }),
-            },
-            Ok(None) => (None, None),
+        let latest = match cache.get_revision(key).await {
+            Ok(latest) => latest,
             Err(source) => return Err(Error::Store { source }),
         };
-        let (conversation, value) = match change(stored)? {
-            Edit::Write(conversation, value) => (conversation, value),
+        let (stored, revision) = match cache.get_with_revision(key).await {
+            Ok(Some((bytes, revision))) => match serde_json::from_slice(&bytes) {
+                Ok(session) => (Some(session), Some(revision)),
+                Err(source) => return Err(Error::Corrupt { source }),
+            },
+            Ok(None) => (None, latest),
+            Err(source) => return Err(Error::Store { source }),
+        };
+        let (session, value) = match change(stored)? {
+            Edit::Write(session, value) => (session, value),
             Edit::Keep(value) => return Ok(value),
         };
-        let bytes = match serde_json::to_vec(&conversation) {
+        let bytes = match serde_json::to_vec(&session) {
             Ok(bytes) => bytes::Bytes::from(bytes),
             Err(source) => return Err(Error::Serialize { source }),
         };
-        let ttl = conversation_ttl(state);
+        let ttl = session_ttl(state);
         let written = match revision {
             Some(revision) => cache.update(key, bytes, revision, ttl).await,
-            None => match cache.get_revision(key).await {
-                Ok(Some(deleted)) => cache.update(key, bytes, deleted, ttl).await,
-                Ok(None) => cache.create(key, bytes, ttl).await,
-                Err(source) => Err(source),
-            },
+            None => cache.create(key, bytes, ttl).await,
         };
         match written {
             Ok(_) => return Ok(value),
@@ -492,7 +490,7 @@ struct ChatMessage {
 
 /// The history the agent replies to, without replies that failed, are still
 /// being written, or said nothing.
-fn chat_messages(messages: &[api::ConversationMessage]) -> Vec<ChatMessage> {
+fn chat_messages(messages: &[api::SessionMessage]) -> Vec<ChatMessage> {
     messages
         .iter()
         .filter(|message| {
@@ -611,7 +609,7 @@ fn gateway_text(body: &str) -> String {
 /// Folds one gateway frame into the reply. Returns whether a tool call
 /// started, so the reply is saved with it. A tool call past the next step is
 /// ignored.
-fn apply(message: &mut api::ConversationMessage, chunk: ChatChunk) -> bool {
+fn apply(message: &mut api::SessionMessage, chunk: ChatChunk) -> bool {
     let mut tool_started = false;
     for choice in chunk.choices {
         if let Some(text) = choice.delta.content {
@@ -651,7 +649,7 @@ fn apply(message: &mut api::ConversationMessage, chunk: ChatChunk) -> bool {
     tool_started
 }
 
-/// The stored conversation a reply writes into.
+/// The stored session a reply writes into.
 struct Store {
     state: Arc<WebState>,
     key: String,
@@ -666,31 +664,31 @@ enum Saved {
     Written,
     /// The reply's message is no longer pending, e.g. stopped from another
     /// pod, and stays as stored.
-    Stopped(api::ConversationMessage),
+    Stopped(api::SessionMessage),
     Deleted,
 }
 
 impl Store {
-    /// Writes the reply over its message in the stored conversation. A reply
+    /// Writes the reply over its message in the stored session. A reply
     /// someone follows live stays read for its writer; one that ends unwatched
     /// turns unread.
-    async fn save(&self, reply: &api::ConversationMessage, followed: bool) -> Result<Saved, Error> {
+    async fn save(&self, reply: &api::SessionMessage, followed: bool) -> Result<Saved, Error> {
         let saved = self.write(reply).await?;
         if followed && matches!(saved, Saved::Written) {
             let read = write_read_at(&self.state, self.owner.as_deref(), &self.id, now_millis());
             if let Err(source) = read.await {
-                warn!(key = %self.key, error = %source, "Failed to mark the conversation read");
+                warn!(key = %self.key, error = %source, "Failed to mark the session read");
             }
         }
         Ok(saved)
     }
 
-    async fn write(&self, reply: &api::ConversationMessage) -> Result<Saved, Error> {
+    async fn write(&self, reply: &api::SessionMessage) -> Result<Saved, Error> {
         edit(&self.state, &self.key, |stored| {
-            let Some(mut conversation) = stored else {
+            let Some(mut session) = stored else {
                 return Ok(Edit::Keep(Saved::Deleted));
             };
-            let message = conversation
+            let message = session
                 .messages
                 .iter_mut()
                 .rev()
@@ -698,8 +696,8 @@ impl Store {
             match message {
                 Some(message) if message.pending == Some(true) => {
                     *message = reply.clone();
-                    conversation.updated_at = now_millis();
-                    Ok(Edit::Write(conversation, Saved::Written))
+                    session.updated_at = now_millis();
+                    Ok(Edit::Write(session, Saved::Written))
                 }
                 Some(message) => Ok(Edit::Keep(Saved::Stopped(message.clone()))),
                 None => {
@@ -720,16 +718,16 @@ enum Ending {
     /// The user stopped the reply on this pod.
     Halted,
     /// The reply stopped elsewhere; its message stays as stored.
-    Stopped(api::ConversationMessage),
-    /// The conversation was deleted.
+    Stopped(api::SessionMessage),
+    /// The session was deleted.
     Deleted,
 }
 
-/// Streams the reply from the AI gateway into the conversation until it
+/// Streams the reply from the AI gateway into the session until it
 /// ends, fails or is stopped.
 async fn run(
     store: Store,
-    sender: watch::Sender<api::ConversationMessage>,
+    sender: watch::Sender<api::SessionMessage>,
     stop: CancellationToken,
     request: Request,
 ) {
@@ -763,16 +761,16 @@ async fn run(
 }
 
 /// Whether a browser follows the reply, besides the receiver `Replies` holds.
-fn followed(sender: &watch::Sender<api::ConversationMessage>) -> bool {
+fn followed(sender: &watch::Sender<api::SessionMessage>) -> bool {
     sender.receiver_count() > 1
 }
 
 /// Saves the ended reply with the flow runs of its tool calls.
 async fn finish(
     store: &Store,
-    mut reply: api::ConversationMessage,
+    mut reply: api::SessionMessage,
     followed: bool,
-) -> api::ConversationMessage {
+) -> api::SessionMessage {
     record_runs(&store.state, &mut reply, store.started_at).await;
     reply.pending = None;
     reply.at = now_millis();
@@ -789,7 +787,7 @@ async fn finish(
 /// Saves each tool call's flow run with its step: the logs it comes from are
 /// kept in memory only. Reads the logs of the tools' flows since the reply
 /// started.
-async fn record_runs(state: &Arc<WebState>, reply: &mut api::ConversationMessage, since_ms: i64) {
+async fn record_runs(state: &Arc<WebState>, reply: &mut api::SessionMessage, since_ms: i64) {
     let Some(logs) = state.logs_store.as_ref() else {
         return;
     };
@@ -913,8 +911,8 @@ fn span_field<'a>(record: &'a StoredLog, key: &str) -> Option<&'a str> {
 /// starts.
 async fn stream_reply(
     store: &Store,
-    sender: &watch::Sender<api::ConversationMessage>,
-    reply: &mut api::ConversationMessage,
+    sender: &watch::Sender<api::SessionMessage>,
+    reply: &mut api::SessionMessage,
     request: Request,
 ) -> Result<Ending, Error> {
     let idle_timeout = reply_idle_timeout(&store.state);
@@ -1003,8 +1001,8 @@ async fn stream_reply(
 mod tests {
     use super::*;
 
-    fn message() -> api::ConversationMessage {
-        api::ConversationMessage {
+    fn message() -> api::SessionMessage {
+        api::SessionMessage {
             role: "assistant".to_string(),
             content: String::new(),
             at: 0,
@@ -1015,8 +1013,8 @@ mod tests {
         }
     }
 
-    fn conversation(messages: Vec<api::ConversationMessage>, updated_at: i64) -> api::Conversation {
-        api::Conversation {
+    fn session(messages: Vec<api::SessionMessage>, updated_at: i64) -> api::Session {
+        api::Session {
             id: "a1".to_string(),
             title: "a".to_string(),
             messages,
@@ -1127,13 +1125,13 @@ mod tests {
     #[test]
     fn the_history_leaves_out_failed_pending_and_empty_replies() {
         let reply =
-            |content: &str, pending: Option<bool>, error: Option<&str>| api::ConversationMessage {
+            |content: &str, pending: Option<bool>, error: Option<&str>| api::SessionMessage {
                 content: content.to_string(),
                 pending,
                 error: error.map(str::to_string),
                 ..message()
             };
-        let user = api::ConversationMessage {
+        let user = api::SessionMessage {
             role: "user".to_string(),
             ..reply("a", None, None)
         };
@@ -1202,8 +1200,8 @@ mod tests {
 
     #[test]
     fn a_pending_reply_not_saved_for_a_while_is_interrupted() {
-        let mut fresh = conversation(vec![message()], now_millis());
-        let mut stale = conversation(vec![message(), message()], now_millis() - 30_001);
+        let mut fresh = session(vec![message()], now_millis());
+        let mut stale = session(vec![message(), message()], now_millis() - 30_001);
 
         settle_interrupted(&mut fresh, Duration::from_secs(3));
         settle_interrupted(&mut stale, Duration::from_secs(3));
@@ -1224,12 +1222,12 @@ mod tests {
         assert!(title.chars().count() <= TITLE_MAX + 1);
     }
 
-    async fn store_with(stored: Option<api::Conversation>) -> Store {
+    async fn store_with(stored: Option<api::Session>) -> Store {
         let state = Arc::new(crate::web::tests::test_state());
-        let key = conversation_key(&state, None, "a1");
+        let key = session_key(&state, None, "a1");
         if let Some(stored) = stored {
             state
-                .conversation_cache
+                .session_cache
                 .put(&key, serde_json::to_vec(&stored).unwrap().into(), None)
                 .await
                 .unwrap();
@@ -1243,18 +1241,13 @@ mod tests {
         }
     }
 
-    async fn stored(store: &Store) -> Option<api::Conversation> {
-        let bytes = store
-            .state
-            .conversation_cache
-            .get(&store.key)
-            .await
-            .unwrap()?;
+    async fn stored(store: &Store) -> Option<api::Session> {
+        let bytes = store.state.session_cache.get(&store.key).await.unwrap()?;
         Some(serde_json::from_slice(&bytes).unwrap())
     }
 
-    fn written(content: &str) -> api::ConversationMessage {
-        api::ConversationMessage {
+    fn written(content: &str) -> api::SessionMessage {
+        api::SessionMessage {
             content: content.to_string(),
             ..message()
         }
@@ -1262,12 +1255,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_save_replaces_only_the_reply_and_keeps_a_rename_made_meanwhile() {
-        let store = store_with(Some(conversation(vec![message()], 1))).await;
+        let store = store_with(Some(session(vec![message()], 1))).await;
         let mut renamed = stored(&store).await.unwrap();
         renamed.title = "b".to_string();
         store
             .state
-            .conversation_cache
+            .session_cache
             .put(
                 &store.key,
                 serde_json::to_vec(&renamed).unwrap().into(),
@@ -1286,7 +1279,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_save_does_not_bring_back_a_deleted_conversation() {
+    async fn a_save_does_not_bring_back_a_deleted_session() {
         let store = store_with(None).await;
 
         let saved = store.save(&written("c"), false).await.unwrap();
@@ -1297,11 +1290,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_reply_stopped_from_another_pod_stays_as_stored() {
-        let stopped = api::ConversationMessage {
+        let stopped = api::SessionMessage {
             pending: None,
             ..written("a")
         };
-        let store = store_with(Some(conversation(vec![stopped], 1))).await;
+        let store = store_with(Some(session(vec![stopped], 1))).await;
 
         let saved = store.save(&written("b"), false).await.unwrap();
 
@@ -1313,7 +1306,7 @@ mod tests {
     }
 
     async fn unread_after_save(followed: bool) -> bool {
-        let store = store_with(Some(conversation(vec![message()], 1))).await;
+        let store = store_with(Some(session(vec![message()], 1))).await;
         crate::web::write_read_at(&store.state, None, "a1", 1)
             .await
             .unwrap();
@@ -1321,7 +1314,7 @@ mod tests {
         store.save(&written("c"), followed).await.unwrap();
 
         let bytes = serde_json::to_vec(&stored(&store).await.unwrap()).unwrap();
-        let seen = crate::web::conversation_for(&store.state, None, &store.key, &bytes)
+        let seen = crate::web::session_for(&store.state, None, &store.key, &bytes)
             .await
             .unwrap();
         seen.unread == Some(true)
@@ -1331,5 +1324,32 @@ mod tests {
     async fn a_followed_reply_stays_read_and_an_unwatched_one_turns_unread() {
         assert!(!unread_after_save(true).await);
         assert!(unread_after_save(false).await);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_first_edits_of_a_session_all_land() {
+        for _ in 0..300 {
+            let store = store_with(None).await;
+
+            let edits: Vec<_> = (0..10)
+                .map(|_| {
+                    let state = Arc::clone(&store.state);
+                    let key = store.key.clone();
+                    tokio::spawn(async move {
+                        edit(&state, &key, |stored| {
+                            let mut current = stored.unwrap_or_else(|| session(Vec::new(), 1));
+                            current.messages.push(message());
+                            Ok(Edit::Write(current, ()))
+                        })
+                        .await
+                    })
+                })
+                .collect();
+            for edit in edits {
+                edit.await.unwrap().unwrap();
+            }
+
+            assert_eq!(stored(&store).await.unwrap().messages.len(), 10);
+        }
     }
 }

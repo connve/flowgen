@@ -26,6 +26,7 @@ rig-agent = { workspace = true }
 rig-reqwest = { workspace = true }
 rig-rmcp = { workspace = true }
 rig-vertexai = { workspace = true }
+google-cloud-auth = { workspace = true }
 rmcp = { workspace = true }
 tokio-retry = { workspace = true }
 handlebars = { workspace = true }
@@ -46,6 +47,7 @@ url = { workspace = true }
 [dev-dependencies]
 bytes = { workspace = true }
 flowgen_core = { path = "../core", features = ["test-util"] }
+serde_yaml = { workspace = true }
 
 [lints]
 workspace = true

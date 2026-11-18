@@ -10,7 +10,6 @@ flow:
     tags: ["object-store", "csv", "nats", "iterate", "example"]
   require_leader_election: true
   tasks:
-
     - generate:
         name: trigger
         interval: 10s
@@ -33,7 +32,7 @@ flow:
 
     - nats_jetstream_publish:
         name: publish_to_queue
-        credentials_path: /etc/nats/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/nats.json"
         url: "{{env.NATS_URL}}"
         subject: rows.received
         stream:

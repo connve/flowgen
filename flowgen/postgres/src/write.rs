@@ -535,7 +535,8 @@ impl Runner for Processor {
                     .field("query_timeout", &config.query_timeout)
                     .build(),
                 || async {
-                    let credentials = crate::client::read_credentials(&config.credentials_path)?;
+                    let credentials =
+                        crate::client::load_credentials(&config.credentials_path).await?;
                     Ok(Client::new(
                         &credentials,
                         config.max_connections,

@@ -7,7 +7,7 @@ Publishes events to a NATS JetStream subject.
 ```yaml
 - nats_jetstream_publish:
     name: publish_results
-    credentials_path: /etc/nats/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/nats.json"
     url: "{{env.NATS_URL}}"
     subject: "results.processed"
 ```
@@ -66,7 +66,7 @@ If two tasks share a stream and one task sets `max_messages_per_subject`, the ot
 ```yaml
 - nats_jetstream_publish:
     name: publish_created
-    credentials_path: /etc/nats/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/nats.json"
     subject: "orders.created"
     stream:
       name: ORDERS
@@ -78,7 +78,7 @@ If two tasks share a stream and one task sets `max_messages_per_subject`, the ot
 
 - nats_jetstream_publish:
     name: publish_updated
-    credentials_path: /etc/nats/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/nats.json"
     subject: "orders.updated"
     stream:
       name: ORDERS
@@ -130,7 +130,7 @@ The safest way to avoid accidental cross-task interference is to use a separate 
 ```yaml
 - nats_jetstream_publish:
     name: publish_orders
-    credentials_path: /etc/nats/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/nats.json"
     subject: "orders.processed.{{event.data.region}}"
     stream:
       name: PROCESSED_ORDERS

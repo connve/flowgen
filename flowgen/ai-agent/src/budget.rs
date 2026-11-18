@@ -212,26 +212,29 @@ impl Budget {
     }
 
     /// Adds `added` to the count under `key`, again when another writer won the race.
+    /// The revision is read before the value, so a write between the two reads fails
+    /// the update instead of being overwritten.
     async fn add(&self, key: &str, added: u64) -> Result<(), Error> {
         let keep = u64::try_from(chrono::Duration::days(KEEP_DAYS).num_seconds()).ok();
         loop {
-            let written = match self.cache.get_with_revision(key).await {
-                Ok(Some((value, revision))) => {
+            let latest = match self.cache.get_revision(key).await {
+                Ok(latest) => latest,
+                Err(source) => return Err(Error::Cache { source }),
+            };
+            let written = match (self.cache.get_with_revision(key).await, latest) {
+                (Ok(Some((value, revision))), _) => {
                     let used = count(key, &value)?.saturating_add(added);
                     self.cache
                         .update(key, used.to_string().into(), revision, keep)
                         .await
                 }
-                Ok(None) => match self.cache.get_revision(key).await {
-                    Ok(Some(deleted)) => {
-                        self.cache
-                            .update(key, added.to_string().into(), deleted, keep)
-                            .await
-                    }
-                    Ok(None) => self.cache.create(key, added.to_string().into(), keep).await,
-                    Err(source) => return Err(Error::Cache { source }),
-                },
-                Err(source) => return Err(Error::Cache { source }),
+                (Ok(None), Some(deleted)) => {
+                    self.cache
+                        .update(key, added.to_string().into(), deleted, keep)
+                        .await
+                }
+                (Ok(None), None) => self.cache.create(key, added.to_string().into(), keep).await,
+                (Err(source), _) => return Err(Error::Cache { source }),
             };
             match written {
                 Ok(_) => return Ok(()),
@@ -486,25 +489,27 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn concurrent_spends_all_count() {
-        let budget = budget(vec![limit(
-            Scope::Workspace,
-            Period::Day,
-            Some(1_000),
-            None,
-        )]);
+    async fn concurrent_first_spends_all_count() {
+        for _ in 0..300 {
+            let budget = budget(vec![limit(
+                Scope::Workspace,
+                Period::Day,
+                Some(1_000),
+                None,
+            )]);
 
-        let spends: Vec<_> = (0..50)
-            .map(|_| {
-                let budget = Arc::clone(&budget);
-                tokio::spawn(async move { budget.spend(None, "cheap", usage(1, 1)).await })
-            })
-            .collect();
-        for spend in spends {
-            spend.await.unwrap().unwrap();
+            let spends: Vec<_> = (0..10)
+                .map(|_| {
+                    let budget = Arc::clone(&budget);
+                    tokio::spawn(async move { budget.spend(None, "cheap", usage(1, 1)).await })
+                })
+                .collect();
+            for spend in spends {
+                spend.await.unwrap().unwrap();
+            }
+
+            let key = key(&budget.config.limits[0], None, chrono::Utc::now());
+            assert_eq!(budget.used(&key).await.unwrap(), 20);
         }
-
-        let key = key(&budget.config.limits[0], None, chrono::Utc::now());
-        assert_eq!(budget.used(&key).await.unwrap(), 100);
     }
 }

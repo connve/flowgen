@@ -45,6 +45,7 @@ export const navigation: NavSection[] = [
 			{ title: 'Why Flowgen', href: '/getting-started/why-flowgen' },
 			{ title: 'Installation', href: '/getting-started/installation' },
 			{ title: 'Quick Start', href: '/getting-started/quickstart' },
+			{ title: 'Agent setup', href: '/getting-started/agent-setup' },
 			{ title: 'WireGuard Gateway', href: '/getting-started/wireguard-gateway' }
 		]
 	},
@@ -61,6 +62,7 @@ export const navigation: NavSection[] = [
 			{ title: 'Credentials', href: '/concepts/credentials' },
 			{ title: 'Authentication', href: '/concepts/auth' },
 			{ title: 'Authoring', href: '/concepts/authoring' },
+			{ title: 'Hubs', href: '/concepts/hubs' },
 			{ title: 'Telemetry', href: '/concepts/telemetry' },
 			{ title: 'Configuration', href: '/concepts/configuration' }
 		]
@@ -150,6 +152,15 @@ export const navigation: NavSection[] = [
 		]
 	},
 	{
+		title: 'Key-Value Store',
+		icon: '/icons/kv.svg',
+		items: [
+			{ title: 'Overview', href: '/kv-store' },
+			{ title: 'KV Store', href: '/kv-store/kv-store' },
+			{ title: 'KV Watch', href: '/kv-store/kv-watch' }
+		]
+	},
+	{
 		title: 'Klaviyo',
 		icon: '/icons/klaviyo.png',
 		items: [
@@ -194,8 +205,7 @@ export const navigation: NavSection[] = [
 		items: [
 			{ title: 'Overview', href: '/nats' },
 			{ title: 'Subscribe', href: '/nats/subscribe' },
-			{ title: 'Publish', href: '/nats/publish' },
-			{ title: 'KV Store', href: '/nats/kv-store' }
+			{ title: 'Publish', href: '/nats/publish' }
 		]
 	},
 	{

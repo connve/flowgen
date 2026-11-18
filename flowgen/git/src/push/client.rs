@@ -1,5 +1,6 @@
 //! Commits file changes on top of a remote branch and pushes them over smart
-//! HTTP (`git-receive-pack`), without a git binary.
+//! HTTP (`git-receive-pack`), or onto a branch checked out on this machine,
+//! without a git binary.
 //!
 //! The commit is built with gix in a temporary bare shallow fetch; the pack and the
 //! receive-pack exchange are written here because gix has no push support.
@@ -8,18 +9,20 @@ use crate::remote::{CloneError, Credentials};
 use gix::objs::tree::EntryKind;
 use gix::odb::pack::data::entry::Header as PackEntryHeader;
 use gix::protocol::transport::packetline;
+use gix::refs::file::transaction::prepare::Error as RefPrepareError;
 use gix::ObjectId;
 use secrecy::ExposeSecret;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
-use std::sync::atomic::AtomicBool;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Failure to commit or push.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("Invalid file path '{path}': must be relative and name a file, without '.', '..' or '.git' segments")]
     InvalidPath { path: String },
-    #[error("'{path}' changed in the repository. Please propose the change again.")]
+    #[error("'{path}' changed on the branch since the change was prepared")]
     Conflict { path: String },
     #[error("Nothing to push to an empty repository")]
     NothingToPush,
@@ -108,8 +111,26 @@ pub enum Error {
     ServerError { message: String },
     #[error("Branch '{branch}' moved while the commit was being built")]
     BranchMoved { branch: String },
+    #[error("The commit ran out of time before the branch was moved")]
+    Interrupted,
     #[error("Failed to create a temporary directory: {source}")]
     TempDir {
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("Failed to open the repository at {path}: {source}")]
+    OpenRepository {
+        path: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    #[error("Branch '{branch}' is not checked out in the repository")]
+    NotCheckedOut { branch: String },
+    #[error("The repository has no branch checked out; check one out to commit to it")]
+    DetachedHead,
+    #[error("Failed to update '{path}' in the working tree: {source}")]
+    Worktree {
+        path: String,
         #[source]
         source: std::io::Error,
     },
@@ -125,6 +146,23 @@ fn write_error(source: impl std::error::Error + Send + Sync + 'static) -> Error 
     Error::WriteRepository {
         source: Box::new(source),
     }
+}
+
+/// Gives `repo`, in memory only, `author` as its user when the machine has
+/// none, since moving a branch writes the user into the reflog.
+pub(crate) fn ensure_committer(repo: &mut gix::Repository, author: &Author) -> Result<(), Error> {
+    if let Some(Ok(_)) = repo.committer() {
+        return Ok(());
+    }
+    let mut config = repo.config_snapshot_mut();
+    config
+        .set_value(&gix::config::tree::User::NAME, author.name.as_str())
+        .map_err(write_error)?;
+    config
+        .set_value(&gix::config::tree::User::EMAIL, author.email.as_str())
+        .map_err(write_error)?;
+    config.commit().map_err(write_error)?;
+    Ok(())
 }
 
 /// What a file must contain on the branch for a change to apply.
@@ -237,20 +275,7 @@ impl Push {
         message: String,
     ) -> Result<Pushed, Error> {
         crate::remote::check_url(&self.repository_url, self.credentials.as_ref())?;
-        let prefix = match &self.path {
-            Some(path) => normalize_path(path)?,
-            None => Vec::new(),
-        };
-        let mut full_paths = Vec::with_capacity(changes.len());
-        for change in changes {
-            let segments = normalize_path(&change.path)?;
-            if segments.is_empty() {
-                return Err(Error::InvalidPath { path: change.path });
-            }
-            let mut full = prefix.clone();
-            full.extend(segments);
-            full_paths.push((full.join("/"), change));
-        }
+        let (prefix, full_paths) = resolve(self.path.as_deref(), changes)?;
 
         let advertised = self.advertisement().await?;
         if advertised.tip.is_none() && advertised.has_refs {
@@ -262,7 +287,6 @@ impl Push {
         let capabilities = advertised.capabilities;
         let built = {
             let push = self.clone();
-            let prefix = prefix.join("/");
             crate::remote::run_blocking(self.timeout, move |interrupt| {
                 push.build(
                     tip.is_some(),
@@ -450,31 +474,7 @@ impl Push {
             None => ObjectId::empty_tree(repo.object_hash()),
         };
 
-        let mut kinds = Vec::with_capacity(changes.len());
-        for (path, change) in changes {
-            let current = entry_at(&repo, base_tree, path)?;
-            check_expected(path, change, &current)?;
-            kinds.push(match current {
-                Some(Current::File { kind, .. }) => kind,
-                _ => EntryKind::Blob,
-            });
-        }
-
-        let mut editor = repo.edit_tree(base_tree).map_err(read_error)?;
-        for ((path, change), kind) in changes.iter().zip(kinds) {
-            match &change.content {
-                Some(content) => {
-                    let blob = repo.write_blob(content).map_err(write_error)?;
-                    editor
-                        .upsert(path.as_str(), kind, blob)
-                        .map_err(write_error)?;
-                }
-                None => {
-                    editor.remove(path.as_str()).map_err(write_error)?;
-                }
-            }
-        }
-        let tree = editor.write().map_err(write_error)?.detach();
+        let tree = apply(&repo, base_tree, changes)?;
 
         if tree == base_tree {
             let commit = match parent {
@@ -512,9 +512,332 @@ impl Push {
     }
 }
 
+/// Where to commit on this machine: a repository with its branch checked out.
+#[derive(Debug, Clone)]
+pub struct Commit {
+    /// Root of the repository's working tree.
+    pub repository_path: PathBuf,
+    /// Branch the commit lands on, which must be the one checked out; `None`
+    /// is the checked-out branch, even one without commits yet.
+    pub branch: Option<String>,
+    /// Directory within the repository the changes are relative to.
+    pub path: Option<String>,
+    /// Committer; `None` commits as the author.
+    pub committer: Option<Author>,
+    /// Key that signs the commit.
+    pub signing_key: Option<std::sync::Arc<ssh_key::PrivateKey>>,
+    /// Time budget for building the commit; `None` waits indefinitely.
+    pub timeout: Option<std::time::Duration>,
+}
+
+impl Commit {
+    /// Commits `changes` on top of the branch, writes the files into the
+    /// working tree and the index, then moves the branch to the commit. A file
+    /// whose working copy differs from the branch is a [`Error::Conflict`], so
+    /// edits not yet committed are never overwritten. Without `author` the
+    /// commit is the git user's of this machine.
+    pub async fn commit(
+        &self,
+        changes: Vec<FileChange>,
+        author: Option<Author>,
+        message: String,
+    ) -> Result<Pushed, Error> {
+        let commit = self.clone();
+        crate::remote::run_blocking(self.timeout, move |interrupt| {
+            commit.commit_blocking(changes, author, &message, interrupt)
+        })
+        .await?
+    }
+
+    /// [`Self::commit`] on the calling thread; once `interrupt` is set the
+    /// branch is left where it is.
+    pub(crate) fn commit_blocking(
+        &self,
+        changes: Vec<FileChange>,
+        author: Option<Author>,
+        message: &str,
+        interrupt: &AtomicBool,
+    ) -> Result<Pushed, Error> {
+        let (prefix, full_paths) = resolve(self.path.as_deref(), changes)?;
+        self.write(&full_paths, &author, message, &prefix, interrupt)
+    }
+
+    fn write(
+        &self,
+        changes: &[(String, FileChange)],
+        author: &Option<Author>,
+        message: &str,
+        prefix: &str,
+        interrupt: &AtomicBool,
+    ) -> Result<Pushed, Error> {
+        let mut repo =
+            gix::open(&self.repository_path).map_err(|source| Error::OpenRepository {
+                path: self.repository_path.display().to_string(),
+                source: Box::new(source),
+            })?;
+        let author = match author {
+            Some(author) => author.clone(),
+            None => {
+                let (name, email) = crate::workspace::machine_user(&repo);
+                Author { name, email }
+            }
+        };
+        ensure_committer(&mut repo, &author)?;
+        let checked_out = repo.head_name().map_err(read_error)?;
+        let branch = match (&self.branch, checked_out) {
+            (Some(branch), Some(head)) if head.shorten() == branch.as_str() => branch.clone(),
+            (Some(branch), _) => {
+                return Err(Error::NotCheckedOut {
+                    branch: branch.clone(),
+                })
+            }
+            (None, Some(head)) => head.shorten().to_string(),
+            (None, None) => return Err(Error::DetachedHead),
+        };
+        let root = match repo.workdir() {
+            Some(root) => root.to_path_buf(),
+            None => return Err(Error::NotCheckedOut { branch }),
+        };
+        let reference = format!("refs/heads/{branch}");
+
+        let parent = match repo
+            .try_find_reference(reference.as_str())
+            .map_err(read_error)?
+        {
+            Some(mut found) => Some(found.peel_to_id().map_err(read_error)?.detach()),
+            None => None,
+        };
+        let base_tree = match parent {
+            Some(parent) => repo
+                .find_commit(parent)
+                .map_err(read_error)?
+                .tree_id()
+                .map_err(read_error)?
+                .detach(),
+            None => ObjectId::empty_tree(repo.object_hash()),
+        };
+        for (path, change) in changes {
+            check_worktree(&root, path, change, &entry_at(&repo, base_tree, path)?)?;
+        }
+        let tree = apply(&repo, base_tree, changes)?;
+
+        if tree == base_tree {
+            return match parent {
+                Some(parent) => Ok(Pushed {
+                    commit: parent.to_string(),
+                    changed: false,
+                    files: files_under(&repo, tree, prefix)?,
+                }),
+                None => Err(Error::NothingToPush),
+            };
+        }
+
+        let commit = write_commit(
+            &repo,
+            tree,
+            parent,
+            &author,
+            self.committer.as_ref(),
+            message,
+            self.signing_key.as_deref(),
+        )?;
+        for (path, change) in changes {
+            write_worktree(&root, path, change.content.as_deref())?;
+        }
+        update_index(&repo, &root, tree, changes)?;
+
+        if interrupt.load(Ordering::Relaxed) {
+            return Err(Error::Interrupted);
+        }
+        let previous = match parent {
+            Some(parent) => gix::refs::transaction::PreviousValue::MustExistAndMatch(
+                gix::refs::Target::Object(parent),
+            ),
+            None => gix::refs::transaction::PreviousValue::MustNotExist,
+        };
+        match repo.reference(
+            reference.as_str(),
+            commit,
+            previous,
+            format!("commit: {message}"),
+        ) {
+            Ok(_) => {}
+            Err(gix::reference::edit::Error::FileTransactionPrepare(
+                RefPrepareError::ReferenceOutOfDate { .. }
+                | RefPrepareError::MustExist { .. }
+                | RefPrepareError::MustNotExist { .. },
+            )) => return Err(Error::BranchMoved { branch }),
+            Err(error) => return Err(write_error(error)),
+        }
+
+        Ok(Pushed {
+            commit: commit.to_string(),
+            changed: true,
+            files: files_under(&repo, tree, prefix)?,
+        })
+    }
+}
+
+/// Points the index entries of `changes` at `tree` and the files just written,
+/// keeping every other entry, so work staged elsewhere survives the commit.
+fn update_index(
+    repo: &gix::Repository,
+    root: &Path,
+    tree: ObjectId,
+    changes: &[(String, FileChange)],
+) -> Result<(), Error> {
+    let mut index = match repo.index_path().exists() {
+        true => repo.open_index().map_err(write_error)?,
+        false => repo
+            .index_from_tree(&ObjectId::empty_tree(repo.object_hash()))
+            .map_err(write_error)?,
+    };
+    let changed: HashSet<&gix::bstr::BStr> = changes
+        .iter()
+        .map(|(path, _)| gix::bstr::BStr::new(path.as_str()))
+        .collect();
+    index.remove_entries(|_, path, _| changed.contains(&path));
+    index.remove_tree();
+    let tree = read_tree(repo, tree)?;
+    for (path, _) in changes {
+        let entry = match tree.lookup_entry_by_path(path).map_err(read_error)? {
+            Some(entry) => entry,
+            None => continue,
+        };
+        let mode = match entry.mode().kind() {
+            EntryKind::BlobExecutable => gix::index::entry::Mode::FILE_EXECUTABLE,
+            _ => gix::index::entry::Mode::FILE,
+        };
+        let metadata =
+            gix::index::fs::Metadata::from_path_no_follow(&root.join(path)).map_err(|source| {
+                Error::Worktree {
+                    path: path.clone(),
+                    source,
+                }
+            })?;
+        let stat = gix::index::entry::Stat::from_fs(&metadata).map_err(write_error)?;
+        index.dangerously_push_entry(
+            stat,
+            entry.object_id(),
+            gix::index::entry::Flags::empty(),
+            mode,
+            gix::bstr::BStr::new(path.as_str()),
+        );
+    }
+    index.sort_entries();
+    index
+        .write(gix::index::write::Options::default())
+        .map_err(write_error)
+}
+
+/// The joined `path` prefix, and each change with its path inside the repository.
+fn resolve(
+    path: Option<&str>,
+    changes: Vec<FileChange>,
+) -> Result<(String, Vec<(String, FileChange)>), Error> {
+    let prefix = match path {
+        Some(path) => normalize_path(path)?,
+        None => Vec::new(),
+    };
+    let mut full_paths = Vec::with_capacity(changes.len());
+    for change in changes {
+        let segments = normalize_path(&change.path)?;
+        if segments.is_empty() {
+            return Err(Error::InvalidPath { path: change.path });
+        }
+        let mut full = prefix.clone();
+        full.extend(segments);
+        full_paths.push((full.join("/"), change));
+    }
+    Ok((prefix.join("/"), full_paths))
+}
+
+/// `base_tree` with `changes` applied, each checked against what it holds.
+fn apply(
+    repo: &gix::Repository,
+    base_tree: ObjectId,
+    changes: &[(String, FileChange)],
+) -> Result<ObjectId, Error> {
+    let mut kinds = Vec::with_capacity(changes.len());
+    for (path, change) in changes {
+        let current = entry_at(repo, base_tree, path)?;
+        check_expected(path, change, &current)?;
+        kinds.push(match current {
+            Some(Current::File { kind, .. }) => kind,
+            _ => EntryKind::Blob,
+        });
+    }
+
+    let mut editor = repo.edit_tree(base_tree).map_err(read_error)?;
+    for ((path, change), kind) in changes.iter().zip(kinds) {
+        match &change.content {
+            Some(content) => {
+                let blob = repo.write_blob(content).map_err(write_error)?;
+                editor
+                    .upsert(path.as_str(), kind, blob)
+                    .map_err(write_error)?;
+            }
+            None => {
+                editor.remove(path.as_str()).map_err(write_error)?;
+            }
+        }
+    }
+    Ok(editor.write().map_err(write_error)?.detach())
+}
+
+/// The working copy of `path` must hold what the branch holds, or already the
+/// change's result.
+fn check_worktree(
+    root: &Path,
+    path: &str,
+    change: &FileChange,
+    current: &Option<Current>,
+) -> Result<(), Error> {
+    let on_disk = match std::fs::read(root.join(path)) {
+        Ok(content) => Some(content),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(source) => {
+            return Err(Error::Worktree {
+                path: path.to_string(),
+                source,
+            })
+        }
+    };
+    let committed = match current {
+        Some(Current::File { content, .. }) => Some(content),
+        _ => None,
+    };
+    match on_disk.as_ref() == committed || on_disk == change.content {
+        true => Ok(()),
+        false => Err(Error::Conflict {
+            path: path.to_string(),
+        }),
+    }
+}
+
+/// Writes `content` to `path` in the working tree, or removes it when `None`.
+fn write_worktree(root: &Path, path: &str, content: Option<&[u8]>) -> Result<(), Error> {
+    let file = root.join(path);
+    let written = match content {
+        Some(content) => match file.parent() {
+            Some(parent) => std::fs::create_dir_all(parent),
+            None => Ok(()),
+        }
+        .and_then(|()| std::fs::write(&file, content)),
+        None => match std::fs::remove_file(&file) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            removed => removed,
+        },
+    };
+    written.map_err(|source| Error::Worktree {
+        path: path.to_string(),
+        source,
+    })
+}
+
 /// Splits a relative path into its segments, rejecting anything that could
 /// leave the directory it is relative to.
-fn normalize_path(path: &str) -> Result<Vec<String>, Error> {
+pub(crate) fn normalize_path(path: &str) -> Result<Vec<String>, Error> {
     let segments: Vec<String> = path
         .split('/')
         .filter(|segment| !segment.is_empty())
@@ -722,7 +1045,7 @@ fn new_objects(
 }
 
 /// Files under `prefix` in `tree`, with paths relative to `prefix`.
-fn files_under(
+pub(crate) fn files_under(
     repo: &gix::Repository,
     tree: ObjectId,
     prefix: &str,
@@ -1219,6 +1542,353 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    fn author() -> Option<Author> {
+        Some(Author {
+            name: "a".to_string(),
+            email: "a@example.com".to_string(),
+        })
+    }
+
+    fn local(root: &Path) -> Commit {
+        Commit {
+            repository_path: root.to_path_buf(),
+            branch: None,
+            path: None,
+            committer: None,
+            signing_key: None,
+            timeout: None,
+        }
+    }
+
+    fn edit(path: &str, content: Option<&str>, expected: Expected) -> FileChange {
+        FileChange {
+            path: path.to_string(),
+            content: content.map(|c| c.as_bytes().to_vec()),
+            expected,
+        }
+    }
+
+    fn workspace(files: &[(String, &str)]) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().join("w");
+        crate::workspace::init(&root, files).unwrap();
+        (dir, root)
+    }
+
+    fn clean(root: &Path) -> bool {
+        gix::open(root)
+            .unwrap()
+            .status(gix::progress::Discard)
+            .unwrap()
+            .into_index_worktree_iter(Vec::new())
+            .unwrap()
+            .count()
+            == 0
+    }
+
+    #[tokio::test]
+    async fn a_local_commit_moves_the_branch_and_updates_the_checked_out_files() {
+        let (_dir, root) = workspace(&[("flows/a.yaml".to_string(), "a")]);
+        let first = gix::open(&root).unwrap().head_id().unwrap().detach();
+
+        let committed = local(&root)
+            .commit(
+                vec![
+                    edit("flows/a.yaml", Some("a2"), Expected::Content(b"a".to_vec())),
+                    edit("flows/nested/b.yaml", Some("b"), Expected::Missing),
+                ],
+                author(),
+                "Change a".to_string(),
+            )
+            .await
+            .unwrap();
+
+        assert!(committed.changed);
+        let repo = gix::open(&root).unwrap();
+        let head = repo.head_commit().unwrap();
+        assert_eq!(head.id.to_string(), committed.commit);
+        assert_eq!(head.parent_ids().next().unwrap().detach(), first);
+        assert_eq!(head.message_raw_sloppy(), "Change a");
+        assert_eq!(
+            std::fs::read_to_string(root.join("flows/a.yaml")).unwrap(),
+            "a2"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("flows/nested/b.yaml")).unwrap(),
+            "b"
+        );
+        assert!(clean(&root), "The index matches the commit");
+        assert!(committed
+            .files
+            .iter()
+            .any(|f| f.path == "flows/nested/b.yaml"));
+
+        let deleted = local(&root)
+            .commit(
+                vec![edit(
+                    "flows/a.yaml",
+                    None,
+                    Expected::Content(b"a2".to_vec()),
+                )],
+                author(),
+                "Remove a".to_string(),
+            )
+            .await
+            .unwrap();
+        assert!(deleted.changed);
+        assert!(!root.join("flows/a.yaml").exists());
+        assert!(clean(&root));
+
+        let again = local(&root)
+            .commit(
+                vec![edit(
+                    "flows/a.yaml",
+                    None,
+                    Expected::Content(b"a2".to_vec()),
+                )],
+                author(),
+                "Remove a".to_string(),
+            )
+            .await
+            .unwrap();
+        assert!(!again.changed);
+        assert_eq!(again.commit, deleted.commit);
+    }
+
+    #[tokio::test]
+    async fn an_uncommitted_edit_is_a_conflict_and_is_kept() {
+        let (_dir, root) = workspace(&[("flows/a.yaml".to_string(), "a")]);
+        let first = gix::open(&root).unwrap().head_id().unwrap().detach();
+        std::fs::write(root.join("flows/a.yaml"), "edited").unwrap();
+
+        let result = local(&root)
+            .commit(
+                vec![edit("flows/a.yaml", Some("a2"), Expected::Any)],
+                author(),
+                "Change a".to_string(),
+            )
+            .await;
+
+        assert!(matches!(result, Err(Error::Conflict { path }) if path == "flows/a.yaml"));
+        assert_eq!(
+            std::fs::read_to_string(root.join("flows/a.yaml")).unwrap(),
+            "edited"
+        );
+        assert_eq!(gix::open(&root).unwrap().head_id().unwrap().detach(), first);
+    }
+
+    #[tokio::test]
+    async fn a_change_prepared_against_other_content_is_a_conflict() {
+        let (_dir, root) = workspace(&[("flows/a.yaml".to_string(), "a")]);
+
+        let result = local(&root)
+            .commit(
+                vec![edit(
+                    "flows/a.yaml",
+                    Some("a2"),
+                    Expected::Content(b"old".to_vec()),
+                )],
+                author(),
+                "Change a".to_string(),
+            )
+            .await;
+
+        assert!(matches!(result, Err(Error::Conflict { .. })));
+        assert_eq!(
+            std::fs::read_to_string(root.join("flows/a.yaml")).unwrap(),
+            "a"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_an_author_the_commit_is_the_machine_user() {
+        let (_dir, root) = workspace(&[]);
+        let expected = crate::workspace::machine_user(&gix::open(&root).unwrap());
+
+        local(&root)
+            .commit(
+                vec![edit("flows/a.yaml", Some("a"), Expected::Missing)],
+                None,
+                "Add a".to_string(),
+            )
+            .await
+            .unwrap();
+
+        let repo = gix::open(&root).unwrap();
+        let head = repo.head_commit().unwrap();
+        let author = head.author().unwrap();
+        assert_eq!(
+            (author.name.to_string(), author.email.to_string()),
+            expected
+        );
+    }
+
+    #[tokio::test]
+    async fn only_the_checked_out_branch_is_committed_to() {
+        let (_dir, root) = workspace(&[]);
+        let mut other = local(&root);
+        other.branch = Some("release".to_string());
+
+        let result = other
+            .commit(
+                vec![edit("flows/a.yaml", Some("a"), Expected::Missing)],
+                author(),
+                "Add a".to_string(),
+            )
+            .await;
+
+        assert!(matches!(result, Err(Error::NotCheckedOut { branch }) if branch == "release"));
+        assert!(!root.join("flows/a.yaml").exists());
+    }
+
+    #[tokio::test]
+    async fn without_a_branch_the_commit_lands_on_the_checked_out_one() {
+        let (_dir, root) = workspace(&[]);
+        let mut repo = gix::open(&root).unwrap();
+        ensure_committer(
+            &mut repo,
+            &Author {
+                name: "a".to_string(),
+                email: "a@example.com".to_string(),
+            },
+        )
+        .unwrap();
+        let first = repo.head_id().unwrap().detach();
+        repo.reference(
+            "refs/heads/master",
+            first,
+            gix::refs::transaction::PreviousValue::MustNotExist,
+            "branch",
+        )
+        .unwrap();
+        std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/master\n").unwrap();
+
+        let committed = local(&root)
+            .commit(
+                vec![edit("flows/a.yaml", Some("a"), Expected::Missing)],
+                author(),
+                "Add a".to_string(),
+            )
+            .await
+            .unwrap();
+
+        let repo = gix::open(&root).unwrap();
+        let master = repo
+            .find_reference("refs/heads/master")
+            .unwrap()
+            .peel_to_id()
+            .unwrap()
+            .detach();
+        assert_eq!(master.to_string(), committed.commit);
+        assert!(clean(&root));
+    }
+
+    #[tokio::test]
+    async fn work_staged_in_other_files_survives_a_commit() {
+        let (_dir, root) = workspace(&[("notes.txt".to_string(), "one")]);
+        let repo = gix::open(&root).unwrap();
+        let staged = repo.write_blob(b"two").unwrap().detach();
+        std::fs::write(root.join("notes.txt"), "two").unwrap();
+        let mut index = repo.open_index().unwrap();
+        index
+            .entry_mut_by_path_and_stage(
+                gix::bstr::BStr::new("notes.txt"),
+                gix::index::entry::Stage::Unconflicted,
+            )
+            .unwrap()
+            .id = staged;
+        index.write(gix::index::write::Options::default()).unwrap();
+
+        local(&root)
+            .commit(
+                vec![edit("flows/a.yaml", Some("a"), Expected::Missing)],
+                author(),
+                "Add a".to_string(),
+            )
+            .await
+            .unwrap();
+
+        let index = gix::open(&root).unwrap().open_index().unwrap();
+        let entry = |path: &str| index.entry_by_path(gix::bstr::BStr::new(path)).unwrap().id;
+        assert_eq!(entry("notes.txt"), staged, "The staged edit is kept");
+        assert_eq!(
+            entry("flows/a.yaml"),
+            gix::open(&root)
+                .unwrap()
+                .head_tree()
+                .unwrap()
+                .lookup_entry_by_path("flows/a.yaml")
+                .unwrap()
+                .unwrap()
+                .object_id()
+        );
+    }
+
+    fn head(root: &Path) -> ObjectId {
+        gix::open(root).unwrap().head_id().unwrap().detach()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_write_leaves_the_branch_so_a_retry_commits() {
+        let (_dir, root) = workspace(&[]);
+        let first = head(&root);
+        std::os::unix::fs::symlink(root.join("missing"), root.join("docs")).unwrap();
+        let change = || vec![edit("docs/a.yaml", Some("a"), Expected::Missing)];
+
+        let failed = local(&root)
+            .commit(change(), author(), "Add a".to_string())
+            .await;
+
+        assert!(matches!(failed, Err(Error::Worktree { .. })), "{failed:?}");
+        assert_eq!(head(&root), first);
+        std::fs::remove_file(root.join("docs")).unwrap();
+        let committed = local(&root)
+            .commit(change(), author(), "Add a".to_string())
+            .await
+            .unwrap();
+        assert_eq!(head(&root).to_string(), committed.commit);
+        assert!(clean(&root));
+    }
+
+    #[tokio::test]
+    async fn a_locked_branch_is_a_write_error_not_a_moved_branch() {
+        let (_dir, root) = workspace(&[]);
+        let first = head(&root);
+        let branch = gix::open(&root).unwrap().head_name().unwrap().unwrap();
+        std::fs::write(root.join(format!(".git/{}.lock", branch.as_bstr())), "").unwrap();
+
+        let result = local(&root)
+            .commit(
+                vec![edit("flows/a.yaml", Some("a"), Expected::Missing)],
+                author(),
+                "Add a".to_string(),
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(Error::WriteRepository { .. })),
+            "{result:?}"
+        );
+        assert_eq!(head(&root), first);
+    }
+
+    #[test]
+    fn an_interrupted_commit_leaves_the_branch() {
+        let (_dir, root) = workspace(&[]);
+        let first = head(&root);
+
+        let result = local(&root).commit_blocking(
+            vec![edit("flows/a.yaml", Some("a"), Expected::Missing)],
+            author(),
+            "Add a",
+            &AtomicBool::new(true),
+        );
+
+        assert!(matches!(result, Err(Error::Interrupted)), "{result:?}");
+        assert_eq!(head(&root), first);
     }
 
     #[test]

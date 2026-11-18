@@ -11,7 +11,6 @@ flow:
     tags: ["bigquery", "gcp", "storage-write", "webhook", "example"]
   require_leader_election: true
   tasks:
-
     # POST /api/flowgen/workers/v1/webhooks/events; each POST becomes one event.
     - http_endpoint:
         name: receive_webhook
@@ -21,7 +20,7 @@ flow:
     # Task-level retry covers transient BigQuery API failures.
     - gcp_bigquery_storage_write:
         name: stream_to_bigquery
-        credentials_path: /etc/gcp/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/gcp.json"
         project_id: my-project-id
         dataset_id: analytics
         table_id: events

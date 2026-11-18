@@ -14,7 +14,6 @@ flow:
     tags: ["salesforce", "bulk-api", "incremental", "cron", "example"]
   require_leader_election: true
   tasks:
-
     - generate:
         name: trigger
         cron: "*/5 * * * *"
@@ -28,7 +27,7 @@ flow:
     - salesforce_bulkapi_query_job:
         name: query_account
         operation: create
-        credentials_path: /etc/sfdc/credentials.json
+        credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/salesforce.json"
         query_operation: query
         query:
           resource: salesforce/query_account.soql

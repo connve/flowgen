@@ -31,13 +31,13 @@
 		gap: 1rem;
 		margin-top: 3rem;
 		padding-top: 1.5rem;
-		border-top: 1px solid rgb(0 0 0 / 0.08);
+		border-top: 1px solid var(--color-base-200);
 	}
 	.prev-next-link {
 		display: flex;
 		flex-direction: column;
 		padding: 0.75rem 1rem;
-		border: 1px solid rgb(0 0 0 / 0.1);
+		border: 1px solid var(--color-base-300);
 		border-radius: 0.5rem;
 		text-decoration: none;
 		color: inherit;
@@ -48,8 +48,14 @@
 			transform 0.15s ease;
 	}
 	.prev-next-link:hover {
-		border-color: #006b55;
+		border-color: var(--color-primary);
 		transform: translateY(-1px);
+	}
+	@media (max-width: 40rem) {
+		.prev-next-link {
+			flex: 1 1 0;
+			min-width: 0;
+		}
 	}
 	.prev-next-next {
 		align-items: flex-end;

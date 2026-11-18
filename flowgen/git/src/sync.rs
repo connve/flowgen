@@ -1,7 +1,7 @@
-//! The `git_sync` task: clones or pulls a repository and emits file contents as events.
+//! The `git_sync` task: reads the tip of a branch and emits its files.
 //!
-//! Each file found under the configured path is emitted as a separate event
-//! with `{path, content, commit}` data. Downstream tasks decide what to do
+//! Every file found under the configured path is emitted in one event,
+//! `{commit, files: [{path, content}]}`. Downstream tasks decide what to do
 //! with the files (parse, store, transform).
 
 use crate::remote::{check_url, load_credentials};
@@ -10,21 +10,18 @@ use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
 use flowgen_core::task::TaskConfig;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tracing::{error, info};
-use walkdir::WalkDir;
+use tracing::{debug, error};
 
 pub use crate::remote::Credentials;
 
-fn default_branch() -> String {
-    "main".to_string()
-}
+/// The branch a remote repository is read at without `branch`.
+const DEFAULT_BRANCH: &str = "main";
 
 /// Git sync processor configuration.
 ///
-/// Clones or pulls a Git repository and emits one event per file found
+/// Reads the tip of a branch and emits one event with every file found
 /// under the configured `path` within the repository. Downstream tasks
 /// decide what to do with the files (parse, store, transform).
 ///
@@ -33,7 +30,7 @@ fn default_branch() -> String {
 /// ```yaml
 /// - git_sync:
 ///     name: sync_configs
-///     repository_url: "https://git.example.com/team/configs.git"
+///     repository: "https://git.example.com/team/configs.git"
 ///     branch: main
 ///     path: "configs/"
 ///     credentials_path: /etc/git/credentials.json
@@ -43,25 +40,22 @@ fn default_branch() -> String {
 pub struct GitSync {
     /// Task name.
     pub name: String,
-    /// Git repository URL (HTTPS).
-    pub repository_url: String,
-    /// Branch to track (defaults to "main").
-    #[serde(default = "default_branch")]
-    pub branch: String,
-    /// Path within the repository to scan for files.
-    /// All files under this path are emitted as events.
+    /// The repository: an HTTPS URL, whose branch tip is fetched shallow into
+    /// a temporary folder for each sync, or a path on this machine, read in
+    /// place. Either way only committed files are emitted.
+    ///
+    /// Example: `repository: "https://git.example.com/team/configs.git"`
+    pub repository: String,
+    /// Branch to track. Defaults to `main` for a URL and to the checked-out
+    /// branch for a path.
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// Folder within the repository to scan for files; all files under it are emitted.
     #[serde(default)]
     pub path: Option<String>,
-    /// Local path to clone the repository into.
-    ///
-    /// Defaults to `<system_temp>/<flow_name>/<task_name>` so that multiple
-    /// `git_sync` tasks in the same worker do not collide on the same
-    /// working tree. Override only when you need a stable path on a
-    /// persistent volume.
-    #[serde(default)]
-    pub clone_path: Option<PathBuf>,
-    /// Path to credentials JSON file for HTTPS token authentication.
-    #[serde(default)]
+    /// Path to credentials JSON file for HTTPS token authentication. Empty
+    /// means none.
+    #[serde(default, deserialize_with = "flowgen_core::config::optional_path")]
     pub credentials_path: Option<PathBuf>,
     /// Bypass the HEAD-commit cache and re-walk the working tree every
     /// tick. Use when downstream cache was mutated out of band and
@@ -81,33 +75,107 @@ pub struct GitSync {
 
 impl ConfigExt for GitSync {}
 
-/// Rewrites `/`, `:`, `@`, `?`, `=` in a repository URL to hyphens so
-/// it fits the cache key alphabet.
-fn sanitize_repo_url(url: &str) -> String {
-    url.replace(['/', ':', '@', '?', '='], "-")
+/// Where the files come from.
+pub enum Source<'a> {
+    /// A git server, by URL, fetched for each sync.
+    Remote(&'a str),
+    /// A repository on this machine, by path.
+    Local(&'a Path),
 }
 
-/// File event emitted for each file found in the repository.
+impl GitSync {
+    /// Whether the repository or credentials hold a template, so where the
+    /// files come from is known only once rendered.
+    pub fn templated(&self) -> bool {
+        use crate::remote::is_template;
+        is_template(&self.repository)
+            || self
+                .credentials_path
+                .as_ref()
+                .is_some_and(|path| is_template(&path.to_string_lossy()))
+    }
+
+    /// The repository this task reads; a local one is neither fetched nor
+    /// authenticated.
+    pub fn source(&self) -> Result<Source<'_>, ConfigError> {
+        match crate::remote::is_url(&self.repository) {
+            _ if self.repository.is_empty() => Err(ConfigError::Repository),
+            true => Ok(Source::Remote(&self.repository)),
+            false if self.credentials_path.is_some() => Err(ConfigError::LocalCredentials),
+            false => Ok(Source::Local(Path::new(&self.repository))),
+        }
+    }
+}
+
+/// An invalid git sync config.
+#[derive(thiserror::Error, Debug)]
+pub enum ConfigError {
+    #[error("Set repository to a URL or a path")]
+    Repository,
+    #[error("A repository on this machine is read in place and takes no credentials_path")]
+    LocalCredentials,
+}
+
+/// The repository an [`EventHandler`] reads, resolved at init.
+enum Repository {
+    Remote {
+        url: String,
+        credentials: Option<Credentials>,
+    },
+    Local(PathBuf),
+}
+
+impl Repository {
+    /// Names the repository in logs and in the cache key of its last commit.
+    fn label(&self) -> String {
+        match self {
+            Repository::Remote { url, .. } => url.clone(),
+            Repository::Local(path) => path.display().to_string(),
+        }
+    }
+}
+
+/// The cache key of the last commit synced from the repository named `label`,
+/// with the label as a hex SHA-1 so any URL or path fits the key alphabet.
+fn cursor_key(flow_key: &str, label: &str) -> String {
+    let mut hasher = gix::hash::hasher(gix::hash::Kind::Sha1);
+    hasher.update(label.as_bytes());
+    let hash = match hasher.try_finalize() {
+        Ok(hash) => hash,
+        Err(gix::hash::hasher::Error::CollisionAttack { digest }) => digest,
+    };
+    format!("flow.{flow_key}.git_head.{hash}")
+}
+
+/// The event `git_sync` emits: every file under `path` at one commit.
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct FileEvent {
+pub struct Snapshot {
+    /// The commit the files are read at.
+    pub commit: String,
+    /// The files, by their path within `path`.
+    pub files: Vec<File>,
+}
+
+/// A file of a [`Snapshot`].
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct File {
     /// Relative path of the file within the scanned directory.
     pub path: String,
     /// File content as a string.
     pub content: String,
-    /// Git commit hash at HEAD.
-    pub commit: String,
 }
 
 /// Errors that can occur during git sync processing.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Failed to prepare the clone path {path}: {source}")]
-    PrepareClonePath {
-        path: PathBuf,
+    #[error("Failed to create a temporary directory: {source}")]
+    TempDir {
         #[source]
         source: std::io::Error,
     },
+    #[error("Path {path} is not a folder in the repository")]
+    NotAFolder { path: String },
     #[error("Failed to open existing repository at {path}: {source}")]
     OpenRepo {
         path: PathBuf,
@@ -120,29 +188,21 @@ pub enum Error {
         source: Box<dyn std::error::Error + Send + Sync>,
     },
     #[error(transparent)]
+    Config(#[from] ConfigError),
+    #[error(transparent)]
     Remote(#[from] crate::remote::CloneError),
+    #[error(transparent)]
+    Local(#[from] crate::push::client::Error),
+    #[error("Branch '{branch}' does not exist in {path}")]
+    BranchMissing { branch: String, path: PathBuf },
+    #[error("The repository at {path} has no branch checked out; set branch or check one out")]
+    DetachedHead { path: PathBuf },
     #[error(transparent)]
     Url(#[from] crate::remote::UrlError),
     #[error(transparent)]
     Credentials(#[from] flowgen_core::credentials::Error),
-    #[error("Invalid clone_path configuration: {source}")]
-    InvalidClonePath {
-        #[source]
-        source: flowgen_core::validate::Error,
-    },
     #[error(transparent)]
     Blocking(#[from] crate::remote::BlockingError),
-    #[error("Failed to read file '{path}': {source}")]
-    FileRead {
-        path: String,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("File walk error: {source}")]
-    WalkDir {
-        #[source]
-        source: walkdir::Error,
-    },
     #[error("Error sending event: {source}")]
     SendMessage {
         #[source]
@@ -172,17 +232,32 @@ pub enum Error {
     },
 }
 
+impl Error {
+    /// Whether retrying the same sync cannot succeed.
+    fn is_permanent(&self) -> bool {
+        match self {
+            Error::Local(source) => {
+                matches!(source, crate::push::client::Error::InvalidPath { .. })
+            }
+            Error::Config(_)
+            | Error::Url(_)
+            | Error::RenderConfig { .. }
+            | Error::NotAFolder { .. }
+            | Error::BranchMissing { .. }
+            | Error::DetachedHead { .. }
+            | Error::OpenRepo { .. } => true,
+            _ => false,
+        }
+    }
+}
+
 /// Event handler for git sync operations.
 pub struct EventHandler {
     config: Arc<GitSync>,
-    /// Resolved local path for the repository clone. Either the explicit
-    /// `clone_path` from config, or the derived default
-    /// `<temp>/<flow_name>/<task_name>`.
-    clone_path: PathBuf,
-    /// HTTPS credentials loaded from the credentials file at init, if configured.
-    /// Surfaced to a gix credential helper at fetch time so the token never
-    /// embeds in the repository URL.
-    credentials: Option<Credentials>,
+    /// The repository, with the HTTPS credentials of a remote one, which
+    /// reach gix through a credential helper, so the token never embeds in
+    /// the repository URL.
+    repository: Repository,
     tx: Option<Sender<Event>>,
     task_id: usize,
     task_type: &'static str,
@@ -195,6 +270,10 @@ impl flowgen_core::task::runner::Handler for EventHandler {
 
     fn sender(&self) -> Option<&Sender<Event>> {
         self.tx.as_ref()
+    }
+
+    fn is_retryable(&self, error: &Error) -> bool {
+        !error.is_permanent()
     }
 
     /// Handles a trigger event by syncing the repository and emitting file events.
@@ -212,20 +291,24 @@ impl flowgen_core::task::runner::Handler for EventHandler {
         let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
 
         flowgen_core::event::with_event_context(&Arc::clone(&event), async {
-            let commit = clone_or_pull(
-                &self.config.repository_url,
-                &self.config.branch,
-                self.credentials.clone(),
-                &self.clone_path,
-            )
-            .await?;
+            let label = self.repository.label();
+            let (path, commit, _fetched) = match &self.repository {
+                Repository::Remote { url, credentials } => {
+                    let branch = match &self.config.branch {
+                        Some(branch) => branch.clone(),
+                        None => DEFAULT_BRANCH.to_string(),
+                    };
+                    let (fetched, commit) = fetch(url, branch, credentials.clone()).await?;
+                    (fetched.path().to_path_buf(), commit, Some(fetched))
+                }
+                Repository::Local(path) => {
+                    let commit = local_tip(path, self.config.branch.as_deref()).await?;
+                    (path.clone(), commit, None)
+                }
+            };
 
-            // Skip the file walk when HEAD matches the last successful
-            // sync — file contents at the same commit are byte-identical.
             let cache = &self.task_context.cache;
-            let flow_key = self.task_context.flow.id();
-            let sanitized_url = sanitize_repo_url(&self.config.repository_url);
-            let cache_key = format!("flow.{flow_key}.git_head.{sanitized_url}");
+            let cache_key = cursor_key(&self.task_context.flow.id(), &label);
             let cached_commit = cache
                 .get(&cache_key)
                 .await
@@ -233,8 +316,8 @@ impl flowgen_core::task::runner::Handler for EventHandler {
                 .flatten()
                 .and_then(|bytes| String::from_utf8(bytes.to_vec()).ok());
             if !self.config.force_pull && cached_commit.as_deref() == Some(commit.as_str()) {
-                info!(
-                    repository = %self.config.repository_url,
+                debug!(
+                    repository = %label,
                     commit = %commit,
                     "Git HEAD unchanged since last sync, skipping file walk"
                 );
@@ -247,88 +330,61 @@ impl flowgen_core::task::runner::Handler for EventHandler {
                 return Ok(());
             }
 
-            // Determine the scan base path.
-            let scan_path = match &self.config.path {
-                Some(p) => self.clone_path.join(p),
-                None => self.clone_path.clone(),
+            let entries = local_files(&path, &commit, self.config.path.as_deref()).await?;
+
+            let snapshot = Snapshot {
+                commit: commit.clone(),
+                files: entries
+                    .into_iter()
+                    .map(|(path, content)| File { path, content })
+                    .collect(),
+            };
+            let data =
+                serde_json::to_value(&snapshot).map_err(|source| Error::SerdeJson { source })?;
+            let mut e = EventBuilder::new()
+                .data(EventData::Json(data))
+                .subject(self.config.name.clone())
+                .task_id(self.task_id)
+                .task_type(self.task_type)
+                .build()
+                .map_err(|source| Error::EventBuilder { source })?;
+
+            let save_cursor = {
+                let cache = Arc::clone(cache);
+                let (cache_key, commit, label) = (cache_key, commit.clone(), label.to_string());
+                async move {
+                    if let Err(e) = cache.put(&cache_key, commit.clone().into(), None).await {
+                        error!(
+                            repository = %label,
+                            commit = %commit,
+                            error = %e,
+                            "Failed to persist git HEAD, next tick will re-walk"
+                        );
+                    }
+                }
+            };
+            let save_cursor = match completion_tx_arc.as_ref() {
+                Some(arc) => {
+                    arc.on_success(Box::pin(save_cursor));
+                    match self.tx {
+                        None => arc.signal_completion(e.data_as_json().ok()),
+                        Some(_) => e.completion_tx = Some(Arc::clone(arc)),
+                    }
+                    None
+                }
+                None => Some(save_cursor),
             };
 
-            let entries = repository_files(&self.clone_path, &scan_path);
-
-            for (index, file_path) in entries.iter().enumerate() {
-                let content =
-                    std::fs::read_to_string(file_path).map_err(|source| Error::FileRead {
-                        path: file_path.display().to_string(),
-                        source,
-                    })?;
-
-                let relative_path = file_path
-                    .strip_prefix(&scan_path)
-                    .unwrap_or(file_path)
-                    .to_string_lossy()
-                    .replace('\\', "/");
-
-                let file_event = FileEvent {
-                    path: relative_path,
-                    content,
-                    commit: commit.clone(),
-                };
-                let data = serde_json::to_value(&file_event)
-                    .map_err(|source| Error::SerdeJson { source })?;
-
-                let mut e = EventBuilder::new()
-                    .data(EventData::Json(data))
-                    .subject(self.config.name.clone())
-                    .task_id(self.task_id)
-                    .task_type(self.task_type)
-                    .build()
-                    .map_err(|source| Error::EventBuilder { source })?;
-
-                // Only the last file carries the completion signal.
-                if index == entries.len() - 1 {
-                    match self.tx {
-                        None => {
-                            // Leaf task: signal completion.
-                            if let Some(arc) = completion_tx_arc.as_ref() {
-                                arc.signal_completion(e.data_as_json().ok());
-                            }
-                        }
-                        Some(_) => {
-                            e.completion_tx = completion_tx_arc.clone();
-                        }
-                    }
-                }
-
-                let short_commit = commit.get(..7).unwrap_or(commit.as_str());
-                e.send_with_logging(self.tx.as_ref())
-                    .context("path", &file_event.path)
-                    .context("commit", short_commit)
-                    .await
-                    .map_err(|source| Error::SendMessage { source })?;
-            }
-
-            // If no files were found there is nothing to forward downstream.
-            // The upstream completion channel was sized for every leaf in
-            // git_sync's subtree, so emit one signal per leaf to satisfy that
-            // contract instead of leaving the source waiting forever.
-            if entries.is_empty() {
-                if let Some(arc) = completion_tx_arc.as_ref() {
-                    let upstream_leaf_share = self.task_context.leaf_count.max(1);
-                    for _ in 0..upstream_leaf_share {
-                        arc.signal_completion(None);
-                    }
-                }
-            }
-
-            // Persist only after every file event was sent — a mid-walk
-            // failure must re-emit the full batch on the next tick.
-            if let Err(e) = cache.put(&cache_key, commit.clone().into(), None).await {
-                error!(
-                    repository = %self.config.repository_url,
-                    commit = %commit,
-                    error = %e,
-                    "Failed to persist git HEAD, next tick will re-walk"
-                );
+            let short_commit = match commit.get(..7) {
+                Some(short) => short,
+                None => commit.as_str(),
+            };
+            e.send_with_logging(self.tx.as_ref())
+                .context("commit", short_commit)
+                .await
+                .map_err(|source| Error::SendMessage { source })?;
+            if let Some(save_cursor) = save_cursor {
+                save_cursor.await;
             }
 
             Ok(())
@@ -337,96 +393,110 @@ impl flowgen_core::task::runner::Handler for EventHandler {
     }
 }
 
-/// Regular files under `scan_path`, without `.git/` and without symlinks, so a
-/// link committed to the repository cannot expose a file outside the clone.
-fn repository_files(clone_path: &Path, scan_path: &Path) -> Vec<PathBuf> {
-    match (
-        std::fs::canonicalize(clone_path),
-        std::fs::canonicalize(scan_path),
-    ) {
-        (Ok(clone), Ok(scan)) if scan.starts_with(&clone) => {}
-        _ => return Vec::new(),
-    }
-    WalkDir::new(scan_path)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(|e| e.file_name() != ".git")
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-        .map(walkdir::DirEntry::into_path)
-        .collect()
-}
-
-// All gix calls are blocking and must run on a dedicated thread. We wrap the
-// whole clone/pull/head sequence in a single `spawn_blocking` to avoid
-// re-paying the thread-handoff cost per call.
-
-/// Clone or pull the repository and return the HEAD commit hash.
-async fn clone_or_pull(
-    repository_url: &str,
-    branch: &str,
+/// Shallow-fetches the tip of `branch` into a temporary bare repository and
+/// returns it with the tip's commit.
+async fn fetch(
+    url: &str,
+    branch: String,
     credentials: Option<Credentials>,
-    clone_path: &Path,
-) -> Result<String, Error> {
-    let url = repository_url.to_string();
-    let clone_path = clone_path.to_path_buf();
-    let branch = branch.to_string();
-
+) -> Result<(tempfile::TempDir, String), Error> {
+    let url = url.to_string();
     crate::remote::run_blocking(None, move |interrupt| {
-        sync_blocking(&url, &branch, credentials.as_ref(), &clone_path, interrupt)
+        let dir = tempfile::TempDir::new().map_err(|source| Error::TempDir { source })?;
+        let repo = crate::remote::shallow_fetch_bare(
+            &url,
+            &branch,
+            dir.path(),
+            credentials.as_ref(),
+            interrupt,
+        )?;
+        let commit = repo.head_id().map_err(head_error)?.to_string();
+        Ok((dir, commit))
     })
     .await?
 }
 
-/// Synchronous core of the clone/pull pipeline. Runs on a blocking thread.
-///
-/// Wipes any existing clone before running a fresh shallow clone. A
-/// previous implementation kept the clone across ticks and called
-/// `fetch_existing`, but gix's low-level fetch only advances the
-/// remote-tracking ref: it never updates `refs/heads/<branch>` or the
-/// working tree. `head_commit` therefore kept returning the original
-/// shallow-clone commit even after upstream advanced, so the sync task
-/// silently missed every new commit until the pod restarted and the
-/// clone_path was wiped. Re-cloning shallow at depth 1 transfers the
-/// same pack file `fetch` would have — the cost of one syscall to
-/// remove ~KB of shallow state — and guarantees the working tree
-/// matches HEAD every tick.
-fn sync_blocking(
-    url: &str,
-    branch: &str,
-    credentials: Option<&Credentials>,
-    path: &Path,
-    interrupt: &AtomicBool,
-) -> Result<String, Error> {
-    let prepare_error = |source| Error::PrepareClonePath {
-        path: path.to_path_buf(),
-        source,
-    };
-    if path.exists() {
-        std::fs::remove_dir_all(path).map_err(prepare_error)?;
-    }
-
-    // gix expects the clone target's parent to exist. The derived default
-    // path includes per-flow and per-task segments that are not pre-created
-    // by the volume mount, so ensure the full path exists up front.
-    std::fs::create_dir_all(path).map_err(prepare_error)?;
-
-    crate::remote::shallow_clone(url, branch, path, credentials, interrupt)?;
-    head_commit(path)
+/// The commit at the tip of `branch`, or of the checked-out branch, in the
+/// repository at `path`.
+async fn local_tip(path: &Path, branch: Option<&str>) -> Result<String, Error> {
+    let path = path.to_path_buf();
+    let branch = branch.map(str::to_string);
+    crate::remote::run_blocking(None, move |_| {
+        let repo = open_local(&path)?;
+        let branch = match branch {
+            Some(branch) => branch,
+            None => match repo.head_name().map_err(head_error)? {
+                Some(head) => head.shorten().to_string(),
+                None => return Err(Error::DetachedHead { path }),
+            },
+        };
+        let reference = format!("refs/heads/{branch}");
+        match repo
+            .try_find_reference(reference.as_str())
+            .map_err(head_error)?
+        {
+            Some(mut found) => Ok(found.peel_to_id().map_err(head_error)?.to_string()),
+            None => Err(Error::BranchMissing { branch, path }),
+        }
+    })
+    .await?
 }
 
-/// Reads the HEAD commit object id.
-fn head_commit(path: &Path) -> Result<String, Error> {
-    let repo = gix::open(path).map_err(|e| Error::OpenRepo {
+/// The UTF-8 files under `prefix` at `commit`, by their path relative to
+/// `prefix`, which must be a folder at the commit.
+async fn local_files(
+    path: &Path,
+    commit: &str,
+    prefix: Option<&str>,
+) -> Result<Vec<(String, String)>, Error> {
+    let path = path.to_path_buf();
+    let commit = commit.to_string();
+    let prefix = match prefix {
+        Some(prefix) => crate::push::client::normalize_path(prefix)?.join("/"),
+        None => String::new(),
+    };
+    crate::remote::run_blocking(None, move |_| {
+        let repo = open_local(&path)?;
+        let id = gix::ObjectId::from_hex(commit.as_bytes()).map_err(head_error)?;
+        let tree = repo
+            .find_commit(id)
+            .map_err(head_error)?
+            .tree()
+            .map_err(head_error)?;
+        let folder = match prefix.is_empty() {
+            true => true,
+            false => matches!(
+                tree.lookup_entry_by_path(&prefix).map_err(head_error)?,
+                Some(entry) if entry.mode().is_tree()
+            ),
+        };
+        if !folder {
+            return Err(Error::NotAFolder { path: prefix });
+        }
+        let tree = tree.id;
+        let mut files = Vec::new();
+        for file in crate::push::client::files_under(&repo, tree, &prefix)? {
+            match String::from_utf8(file.content) {
+                Ok(content) => files.push((file.path, content)),
+                Err(_) => tracing::warn!(path = %file.path, "Skipping a file that is not UTF-8"),
+            }
+        }
+        Ok(files)
+    })
+    .await?
+}
+
+fn head_error(source: impl std::error::Error + Send + Sync + 'static) -> Error {
+    Error::HeadCommit {
+        source: Box::new(source),
+    }
+}
+
+fn open_local(path: &Path) -> Result<gix::Repository, Error> {
+    gix::open(path).map_err(|e| Error::OpenRepo {
         path: path.to_path_buf(),
         source: Box::new(e),
-    })?;
-
-    let head_id = repo.head_id().map_err(|e| Error::HeadCommit {
-        source: Box::new(e),
-    })?;
-
-    Ok(head_id.to_string())
+    })
 }
 
 /// Git sync processor.
@@ -446,37 +516,26 @@ impl flowgen_core::task::runner::Runner for Processor {
     type EventHandler = EventHandler;
 
     async fn init(&self) -> Result<EventHandler, Error> {
-        // Render the config at init time so operator-controlled fields such
-        // as `repository_url`, `branch`, `path`, and `clone_path` can
-        // reference environment variables via `{{env.VAR_NAME}}`. Event data
-        // is intentionally not in scope here — these values are static for
-        // the lifetime of the task.
         let config: GitSync = self
             .config
-            .render(&serde_json::json!({}))
+            .render(&serde_json::Map::new())
             .map_err(|source| Error::RenderConfig { source })?;
 
-        let credentials = load_credentials(config.credentials_path.as_deref()).await?;
-        check_url(&config.repository_url, credentials.as_ref())?;
-
-        let clone_path = match &config.clone_path {
-            Some(path) => {
-                flowgen_core::validate::validate_path(
-                    flowgen_core::validate::PathField("clone_path"),
-                    path,
-                )
-                .map_err(|source| Error::InvalidClonePath { source })?;
-                path.to_path_buf()
+        let repository = match config.source()? {
+            Source::Local(path) => Repository::Local(path.to_path_buf()),
+            Source::Remote(url) => {
+                let credentials = load_credentials(config.credentials_path.as_deref()).await?;
+                check_url(url, credentials.as_ref())?;
+                Repository::Remote {
+                    url: url.to_string(),
+                    credentials,
+                }
             }
-            None => std::env::temp_dir()
-                .join(self.task_context.flow.identity())
-                .join(&config.name),
         };
 
         Ok(EventHandler {
             config: Arc::new(config),
-            clone_path,
-            credentials,
+            repository,
             tx: self.tx.clone(),
             task_id: self.task_id,
             task_type: self.task_type,
@@ -496,7 +555,10 @@ impl flowgen_core::task::runner::Runner for Processor {
                     Ok(handler) => Ok(handler),
                     Err(e) => {
                         error!(error = %e, "Failed to initialize git sync processor");
-                        Err(tokio_retry::RetryError::transient(e))
+                        match e.is_permanent() {
+                            true => Err(tokio_retry::RetryError::permanent(e)),
+                            false => Err(tokio_retry::RetryError::transient(e)),
+                        }
                     }
                 }
             },
@@ -612,10 +674,9 @@ mod tests {
     fn test_config() -> GitSync {
         GitSync {
             name: "test_sync".to_string(),
-            repository_url: "https://github.com/org/repo.git".to_string(),
-            branch: "main".to_string(),
+            repository: "https://github.com/org/repo.git".to_string(),
+            branch: None,
             path: None,
-            clone_path: None,
             credentials_path: None,
             force_pull: false,
             depends_on: None,
@@ -624,50 +685,57 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn symlinks_in_the_repository_are_skipped() {
-        let outside = tempfile::tempdir().unwrap();
-        std::fs::write(outside.path().join("b.txt"), "b").unwrap();
-        let repo = tempfile::tempdir().unwrap();
-        let resources = repo.path().join("resources");
-        std::fs::create_dir_all(&resources).unwrap();
-        std::fs::write(resources.join("a.txt"), "a").unwrap();
-        std::os::unix::fs::symlink(outside.path().join("b.txt"), resources.join("b.txt")).unwrap();
-        std::os::unix::fs::symlink(outside.path(), resources.join("nested")).unwrap();
-        std::os::unix::fs::symlink(resources.join("a.txt"), resources.join("c.txt")).unwrap();
+    #[tokio::test]
+    async fn a_path_that_is_not_a_folder_at_the_commit_is_a_permanent_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("w");
+        crate::workspace::init(&root, &[("flows/a.yaml".to_string(), "a")]).unwrap();
+        let commit = local_tip(&root, None).await.unwrap();
 
-        let files = repository_files(repo.path(), &resources);
-
-        assert_eq!(files, vec![resources.join("a.txt")]);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_scan_path_through_a_symlink_out_of_the_repository_has_no_files() {
-        let outside = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(outside.path().join("nested")).unwrap();
-        std::fs::write(outside.path().join("nested/b.txt"), "b").unwrap();
-        let repo = tempfile::tempdir().unwrap();
-        std::os::unix::fs::symlink(outside.path(), repo.path().join("flows")).unwrap();
-
-        let root = repository_files(repo.path(), &repo.path().join("flows"));
-        let nested = repository_files(repo.path(), &repo.path().join("flows/nested"));
-
-        assert!(root.is_empty());
-        assert!(nested.is_empty());
-    }
-
-    #[test]
-    fn error_display_prepare_clone_path() {
-        let err = Error::PrepareClonePath {
-            path: PathBuf::from("/tmp/repo"),
-            source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
-        };
+        for path in ["missing/", "flows/a.yaml"] {
+            let error = local_files(&root, &commit, Some(path)).await.unwrap_err();
+            assert!(matches!(error, Error::NotAFolder { .. }), "{error}");
+            assert!(error.is_permanent());
+        }
         assert_eq!(
-            err.to_string(),
-            "Failed to prepare the clone path /tmp/repo: denied"
+            Error::NotAFolder {
+                path: "missing".to_string()
+            }
+            .to_string(),
+            "Path missing is not a folder in the repository"
         );
+        let outside = local_files(&root, &commit, Some("../flows"))
+            .await
+            .unwrap_err();
+        assert!(outside.is_permanent(), "{outside}");
+        assert_eq!(
+            local_files(&root, &commit, Some("flows")).await.unwrap(),
+            vec![("a.yaml".to_string(), "a".to_string())]
+        );
+    }
+
+    #[test]
+    fn the_cursor_key_holds_a_hash_of_the_repository() {
+        let key = cursor_key("f", ".");
+        let hash = key.strip_prefix("flow.f.git_head.").unwrap();
+        assert_eq!(hash.len(), 40);
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()), "{key}");
+        assert_ne!(key, cursor_key("f", ".."));
+        assert_eq!(key, cursor_key("f", "."));
+    }
+
+    #[test]
+    fn config_errors_are_not_retried_and_network_errors_are() {
+        let ssh = Error::Url(crate::remote::UrlError::Ssh {
+            url: "git@git.example.com:a.git".to_string(),
+        });
+        let clone = Error::Remote(crate::remote::CloneError::Clone {
+            url: "https://git.example.com/a.git".to_string(),
+            source: "timeout".into(),
+        });
+        assert!(Error::Config(ConfigError::Repository).is_permanent());
+        assert!(ssh.is_permanent());
+        assert!(!clone.is_permanent());
     }
 
     #[test]
@@ -700,18 +768,6 @@ mod tests {
     }
 
     #[test]
-    fn error_display_file_read() {
-        let err = Error::FileRead {
-            path: "/tmp/file.txt".to_string(),
-            source: std::io::Error::new(std::io::ErrorKind::NotFound, "not found"),
-        };
-        assert_eq!(
-            err.to_string(),
-            "Failed to read file '/tmp/file.txt': not found"
-        );
-    }
-
-    #[test]
     fn error_display_missing_builder_attribute() {
         let err = Error::MissingBuilderAttribute("config".to_string());
         assert_eq!(
@@ -737,12 +793,11 @@ mod tests {
     fn test_defaults() {
         let json = r#"{
             "name": "sync",
-            "repository_url": "https://github.com/org/repo.git"
+            "repository": "https://github.com/org/repo.git"
         }"#;
         let config: GitSync = serde_json::from_str(json).unwrap();
-        assert_eq!(config.branch, "main");
+        assert_eq!(config.branch, None);
         assert!(config.path.is_none());
-        assert!(config.clone_path.is_none());
         assert!(config.credentials_path.is_none());
     }
 
@@ -750,14 +805,13 @@ mod tests {
     fn config_deser_minimal() {
         let json = r#"{
             "name": "sync",
-            "repository_url": "https://github.com/org/repo.git"
+            "repository": "https://github.com/org/repo.git"
         }"#;
         let config: GitSync = serde_json::from_str(json).unwrap();
         assert_eq!(config.name, "sync");
-        assert_eq!(config.repository_url, "https://github.com/org/repo.git");
-        assert_eq!(config.branch, "main");
+        assert_eq!(config.repository, "https://github.com/org/repo.git");
+        assert_eq!(config.branch, None);
         assert!(config.path.is_none());
-        assert!(config.clone_path.is_none());
         assert!(config.credentials_path.is_none());
         assert!(config.depends_on.is_none());
         assert!(config.retry.is_none());
@@ -767,18 +821,16 @@ mod tests {
     fn config_deser_full() {
         let json = r#"{
             "name": "sync_all",
-            "repository_url": "https://github.com/org/repo.git",
+            "repository": "https://github.com/org/repo.git",
             "branch": "develop",
             "path": "flows/",
-            "clone_path": "/data/repo",
             "credentials_path": "/etc/flowgen/credentials/git.json",
             "depends_on": ["trigger"],
             "retry": { "max_attempts": 2, "initial_backoff": "500ms" }
         }"#;
         let config: GitSync = serde_json::from_str(json).unwrap();
-        assert_eq!(config.branch, "develop");
+        assert_eq!(config.branch.as_deref(), Some("develop"));
         assert_eq!(config.path.as_deref(), Some("flows/"));
-        assert_eq!(config.clone_path, Some(PathBuf::from("/data/repo")));
         assert_eq!(
             config.credentials_path,
             Some(PathBuf::from("/etc/flowgen/credentials/git.json"))
@@ -790,26 +842,232 @@ mod tests {
     #[test]
     fn config_deser_missing_name_fails() {
         let json = r#"{
-            "repository_url": "https://github.com/org/repo.git"
+            "repository": "https://github.com/org/repo.git"
         }"#;
         let result = serde_json::from_str::<GitSync>(json);
         assert!(result.is_err());
     }
 
     #[test]
-    fn config_deser_missing_repository_url_fails() {
-        let json = r#"{
-            "name": "sync"
-        }"#;
-        let result = serde_json::from_str::<GitSync>(json);
-        assert!(result.is_err());
+    fn a_url_is_fetched_and_a_path_is_read_in_place() {
+        let source = |fields: &str| {
+            let config: GitSync =
+                serde_json::from_str(&format!(r#"{{"name": "sync"{fields}}}"#)).unwrap();
+            match config.source() {
+                Ok(Source::Remote(url)) => format!("remote {url}"),
+                Ok(Source::Local(path)) => format!("local {}", path.display()),
+                Err(error) => error.to_string(),
+            }
+        };
+        assert_eq!(source(r#", "repository": ".""#), "local .");
+        assert_eq!(
+            source(r#", "repository": "https://g.example.com/a.git""#),
+            "remote https://g.example.com/a.git"
+        );
+        assert_eq!(
+            source(r#", "repository": """#),
+            ConfigError::Repository.to_string()
+        );
+        assert_eq!(
+            source(r#", "repository": ".", "credentials_path": "/tmp/a""#),
+            ConfigError::LocalCredentials.to_string()
+        );
+        assert_eq!(
+            source(r#", "repository": ".", "credentials_path": """#),
+            "local ."
+        );
+    }
+
+    fn generic_context(
+        cache: Arc<dyn flowgen_core::cache::Cache>,
+    ) -> Arc<flowgen_core::task::context::TaskContext> {
+        let task_manager = Arc::new(
+            flowgen_core::task::manager::TaskManagerBuilder::new()
+                .build()
+                .unwrap(),
+        );
+        Arc::new(
+            flowgen_core::task::context::TaskContextBuilder::new()
+                .flow_name("test_flow".to_string())
+                .task_manager(task_manager)
+                .cache(cache)
+                .build()
+                .unwrap(),
+        )
+    }
+
+    /// Runs one sync of `config` and returns the paths and contents it emits.
+    async fn sync_once(
+        config: GitSync,
+        cache: Arc<dyn flowgen_core::cache::Cache>,
+    ) -> Vec<(String, String)> {
+        sync_with(config, cache, None).await
+    }
+
+    /// [`sync_once`] for a trigger carrying `completion`.
+    async fn sync_with(
+        config: GitSync,
+        cache: Arc<dyn flowgen_core::cache::Cache>,
+        completion: Option<flowgen_core::event::SharedCompletionTx>,
+    ) -> Vec<(String, String)> {
+        use flowgen_core::task::runner::{Handler, Runner};
+        let (_, rx) = tokio::sync::mpsc::channel(1);
+        let (tx, mut out) = tokio::sync::mpsc::channel(64);
+        let processor = ProcessorBuilder::new()
+            .config(Arc::new(config))
+            .receiver(rx)
+            .sender(tx)
+            .task_type("git_sync")
+            .task_context(generic_context(cache))
+            .build()
+            .await
+            .unwrap();
+        let handler = processor.init().await.unwrap();
+        let mut trigger = EventBuilder::new()
+            .data(EventData::Json(serde_json::json!({})))
+            .subject("tick".to_string())
+            .task_id(0)
+            .task_type("generate")
+            .build()
+            .unwrap();
+        trigger.completion_tx = completion;
+        handler.handle(trigger).await.unwrap();
+        drop(handler);
+        drop(processor);
+        let mut files = Vec::new();
+        while let Ok(event) = out.try_recv() {
+            let data = event.data_as_json().unwrap();
+            for file in data["files"].as_array().unwrap() {
+                files.push((
+                    file["path"].as_str().unwrap().to_string(),
+                    file["content"].as_str().unwrap().to_string(),
+                ));
+            }
+        }
+        files
+    }
+
+    #[tokio::test]
+    async fn the_commit_is_remembered_only_once_the_flow_succeeded() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("w");
+        crate::workspace::init(&root, &[("flows/a.yaml".to_string(), "a")]).unwrap();
+        let config = GitSync {
+            repository: root.display().to_string(),
+            path: Some("flows/".to_string()),
+            ..test_config()
+        };
+        let cache = Arc::new(flowgen_core::cache::memory::MemoryCache::new())
+            as Arc<dyn flowgen_core::cache::Cache>;
+        let wait = || tokio::time::sleep(std::time::Duration::from_millis(100));
+
+        let (failed, _rx) = flowgen_core::event::new_completion_channel(1);
+        assert_eq!(
+            sync_with(
+                config.clone(),
+                Arc::clone(&cache),
+                Some(Arc::clone(&failed))
+            )
+            .await
+            .len(),
+            1
+        );
+        failed.signal_completion_with_error("boom".to_string());
+        wait().await;
+        let (succeeded, _rx) = flowgen_core::event::new_completion_channel(1);
+        assert_eq!(
+            sync_with(
+                config.clone(),
+                Arc::clone(&cache),
+                Some(Arc::clone(&succeeded))
+            )
+            .await
+            .len(),
+            1,
+            "A failed flow syncs the commit again"
+        );
+        succeeded.signal_completion(None);
+        wait().await;
+
+        assert!(
+            sync_once(config, cache).await.is_empty(),
+            "A commit the flow handled is not synced again"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_a_branch_a_local_repository_is_read_at_the_checked_out_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("w");
+        crate::workspace::init(&root, &[("flows/a.yaml".to_string(), "a")]).unwrap();
+        let mut repo = gix::open(&root).unwrap();
+        crate::push::client::ensure_committer(
+            &mut repo,
+            &crate::push::client::Author {
+                name: "a".to_string(),
+                email: "a@example.com".to_string(),
+            },
+        )
+        .unwrap();
+        let head = repo.head_id().unwrap().detach();
+        repo.reference(
+            "refs/heads/master",
+            head,
+            gix::refs::transaction::PreviousValue::MustNotExist,
+            "branch",
+        )
+        .unwrap();
+        std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/master\n").unwrap();
+
+        assert_eq!(local_tip(&root, None).await.unwrap(), head.to_string());
+        assert!(matches!(
+            local_tip(&root, Some("release")).await,
+            Err(Error::BranchMissing { branch, .. }) if branch == "release"
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_local_repository_emits_its_committed_files_once_per_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("w");
+        crate::workspace::init(
+            &root,
+            &[
+                ("flows/a.yaml".to_string(), "a"),
+                ("flows/nested/b.yaml".to_string(), "b"),
+            ],
+        )
+        .unwrap();
+        std::fs::write(root.join("flows/a.yaml"), "not committed").unwrap();
+        std::fs::write(root.join("flows/c.yaml"), "untracked").unwrap();
+        let config = GitSync {
+            repository: root.display().to_string(),
+            path: Some("flows/".to_string()),
+            ..test_config()
+        };
+        let cache = Arc::new(flowgen_core::cache::memory::MemoryCache::new())
+            as Arc<dyn flowgen_core::cache::Cache>;
+
+        let mut files = sync_once(config.clone(), Arc::clone(&cache)).await;
+        files.sort();
+        assert_eq!(
+            files,
+            vec![
+                ("a.yaml".to_string(), "a".to_string()),
+                ("nested/b.yaml".to_string(), "b".to_string())
+            ]
+        );
+        assert!(
+            sync_once(config, cache).await.is_empty(),
+            "Same commit, no files"
+        );
     }
 
     #[test]
     fn config_roundtrip_serde() {
         let json = r#"{
             "name": "rt",
-            "repository_url": "https://github.com/org/repo.git",
+            "repository": "https://github.com/org/repo.git",
             "branch": "main",
             "path": "configs/"
         }"#;
@@ -830,29 +1088,18 @@ mod tests {
     }
 
     #[test]
-    fn file_event_serialization() {
-        let fe = FileEvent {
-            path: "flows/main.yaml".to_string(),
-            content: "name: test".to_string(),
+    fn a_snapshot_is_its_commit_and_files() {
+        let snapshot = Snapshot {
             commit: "abc123".to_string(),
+            files: vec![File {
+                path: "flows/main.yaml".to_string(),
+                content: "name: test".to_string(),
+            }],
         };
-        let value = serde_json::to_value(&fe).unwrap();
-        assert_eq!(value["path"], "flows/main.yaml");
-        assert_eq!(value["content"], "name: test");
+        let value = serde_json::to_value(&snapshot).unwrap();
         assert_eq!(value["commit"], "abc123");
-    }
-
-    #[test]
-    fn file_event_clone() {
-        let fe = FileEvent {
-            path: "a.txt".to_string(),
-            content: "hello".to_string(),
-            commit: "def456".to_string(),
-        };
-        let cloned = fe.clone();
-        assert_eq!(fe.path, cloned.path);
-        assert_eq!(fe.content, cloned.content);
-        assert_eq!(fe.commit, cloned.commit);
+        assert_eq!(value["files"][0]["path"], "flows/main.yaml");
+        assert_eq!(value["files"][0]["content"], "name: test");
     }
 
     #[tokio::test]

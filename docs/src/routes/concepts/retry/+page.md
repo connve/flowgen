@@ -40,7 +40,7 @@ When a task fails, the whole flow restarts. The other tasks are stopped first, a
 
 ## Startup jitter
 
-Every background task sleeps a random duration (up to `initial_backoff`) before its first initialization attempt. This staggers connections across flows and replicas to avoid thundering-herd login storms on external services (e.g. Salesforce OAuth, database connection pools). The jitter is automatic and requires no configuration.
+Every background task sleeps a random duration (up to `initial_backoff`) before its first initialization attempt. This staggers connections across flows and replicas to avoid thundering-herd login storms on external services (e.g. OAuth logins, database connection pools). The jitter is automatic and requires no configuration.
 
 Blocking tasks (`http_endpoint`, `mcp_tool`, `mcp_resource`, `mcp_prompt`, `ai_gateway`) and `generate` tasks skip the jitter — they must bind or fire on schedule immediately.
 
@@ -58,7 +58,7 @@ Failed events are not silently dropped. The error event carries `event.error` wi
 
 ### Infinite reconnect (subscribers)
 
-Subscribers — `nats_jetstream_subscribe`, `salesforce_pubsubapi_subscribe`, and other long-lived consumers — must maintain connectivity indefinitely. They use the retry config differently:
+Subscribers — `nats_jetstream_subscribe`, `kafka_subscribe`, and other long-lived consumers — must maintain connectivity indefinitely. They use the retry config differently:
 
 - **Initialization** retries without a limit, see [Startup](#startup).
 - **Connection loss** reconnects without a limit, with the delay doubling up to 5 minutes. A reconnect that receives from the server resets it to `initial_backoff`.

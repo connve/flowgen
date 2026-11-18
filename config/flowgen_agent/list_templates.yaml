@@ -1,0 +1,40 @@
+# Flowgen Agent tool: lists a hub's templates.
+flow:
+  labels:
+    display_name: "List Templates"
+    description: "Lists a hub's templates, complete flows to start from, for Flowgen Agent."
+    tags: ["mcp", "agent", "flowgen"]
+  tasks:
+    - mcp_tool:
+        name: list_templates
+        description: "List a hub's templates: complete, working flows and resources. Read one with get_template."
+        input_schema:
+          type: object
+          properties:
+            hub:
+              type: string
+              description: "Hub id. Defaults to connve."
+
+    - script:
+        name: hub
+        code: |
+          let data = event.data;
+          if type_of(data.hub) != "string" || data.hub == "" { data.hub = "connve"; }
+          data
+
+    - http_request:
+        name: fetch
+        endpoint: "{{env.FLOWGEN_URL}}/api/hubs/{{event.data.hub}}/templates"
+        method: GET
+
+    # Leaves out the files, which get_template returns.
+    - script:
+        name: summarize
+        code: |
+          #{ templates: event.data.templates.map(|template| #{
+            slug: template.slug,
+            name: template.name,
+            description: template.description,
+            category: template.category,
+            tags: template.tags
+          }) }

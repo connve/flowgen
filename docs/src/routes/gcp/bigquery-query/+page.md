@@ -7,7 +7,7 @@ Runs SQL queries against Google BigQuery. Returns results as Arrow RecordBatch.
 ```yaml
 - gcp_bigquery_query:
     name: get_orders
-    credentials_path: /etc/gcp/service-account.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/gcp.json"
     project_id: my-project
     query: "SELECT * FROM `my-project.dataset.orders` WHERE date = @date"
     parameters:
@@ -44,7 +44,7 @@ This lets a query work from a schema file the flow already keeps on disk, instea
 ```yaml
 - gcp_bigquery_query:
     name: add_missing_columns
-    credentials_path: /etc/gcp/credentials.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/gcp.json"
     project_id: my-project
     query: { resource: gcp/queries/add_missing_columns.sql }
     parameters:
@@ -85,7 +85,7 @@ The task streams the result and emits one downstream event per wire batch (`getQ
 ```yaml
 - gcp_bigquery_query:
     name: daily_report
-    credentials_path: /etc/gcp/service-account.json
+    credentials_path: "{{env.FLOWGEN_CREDENTIALS}}/gcp.json"
     project_id: my-project
     query:
       resource: queries/daily_report.sql

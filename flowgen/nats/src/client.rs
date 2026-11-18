@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::PathBuf;
 
 /// Default NATS Server URL.
@@ -26,11 +25,10 @@ pub struct NKeyCredentials {
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Error reading credentials file '{path}': {source}")]
+    #[error("Error reading credentials: {source}")]
     ReadCredentials {
-        path: std::path::PathBuf,
         #[source]
-        source: std::io::Error,
+        source: flowgen_core::credentials::Error,
     },
     #[error("Error parsing credentials file: {source}")]
     ParseCredentials {
@@ -73,13 +71,10 @@ impl flowgen_core::client::Client for Client {
     async fn connect(mut self) -> Result<Self, Error> {
         let connect_options = match &self.credentials_path {
             Some(path) => {
-                let credentials: Credentials =
-                    serde_json::from_str(&fs::read_to_string(path).map_err(|e| {
-                        Error::ReadCredentials {
-                            path: path.clone(),
-                            source: e,
-                        }
-                    })?)
+                let content = flowgen_core::credentials::read_async(path)
+                    .await
+                    .map_err(|source| Error::ReadCredentials { source })?;
+                let credentials: Credentials = serde_json::from_str(&content)
                     .map_err(|e| Error::ParseCredentials { source: e })?;
                 match credentials.nkey {
                     // NKey seed is passed to async_nats; server validates

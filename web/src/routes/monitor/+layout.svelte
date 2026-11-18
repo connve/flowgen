@@ -3,9 +3,8 @@
 	import { page } from '$app/state';
 	import Icon from '@iconify/svelte';
 	import { onMount } from 'svelte';
-	import SidePane from '$lib/SidePane.svelte';
+	import { SidePane, isMobile } from '@connve/ui';
 	import { cluster, pollClusterStatus, unreachableCount } from '$lib/clusterStatus.svelte';
-	import { isMobile } from '$lib/mobile';
 	import { m } from '$lib/paraglide/messages.js';
 
 	let { children } = $props();

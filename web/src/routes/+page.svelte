@@ -5,19 +5,26 @@
 	import { onMount } from 'svelte';
 	import { SvelteSet } from 'svelte/reactivity';
 	import FlowDag from '$lib/dag/FlowDag.svelte';
-	import Inspector from '$lib/Inspector.svelte';
-	import StatusDot from '$lib/StatusDot.svelte';
-	import StateMessage from '$lib/StateMessage.svelte';
-	import { apiUrl, encodePath, errorMessage, failure } from '$lib/api';
+	import {
+		FolderTree,
+		IconButton,
+		Inspector,
+		ListHeader,
+		Loading,
+		SidePane,
+		StateMessage,
+		StatusDot,
+		buildTree,
+		isMobile
+	} from '@connve/ui';
+	import { encodePath, errorMessage, getConnection, getFlow, isStatus, listFlows } from '$lib/api';
 	import { formatRelative as fmtRelativeMs } from '$lib/time';
 	import { activitiesFor, allMetrics, releaseFlowSubscription } from '$lib/activityStore.svelte';
 	import Icon from '@iconify/svelte';
 	import { m } from '$lib/paraglide/messages.js';
-	import FolderTree from '$lib/FolderTree.svelte';
-	import ListHeader from '$lib/ListHeader.svelte';
-	import SidePane from '$lib/SidePane.svelte';
-	import { isMobile } from '$lib/mobile';
 	import { pageTitle } from '$lib/pageTitle';
+	import { deploymentsStream } from '$lib/urls';
+	import { visibleEventSource } from '$lib/visibleEventSource';
 	import { connectorByName } from '$lib/connectors';
 	import type {
 		AuthoringTarget,
@@ -27,8 +34,6 @@
 		FlowSummary as Flow,
 		FlowDetail
 	} from '$lib/api';
-	import { buildTree } from '$lib/tree';
-	import IconButton from '$lib/IconButton.svelte';
 	import {
 		authoringEnabled,
 		authoringTargets,
@@ -55,12 +60,42 @@
 	let nowTick = $state(Date.now());
 
 	let selectedTags = $state<Set<string>>(new Set());
-	let statusFilter = $state<Record<FlowStatus, boolean>>({
-		idle: true,
-		ok: true,
-		warn: true,
-		error: true,
-	});
+	// `rest` outlines a chip while nothing is picked; `picked` fills a picked one.
+	const STATUS_CHIPS: { status: FlowStatus; rest: string; picked: string; label: () => string }[] =
+		[
+			{
+				status: 'idle',
+				rest: 'border-base-300',
+				picked: 'chip-neutral',
+				label: m.flows_status_idle
+			},
+			{
+				status: 'ok',
+				rest: 'border-(--color-chip-success)/40 text-(--color-chip-success)',
+				picked: 'chip-success',
+				label: m.flows_status_ok
+			},
+			{
+				status: 'warn',
+				rest: 'border-(--color-chip-warning)/40 text-(--color-chip-warning)',
+				picked: 'chip-warn',
+				label: m.flows_status_warn
+			},
+			{
+				status: 'error',
+				rest: 'border-(--color-chip-error)/40 text-(--color-chip-error)',
+				picked: 'chip-error',
+				label: m.flows_status_error
+			}
+		];
+
+	function chipClass(chip: (typeof STATUS_CHIPS)[number]): string {
+		if (pickedStatuses.size === 0) return chip.rest;
+		return pickedStatuses.has(chip.status) ? chip.picked : 'border-base-300 chip-inactive';
+	}
+
+	// The statuses picked; none picked shows every flow.
+	let pickedStatuses = new SvelteSet<FlowStatus>();
 
 	let statusCounts = $derived.by(() => {
 		const c: Record<FlowStatus, number> = { idle: 0, ok: 0, warn: 0, error: 0 };
@@ -69,7 +104,12 @@
 	});
 
 	function toggleStatus(s: FlowStatus) {
-		statusFilter = { ...statusFilter, [s]: !statusFilter[s] };
+		if (pickedStatuses.has(s)) pickedStatuses.delete(s);
+		else pickedStatuses.add(s);
+	}
+
+	function shown(s: FlowStatus): boolean {
+		return pickedStatuses.size === 0 || pickedStatuses.has(s);
 	}
 
 	// Sorted so the chip row is stable across refreshes.
@@ -132,6 +172,12 @@
 		}),
 	);
 
+	// Loads the list again each time a flow starts or stops, such as a deployed change.
+	function reloadFlows() {
+		listFlows().then(({ data }) => (flows = data), () => undefined);
+		pendingChanges().then((changes) => (pending = changes));
+	}
+
 	onMount(() => {
 		const pane = localStorage.getItem('flowgen-folders-pane');
 		if (pane !== null) foldersPaneOpen = pane === '1';
@@ -149,9 +195,9 @@
 		authoringEnabled().then((enabled) => (authoring = enabled));
 		authoringTargets().then((found) => (targets = found));
 
-		load<Flow[]>('api/flows')
-			.then((found) => {
-				flows = found;
+		listFlows()
+			.then(({ data }) => {
+				flows = data;
 			})
 			.catch((err) => {
 				error = errorMessage(err, m.flows_load_failed());
@@ -161,18 +207,16 @@
 			});
 
 		tickerId = setInterval(() => (nowTick = Date.now()), 1000);
+		const closeDeployments = visibleEventSource(deploymentsStream(), (source) =>
+			source.addEventListener('deployment', reloadFlows)
+		);
 
 		return () => {
 			if (tickerId !== null) clearInterval(tickerId);
+			closeDeployments();
 			releaseFlowSubscription();
 		};
 	});
-
-	async function load<T>(path: string): Promise<T> {
-		const response = await fetch(apiUrl(path));
-		if (!response.ok) throw await failure(response);
-		return response.json();
-	}
 
 	// Shallow routing leaves `page.url` as is, so opening a preview keeps the filter.
 	let connectionId = $derived(page.url.searchParams.get('connection'));
@@ -203,13 +247,13 @@
 
 	// A link to a connection no loaded flow uses any more shows every flow.
 	async function loadConnection(id: string): Promise<Connection | null> {
-		const response = await fetch(apiUrl(`api/connections/${encodeURIComponent(id)}`));
-		if (response.status === 404) {
+		try {
+			return (await getConnection({ path: { id } })).data;
+		} catch (err) {
+			if (!isStatus(err, 404)) throw err;
 			clearConnection();
 			return null;
 		}
-		if (!response.ok) throw await failure(response);
-		return response.json();
 	}
 
 	function clearConnection() {
@@ -236,10 +280,12 @@
 			selectedLoading = true;
 		}
 		try {
-			const response = await fetch(apiUrl(`api/flows/${encodePath(path)}`));
-			if (response.status === 404) throw new Error(m.flow_not_found({ path }));
-			if (!response.ok) throw await failure(response);
-			const detail: FlowDetail = await response.json();
+			const detail = await getFlow({ path: { path } }).then(
+				({ data }) => data,
+				(err) => {
+					throw isStatus(err, 404) ? new Error(m.flow_not_found({ path })) : err;
+				}
+			);
 			flowCache.set(path, detail);
 			if (pendingFlow !== path) return;
 			selected = path;
@@ -309,7 +355,7 @@
 	let filtered = $derived.by(() => {
 		const requiredTags = selectedTags;
 		const matched = flowsView.filter((flow) => {
-			if (!statusFilter[flow.status]) return false;
+			if (!shown(flow.status)) return false;
 			for (const t of requiredTags) if (!flow.tags.includes(t)) return false;
 			return true;
 		});
@@ -326,7 +372,8 @@
 
 	// Modal breadcrumb parts derived from `selected` (the currently open flow path).
 	let selectedSegments = $derived(selected ? selected.split('/') : []);
-	let selectedLeaf = $derived(selectedSegments[selectedSegments.length - 1] ?? '');	let sidebarTree = $derived(buildTree<Flow>(scopedFlows, (f) => f.path));
+	let selectedLeaf = $derived(selectedSegments[selectedSegments.length - 1] ?? '');
+	let sidebarTree = $derived(buildTree<Flow>(scopedFlows, (f) => f.path));
 
 	// Table rows: `filtered` (already respects status and tags) further
 	// narrowed to `selectedFolder` when set.
@@ -408,54 +455,31 @@
 		count={m.flows_count({ count: visibleFlows.length })}
 		pending={authoring ? pending.length : null}
 		pendingLabel={m.flows_pending_changes({ count: pending.length })}
+		pendingHref="{base}/changes"
 		newHref="{base}/edit?new=flow{selectedFolder ? `&folder=${encodePath(selectedFolder)}` : ''}"
 	/>
 	<div class="flex flex-wrap items-center gap-2">
 		<div class="flex items-center gap-1">
-			<button
-				type="button"
-				class="chip {statusFilter.idle ? 'chip-neutral' : 'chip-inactive'}"
-				aria-pressed={statusFilter.idle}
-				onclick={() => toggleStatus('idle')}
-			>
-				<span>{m.flows_status_idle()}</span>
-				{#if statusFilter.idle}
-					<span class="tabular-nums opacity-60">{statusCounts.idle}</span>
-				{/if}
-			</button>
-			<button
-				type="button"
-				class="chip {statusFilter.ok ? 'chip-success' : 'chip-inactive'}"
-				aria-pressed={statusFilter.ok}
-				onclick={() => toggleStatus('ok')}
-			>
-				<span>{m.flows_status_ok()}</span>
-				{#if statusFilter.ok}
-					<span class="tabular-nums opacity-60">{statusCounts.ok}</span>
-				{/if}
-			</button>
-			<button
-				type="button"
-				class="chip {statusFilter.warn ? 'chip-warn' : 'chip-inactive'}"
-				aria-pressed={statusFilter.warn}
-				onclick={() => toggleStatus('warn')}
-			>
-				<span>{m.flows_status_warn()}</span>
-				{#if statusFilter.warn}
-					<span class="tabular-nums opacity-60">{statusCounts.warn}</span>
-				{/if}
-			</button>
-			<button
-				type="button"
-				class="chip {statusFilter.error ? 'chip-error' : 'chip-inactive'}"
-				aria-pressed={statusFilter.error}
-				onclick={() => toggleStatus('error')}
-			>
-				<span>{m.flows_status_error()}</span>
-				{#if statusFilter.error}
-					<span class="tabular-nums opacity-60">{statusCounts.error}</span>
-				{/if}
-			</button>
+			{#each STATUS_CHIPS as chip (chip.status)}
+				<button
+					type="button"
+					class="chip {chipClass(chip)}"
+					aria-pressed={pickedStatuses.has(chip.status)}
+					onclick={() => toggleStatus(chip.status)}
+				>
+					<span>{chip.label()}</span>
+					<span class="tabular-nums opacity-60">{statusCounts[chip.status]}</span>
+				</button>
+			{/each}
+			{#if pickedStatuses.size > 0}
+				<button
+					type="button"
+					class="btn btn-ghost btn-xs font-normal text-base-content/60"
+					onclick={() => pickedStatuses.clear()}
+				>
+					{m.flows_tag_filters_clear()}
+				</button>
+			{/if}
 			{#if connection}
 				{@const connector = connectorByName(connection.connector)}
 				<button
@@ -542,19 +566,17 @@
 
 	<div class="flex min-h-0 flex-1 flex-col overflow-y-auto px-6 pb-6">
 	{#if loading || connectionLoading}
-		<div class="flex justify-center py-12">
-			<span class="loading loading-spinner loading-lg text-primary"></span>
-		</div>
+		<Loading />
 	{:else if error}
 		<StateMessage tone="oops" title={m.flows_load_failed()} message={error} />
 	{:else if flows.length === 0}
 		<StateMessage
 			tone="notice"
 			title={m.flows_empty_title()}
-			message={authoring ? m.flows_empty_message_authoring() : m.flows_empty_message()}
+			message={authoring ? undefined : m.flows_empty_message()}
 		/>
 	{:else if visibleFlows.length === 0}
-		<StateMessage tone="notice" title={m.flows_no_match_title()} message={m.flows_no_match_message()} />
+		<StateMessage tone="notice" title={m.flows_no_match_title()} />
 	{:else}
 		<div class="-mx-6 shrink-0 overflow-x-auto px-6">
 			<table class="table table-sm w-full bg-base-100">
@@ -706,9 +728,7 @@
 				/>
 			{/snippet}
 			{#if selectedLoading}
-				<div class="flex justify-center py-12">
-					<span class="loading loading-spinner loading-md text-primary"></span>
-				</div>
+				<Loading size="md" />
 			{:else if selectedError}
 				<StateMessage tone="oops" title={m.flow_load_failed_title()} message={selectedError} />
 			{:else if selectedDetail}

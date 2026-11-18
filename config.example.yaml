@@ -8,30 +8,29 @@
 # The cache is used for:
 # - State persistence across workflow executions (e.g., replay identifiers)
 # - Distributed coordination and leader election via atomic operations
-# When enabled with NATS, provides distributed lease management across multiple instances.
-# When disabled, falls back to in-memory cache (suitable for single-instance deployments only).
+# Without this section, flowgen keeps the cache in a local redb file at
+# .flowgen/state.redb, for a single process. NATS shares it across replicas.
 cache:
-  enabled: true
-  url: "url_of_cache"
+  # `nats` shares the cache across replicas; `redb` (the default) keeps it in
+  # the local file at `path`.
   type: nats
-  # Two buckets on this connection, split by who can reach them.
-  # Both are optional; omit either to take the default shown.
+  url: "nats://localhost:4222"
+  # path: ".flowgen/state.redb"
+  # Optional path to a NATS credentials file.
+  # credentials_path: "/etc/nats/credentials.json"
+  # Two buckets, split by who can reach them; omit either for the default.
   # runtime:
   #   # Flow state, reachable from scripts through ctx.cache.
   #   db_name: "flowgen_cache"
   # system:
-  #   # Leader-election leases and peer registration. Kept apart from
-  #   # runtime so a flow's script cannot read or overwrite them.
+  #   # Out of reach of scripts: leader-election leases, peers, and the
+  #   # flows, resources and releases loaded from the cache.
   #   db_name: "flowgen_system"
-  # Optional path to a NATS credentials file.
-  # credentials_path: "/etc/nats/credentials.json"
-  # Optional: number of historical entries retained per key (defaults to 64,
-  # the NATS server-side cap for KV buckets). Only applies when the KV bucket
-  # is first created.
+  # Historical entries kept per key, when NATS creates a bucket (default 64,
+  # the NATS cap).
   # history: 64
-  # Optional: TTL for KV delete/purge tombstone markers (defaults to 1h).
-  # Must be set for per-key TTLs on cache entries to work at all.
-  # Only applies when the KV bucket is first created.
+  # TTL of delete markers, when NATS creates a bucket (default 1h). Per-key
+  # TTLs on cache entries need it.
   # tombstone_ttl: "1h"
 
 # Flow discovery configuration (shared across worker and server).
@@ -40,23 +39,26 @@ cache:
 # When both are active, the filesystem entry wins on name collisions.
 flows:
   path: "path_to_configs_folder"
-  # Optional: load flows from a distributed cache (e.g., populated by git_sync).
-  # When enabled alongside filesystem, stale cache entries shadowed by filesystem flows
-  # are automatically deleted on startup.
+  # Optional: also load the flows under `flows.` in the system bucket, which
+  # the deploy flow writes. A filesystem flow with the same identity wins.
   # cache:
   #   enabled: true
-  #   prefix: "flowgen.flows"
-  #   db_name: "flowgen_system"
+  # Optional: run this version's system flows under `system/` (commit,
+  # release, deploy, Flowgen Agent, hubs); a flow at `path` with the same
+  # identity takes their place.
+  # system: true
 
 # Resource loading configuration (optional, shared across worker and server).
 # Enables loading external files (SQL queries, templates, etc.) instead of embedding content in YAML.
 resources:
   path: "path_to_resources_folder"
+  # Optional: fall back to the resources under `resources.` in the system bucket.
+  # cache:
+  #   enabled: true
 
 # OpenTelemetry configuration for metrics, traces, and logs (optional).
 # When enabled without a backend, signals stay in-process (memory backend).
-# When configured with the otlp backend, signals ship to any OTLP-compatible
-# collector (OpenTelemetry Collector, Grafana Cloud, Honeycomb, Datadog, etc.).
+# With the `remote` backend, signals go over OTLP/gRPC to a collector.
 telemetry:
   enabled: false
   # Optional: backend selection.
@@ -121,7 +123,7 @@ http_server:
 # mcp_server:
 #   enabled: true
 #   port: 3001
-#   path: "/mcp"
+#   path: "/mcp/v1"
 #   credentials_path: "/etc/mcp/api-keys.json"
 
 # AI gateway server configuration for OpenAI-compatible chat completion endpoints (optional).
@@ -147,18 +149,18 @@ http_server:
 #   # The Agents tab and /api/agents. Omit to hide the tab.
 #   agents:
 #     enabled: true
-#     # How long a chat conversation lives in the configured cache before it
+#     # How long an agent session lives in the configured cache before it
 #     # expires, refreshed on every write. Defaults to 30 days; set to 0 to
 #     # persist indefinitely. Long-term history belongs in a database via a
 #     # persistence flow, not this cache.
-#     conversation_history_ttl: 30d
+#     session_history_ttl: 30d
 #     # Call the AI gateway as the signed-in user, with their login token as
 #     # the bearer (default false). Needs web.auth, and the gateway's auth
 #     # provider must accept the token. Replaces any Authorization header in
 #     # web.headers.
 #     # on_behalf_of_user: true
-#     # Cache key prefix for conversations, read state and folders. A flow
-#     # opens a conversation under `<cache_prefix>.conversations.`.
+#     # Cache key prefix for sessions, read state and folders. A flow
+#     # opens a session under `<cache_prefix>.sessions.`.
 #     # cache_prefix: agents
 #     # How often a reply in progress is saved (default 3s).
 #     # reply_save_interval: 3s
@@ -166,15 +168,12 @@ http_server:
 #     # before it fails (default 10m).
 #     # reply_idle_timeout: 10m
 #   # HTTP headers sent with every request the web server makes to the AI
-#   # gateway for the Agents tab. Identifies this web server to
-#   # llm_proxy/mcp_tool `headers` scoping.
-#   headers:
-#     X-Flowgen-Client: flowgen-ui
+#   # gateway for the Agents tab, such as a key the gateway requires.
+#   # headers:
+#   #   Authorization: "Bearer <key>"
 #
-#   # Optional OIDC login for the web UI (Okta, Zitadel, Auth0, or any
-#   # standard-compliant provider — including one that itself federates to
-#   # an upstream customer IdP). Omit `auth` to leave the web UI
-#   # unauthenticated. flowgen keeps no server-side session store: the
+#   # Optional login for the web UI with any OpenID Connect provider. Omit
+#   # `auth` to leave the web UI unauthenticated. flowgen keeps no server-side session store: the
 #   # browser's cookie holds the IdP's tokens, encrypted with a key the
 #   # first pod generates and keeps in the system bucket.
 #   auth:
@@ -195,7 +194,7 @@ http_server:
 #     # The IdP's logout URL, with its own return URL already embedded and
 #     # registered with the IdP. flowgen appends `id_token_hint`. Unset signs
 #     # out of flowgen only, leaving the IdP session intact.
-#     # signout_redirect_url: "https://example.okta.com/oauth2/default/v1/logout?post_logout_redirect_uri=https%3A%2F%2Fexample.com%2Fflowgen%2F"
+#     # signout_redirect_url: "https://auth.example.com/logout?post_logout_redirect_uri=https%3A%2F%2Fexample.com%2Fflowgen%2F"
 #   # Optional: your own cookie key instead of the generated one.
 #   # cookie_secret: "a long random string, at least 32 bytes"
 #   # Login cookies require HTTPS by default. Set to false only for a
@@ -209,6 +208,11 @@ http_server:
 #   # Who may show the web UI in a frame (Content-Security-Policy
 #   # frame-ancestors). Defaults to the UI's own origin.
 #   # frame_ancestors: ["'self'", "https://console.example.com"]
+#   # Checking for a newer flowgen release, shown next to the version.
+#   # update_check:
+#   #   enabled: true
+#   #   url: "https://api.github.com/repos/connve/flowgen/releases/latest"
+#   #   interval: 24h
 #   # Change proposals for flows and resources, approved in the web UI.
 #   # authoring:
 #   #   enabled: true
@@ -225,10 +229,10 @@ http_server:
 #   #     - name: user
 #   #       paths: ["flows/user/", "resources/user/"]
 #   #       approver_groups: ["business-leads"]
-#   #       # Flow, starting with an inproc_endpoint, that publishes the
-#   #       # target's approved changes (default system/publish_workspace).
-#   #       publish_flow: system/publish_workspace
-#   #       # Report when a published change runs here (default true); turn
+#   #       # Flow, starting with an inproc_endpoint, that commits the
+#   #       # target's approved changes (default system/commit_workspace).
+#   #       commit_flow: system/commit_workspace
+#   #       # Report when a committed change runs here (default true); turn
 #   #       # off when this target is not deployed to this instance.
 #   #       track_deployment: true
 #   #   # Claim of the signed-in user that lists their groups (default groups).
@@ -245,6 +249,25 @@ http_server:
 # How long a stopping flow lets its events in flight finish before its
 # tasks are aborted (default 20s; a flow can set its own).
 # shutdown_timeout: 20s
+
+# The address every server listens on (default 0.0.0.0); 127.0.0.1 keeps
+# them to this machine.
+# host: 0.0.0.0
+
+# Default retry of every task; a task can set its own.
+# retry:
+#   max_attempts: 10
+#   initial_backoff: 1s
+
+# Credentials added in the web UI, encrypted with SOPS and age (optional).
+# credentials:
+#   # age public keys each credential is encrypted for.
+#   recipients: ["age1..."]
+#   # The age key this instance decrypts with; omit where the cluster
+#   # decrypts the credentials.
+#   identity_path: .flowgen/age.key
+#   # The folder flows read credentials from, which FLOWGEN_CREDENTIALS names.
+#   path: credentials
 
 # Limits on what every ai_completion uses, across all models (optional).
 # ai_budget:
