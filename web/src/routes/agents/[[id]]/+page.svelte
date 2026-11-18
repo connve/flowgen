@@ -1076,11 +1076,13 @@
 			/>
 		</div>
 	{:else if modelsEmpty}
-		<div class="flex flex-1 flex-col items-center justify-center gap-8 px-6">
+		<div class="flex flex-1 items-center justify-center">
 			<StateMessage tone="notice" title={m.agents_models_empty_title()}>
-				<a href="{base}/new?kind=flow" class="btn btn-primary btn-sm">{m.agents_models_add()}</a>
+				<div class="flex flex-col items-center gap-6">
+					<a href="{base}/new?kind=flow" class="btn btn-primary btn-sm">{m.agents_models_add()}</a>
+					<CodingAgentsLink href={AGENT_SETUP_URL} label={m.agents_connect_coding_agent()} />
+				</div>
 			</StateMessage>
-			<CodingAgentsLink href={AGENT_SETUP_URL} label={m.agents_connect_coding_agent()} />
 		</div>
 	{:else if convoLoading && messages.length === 0}
 		<!-- Loading a session by id — spinner instead of a flashing empty state. -->

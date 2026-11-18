@@ -326,7 +326,9 @@ pub fn outdated_system_flows(workspace: &Workspace) -> Result<Vec<String>, Lifec
 /// Puts the lifecycle flows of the workspace's last commit into the cache a
 /// run loads flows from, as no flow can deploy the flow that deploys it; the
 /// deploy flow keeps them, and every other flow, up to date from then on.
-/// Fails, starting none, when the commit lacks one.
+/// Announces that commit at `commits.latest`, so the release flow releases it
+/// at start rather than on its first tick. Fails, starting none, when the
+/// commit lacks one.
 pub async fn start_lifecycle(workspace: &Workspace) -> Result<(), LifecycleError> {
     let paths: Vec<String> = LIFECYCLE_FLOWS
         .iter()
@@ -354,6 +356,9 @@ pub async fn start_lifecycle(workspace: &Workspace) -> Result<(), LifecycleError
                 None,
             )
             .await?;
+    }
+    if let Some(commit) = flowgen_git::workspace::head(&workspace.repository)? {
+        cache.put("commits.latest", commit.into(), None).await?;
     }
     Ok(())
 }
@@ -615,6 +620,12 @@ mod tests {
         assert_eq!(
             started("system/deploy_workspace").await,
             Some(system_flow("deploy_workspace.yaml"))
+        );
+        let announced = cache.get("commits.latest").await.unwrap().unwrap();
+        assert_eq!(
+            Some(String::from_utf8(announced.to_vec()).unwrap()),
+            flowgen_git::workspace::head(&root).unwrap(),
+            "The commit is announced, so the release flow runs at start"
         );
         assert!(outdated_system_flows(&workspace).unwrap().is_empty());
         assert!(

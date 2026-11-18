@@ -22,7 +22,7 @@ A template whose files are partly gone from the workspace shows **Incomplete**; 
 
 ## Hub flow
 
-A hub is a flow named `flows/system/<id>_hub.yaml`: an [`inproc_endpoint`](/docs/flowgen/core/inproc) that the web UI calls in-process, followed by a task that returns the catalog's files as `{files: [{path, content}]}`, such as [OCI Sync](/docs/flowgen/oci/sync) of an artifact. The flow's `display_name` names the hub. A workspace started by `flowgen` without `--config` holds `connve_hub.yaml`, reading `ghcr.io/connve/hub/flowgen:<version>` for the running version of flowgen.
+A hub is a flow named `flows/system/<id>_hub.yaml`: an [`inproc_endpoint`](/docs/flowgen/core/inproc) that the web UI calls in-process, followed by a task that returns the catalog's files as `{files: [{path, content}]}`, such as [OCI Sync](/docs/flowgen/oci/sync) of an artifact. The flow's `display_name` names the hub. A workspace started by `flowgen` without `--config` holds `connve_hub.yaml`, reading the hub's latest catalog, `ghcr.io/connve/hub/flowgen:latest`. A template that needs a newer flowgen fails validation before it can be approved.
 
 ```yaml
 flow:
