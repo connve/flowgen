@@ -24,11 +24,7 @@ pub type Latest = watch::Sender<Option<String>>;
 /// Checks the newest release now and then every `options.interval`; a failed
 /// check keeps the last answer.
 pub async fn watch_latest(options: UpdateCheckOptions, latest: Latest) {
-    let client = match reqwest::Client::builder()
-        .timeout(CHECK_TIMEOUT)
-        .user_agent(format!("flowgen/{CURRENT_VERSION}"))
-        .build()
-    {
+    let client = match client() {
         Ok(client) => client,
         Err(e) => {
             debug!(error = %e, "Failed to build the release check client");
@@ -47,7 +43,19 @@ pub async fn watch_latest(options: UpdateCheckOptions, latest: Latest) {
     }
 }
 
-async fn newest_release(client: &reqwest::Client, url: &str) -> Result<String, reqwest::Error> {
+/// The client release checks and downloads go through.
+pub(crate) fn client() -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .timeout(CHECK_TIMEOUT)
+        .user_agent(format!("flowgen/{CURRENT_VERSION}"))
+        .build()
+}
+
+/// The version of the newest release `url` names.
+pub(crate) async fn newest_release(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<String, reqwest::Error> {
     let release: Release = client
         .get(url)
         .send()
@@ -59,7 +67,7 @@ async fn newest_release(client: &reqwest::Client, url: &str) -> Result<String, r
 }
 
 /// Whether `candidate` is a later `major.minor.patch` than `current`.
-fn is_newer(candidate: &str, current: &str) -> bool {
+pub(crate) fn is_newer(candidate: &str, current: &str) -> bool {
     match (parse(candidate), parse(current)) {
         (Some(candidate), Some(current)) => candidate > current,
         _ => false,

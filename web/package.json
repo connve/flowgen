@@ -1,6 +1,6 @@
 {
 	"name": "flowgen-web",
-	"version": "0.157.0",
+	"version": "0.158.0",
 	"private": true,
 	"scripts": {
 		"gen-api": "svelte-kit sync && openapi-ts",
@@ -44,7 +44,7 @@
 		"@codemirror/search": "^6.7.2",
 		"@codemirror/state": "^6.7.6",
 		"@codemirror/view": "^6.43.15",
-		"@connve/ui": "^0.3.1",
+		"@connve/ui": "^0.3.2",
 		"@dagrejs/dagre": "^3.0.0",
 		"@iconify/svelte": "^5.2.2",
 		"@lezer/highlight": "^1.2.5",

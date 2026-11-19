@@ -114,6 +114,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
     steps:
       - name: Download digests
         uses: actions/download-artifact@v4
@@ -152,6 +154,19 @@ jobs:
           TAGARGS=$(echo "${{ steps.tags.outputs.tags }}" | tr ',' '\n' | xargs -I {} echo "-t {}")
           docker buildx imagetools create $TAGARGS \
             $(printf 'ghcr.io/${{ github.repository }}@sha256:%s ' *)
+
+      - name: Read the image's digest
+        id: image
+        run: |
+          DIGEST=$(docker buildx imagetools inspect "ghcr.io/${{ github.repository }}:latest" --format '{{json .Manifest}}' | jq -r .digest)
+          echo "digest=$DIGEST" >> $GITHUB_OUTPUT
+
+      # Ties the image to this workflow and commit, pushed next to it.
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
 
   create-release:
     needs: [detect-version, merge-docker]
@@ -217,6 +232,8 @@ jobs:
     permissions:
       contents: write
       packages: read
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v4
 
@@ -243,6 +260,11 @@ jobs:
           sha256sum "$ARCHIVE" | awk '{print $1}' > "$ARCHIVE.sha256"
           echo "ARCHIVE=$ARCHIVE" >> $GITHUB_ENV
 
+      # Ties the archive to this workflow and commit: `gh attestation verify`.
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ env.ARCHIVE }}
+
       - name: Upload release asset
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -262,6 +284,8 @@ jobs:
     runs-on: macos-latest
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     env:
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
     steps:
@@ -305,6 +329,11 @@ jobs:
           tar -czf "$ARCHIVE" -C "target/${{ matrix.target }}/release" flowgen
           shasum -a 256 "$ARCHIVE" | awk '{print $1}' > "$ARCHIVE.sha256"
           echo "ARCHIVE=$ARCHIVE" >> $GITHUB_ENV
+
+      # Ties the archive to this workflow and commit: `gh attestation verify`.
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ env.ARCHIVE }}
 
       - name: Upload release asset
         env:

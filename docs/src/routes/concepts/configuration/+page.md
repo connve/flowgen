@@ -109,6 +109,7 @@ Flow discovery. Filesystem and distributed cache can be used independently or to
 | `cache` | object | | Cache-mode flow loading. Loads flows from the system bucket, under `flows.`, in addition to the filesystem. |
 | `cache.enabled` | bool | required | Enable cache-mode flow loading. |
 | `system` | bool | `false` | Runs this version's system flows under `system/`: the [lifecycle flows](/docs/flowgen/concepts/authoring#lifecycle-flows), Flowgen Agent and its tools, and the hubs. A flow at `path` with the same identity takes their place. A workspace started by `flowgen` without `--config` holds them in its repository instead. |
+| `system_exclude` | list | | System flows left out, by identity, such as `system/release_workspace` when the repository's CI pushes the releases and flowgen only deploys them. An identity that is not a system flow fails the config. |
 
 Both sources can be active at the same time. Use this for gradual migration: a small set of bootstrap flows mounted from disk (typically a sync flow that pulls user flows from Git into the cache), with the bulk of user flows loaded from the cache. On a name collision the filesystem entry wins, so a locally mounted bootstrap flow cannot be silently overridden by a stale cache entry.
 

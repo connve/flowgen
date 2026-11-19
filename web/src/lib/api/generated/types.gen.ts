@@ -277,6 +277,10 @@ export type VersionInfo = {
      * The newest released version, when it is newer than `version`.
      */
     latest?: string;
+    /**
+     * Whether flowgen runs in a container, updated by its image rather than `flowgen update`.
+     */
+    container: boolean;
 };
 
 export type ConfigInfo = {

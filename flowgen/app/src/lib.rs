@@ -33,6 +33,8 @@ pub mod login;
 pub mod reconciler;
 /// The newest flowgen release, for the web UI's update notice.
 pub mod releases;
+/// `flowgen update`: updating this binary to the newest release.
+pub mod update;
 /// Validation of flow and resource files without running them.
 pub mod validation;
 /// Hot-reload watcher for cache-sourced flows.

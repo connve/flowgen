@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.158.0
+
+### Added
+
+- `flowgen update` updates flowgen to the newest release: with
+  `brew update` and `brew upgrade flowgen` when Homebrew installed it, else
+  by replacing the binary once its checksum matches.
+- `flows.system_exclude` leaves system flows out by identity, such as
+  `system/release_workspace` when the repository's CI pushes the releases;
+  the chart's `systemFlows.release: false` sets it.
+- Release archives and the Docker image carry build provenance
+  attestations, which `gh attestation verify` checks.
+
+### Changed
+
+- The web UI shows Update available above the settings, also with the side
+  panel collapsed, and opens the command to run or, in a container, the
+  image to update to. `GET /api/version` returns `container`.
+
 ## 0.157.0
 
 ### Added

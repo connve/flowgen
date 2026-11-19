@@ -1498,6 +1498,7 @@ async fn get_version(State(state): State<Arc<WebState>>) -> Json<api::VersionInf
     Json(api::VersionInfo {
         version: crate::releases::CURRENT_VERSION.to_string(),
         latest: state.latest_release.borrow().clone(),
+        container: crate::update::in_container(),
     })
 }
 

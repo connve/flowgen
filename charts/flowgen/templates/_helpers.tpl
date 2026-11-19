@@ -67,7 +67,8 @@ app.kubernetes.io/component: wireguard-gateway
 
 {{/*
 The app config: `config.settings`, with `flows.system` on when `systemFlows`
-is enabled. Rendered as YAML; read it back with `fromYaml`.
+is enabled, leaving out the release flow when `systemFlows.release` is false.
+Rendered as YAML; read it back with `fromYaml`.
 */}}
 {{- define "flowgen.settings" -}}
 {{- $worker := index .Values "flowgen" -}}
@@ -75,6 +76,10 @@ is enabled. Rendered as YAML; read it back with `fromYaml`.
 {{- if $worker.systemFlows.enabled }}
 {{- $flows := default dict (get $settings "flows") -}}
 {{- $_ := set $flows "system" true -}}
+{{- if eq (toString $worker.systemFlows.release) "false" }}
+{{- $excluded := default list (get $flows "system_exclude") -}}
+{{- $_ := set $flows "system_exclude" (append $excluded "system/release_workspace" | uniq) -}}
+{{- end }}
 {{- $_ := set $settings "flows" $flows -}}
 {{- end }}
 {{- toYaml $settings }}

@@ -1,7 +1,7 @@
 {
 	"name": "docs",
 	"private": true,
-	"version": "0.157.0",
+	"version": "0.158.0",
 	"type": "module",
 	"scripts": {
 		"sync-icons": "node scripts/sync-icons.mjs",
@@ -31,7 +31,7 @@
 		"vite": "^7.3.1"
 	},
 	"dependencies": {
-		"@connve/ui": "^0.3.1",
+		"@connve/ui": "^0.3.2",
 		"@iconify/svelte": "^5.2.4",
 		"github-slugger": "^2.0.0",
 		"lucide-svelte": "^1.0.1",

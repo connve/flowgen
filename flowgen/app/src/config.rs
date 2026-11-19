@@ -583,6 +583,8 @@ pub enum ValidationError {
          `;` or `,`, e.g. \"'self'\" or \"https://console.example.com\""
     )]
     FrameAncestor { source_expression: String },
+    #[error("`flows.system_exclude` entry {identity:?} is not a system flow; they are {known}")]
+    UnknownSystemFlow { identity: String, known: String },
 }
 
 impl AppConfig {
@@ -678,6 +680,20 @@ impl AppConfig {
     pub fn validate(&self) -> Result<(), ValidationError> {
         if let Some(budget) = self.ai_budget.as_ref() {
             budget.validate()?;
+        }
+        if !self.flows.system_exclude.is_empty() {
+            let known = crate::local::system_flow_identities();
+            if let Some(identity) = self
+                .flows
+                .system_exclude
+                .iter()
+                .find(|identity| !known.contains(identity))
+            {
+                return Err(ValidationError::UnknownSystemFlow {
+                    identity: identity.clone(),
+                    known: known.join(", "),
+                });
+            }
         }
         let Some(web) = self.web.as_ref() else {
             return Ok(());
@@ -828,6 +844,10 @@ pub struct FlowOptions {
     /// and the hubs. A flow at `path` with the same identity takes their place.
     #[serde(default)]
     pub system: bool,
+    /// System flows left out, by identity, such as `system/release_workspace`
+    /// when the repository's CI releases the workspace.
+    #[serde(default)]
+    pub system_exclude: Vec<String>,
 }
 
 /// Default system bucket name.
@@ -1887,6 +1907,7 @@ mod tests {
                 path: Some(PathBuf::from("/test/flows/*")),
                 cache: None,
                 system: false,
+                system_exclude: Vec::new(),
             },
             resources: None,
             http_server: None,
@@ -1919,6 +1940,7 @@ mod tests {
                 path: Some(PathBuf::from("/flows/*")),
                 cache: None,
                 system: false,
+                system_exclude: Vec::new(),
             },
             resources: None,
             http_server: None,
@@ -1960,6 +1982,7 @@ mod tests {
                 path: Some(PathBuf::from("/serialize/flows/*")),
                 cache: None,
                 system: false,
+                system_exclude: Vec::new(),
             },
             resources: None,
             http_server: None,
@@ -1997,6 +2020,7 @@ mod tests {
                 path: None,
                 cache: None,
                 system: false,
+                system_exclude: Vec::new(),
             },
             resources: None,
             http_server: None,
@@ -2033,6 +2057,24 @@ flows:
             "legacy_bucket"
         );
         config.validate().expect("new layout is accepted");
+    }
+
+    #[test]
+    fn a_system_flow_can_be_left_out_by_identity_and_an_unknown_one_is_rejected() {
+        let config = |excluded: &str| -> AppConfig {
+            serde_yaml::from_str(&format!(
+                "flows:\n  system: true\n  system_exclude: [{excluded:?}]\n"
+            ))
+            .expect("parses")
+        };
+
+        config("system/release_workspace")
+            .validate()
+            .expect("a system flow is accepted");
+        assert!(matches!(
+            config("system/release").validate(),
+            Err(ValidationError::UnknownSystemFlow { .. })
+        ));
     }
 
     #[test]
@@ -2295,6 +2337,7 @@ flows:
                 path: None,
                 cache: None,
                 system: false,
+                system_exclude: Vec::new(),
             },
             resources: None,
             http_server: Some(HttpServerOptions {
@@ -2421,6 +2464,7 @@ flows:
                 path: None,
                 cache: None,
                 system: false,
+                system_exclude: Vec::new(),
             },
             resources: None,
             http_server: None,
