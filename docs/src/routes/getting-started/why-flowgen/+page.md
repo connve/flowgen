@@ -31,7 +31,7 @@ And is it agentic? Everything is agentic these days, isn't it? Well, we made sur
 
 - **Agents build, people approve.** Flowgen Agent in the UI, or [the coding agent you already use](/docs/flowgen/getting-started/agent-setup), proposes changes to your data flows or resources. Nothing goes live until somebody approves it.
 - **MCP server.** Turn any flow, whether a query, an API call or a whole pipeline, into a tool your agents can run, on your rules, with your business context and one place for logs.
-- **AI Gateway.** One OpenAI- and Anthropic-compatible endpoint for your apps' model calls. Each request runs through a flow, so you can log, enrich or check it on the way.
+- **AI gateway.** One OpenAI- and Anthropic-compatible endpoint for your apps' model calls. Each request runs through a flow, so you can log, enrich or check it on the way.
 - **AI completions.** Call models from any flow: OpenAI, Anthropic, Gemini, Mistral, local models through Ollama, or any OpenAI-compatible endpoint.
 - **Agent sessions.** Chat with an agent or run MCP tools from the Flowgen UI, to test or simply to work with the platform.
 

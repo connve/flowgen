@@ -70,6 +70,18 @@ pub fn starter_files() -> Vec<(String, String)> {
         .collect()
 }
 
+/// The identities of the system flows, such as `system/release_workspace`.
+pub fn system_flow_identities() -> Vec<String> {
+    let folder = format!("{FLOWS_DIR}/");
+    starter_files()
+        .into_iter()
+        .filter_map(|(path, _)| {
+            path.strip_prefix(&folder)
+                .map(|file| crate::validation::flow_identity(file).to_string())
+        })
+        .collect()
+}
+
 /// The system flows as flows to run, for a run with `flows.system`; one that
 /// fails to load is logged and left out.
 pub fn system_flows() -> Vec<crate::config::FlowConfig> {

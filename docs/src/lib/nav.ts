@@ -46,6 +46,7 @@ export const navigation: NavSection[] = [
 			{ title: 'Installation', href: '/getting-started/installation' },
 			{ title: 'Quick Start', href: '/getting-started/quickstart' },
 			{ title: 'Agent setup', href: '/getting-started/agent-setup' },
+			{ title: 'Kubernetes', href: '/getting-started/kubernetes' },
 			{ title: 'WireGuard Gateway', href: '/getting-started/wireguard-gateway' }
 		]
 	},

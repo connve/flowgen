@@ -5,7 +5,7 @@ info:
     HTTP API for flowgen. Two listeners: `web` (flow / resource /
     SSE endpoints under `web.path`) and `health` (Kubernetes probes
     on the root path).
-  version: 0.157.0
+  version: 0.158.0
   license:
     name: MPL-2.0
 servers:
@@ -1611,7 +1611,7 @@ components:
 
     VersionInfo:
       type: object
-      required: [version]
+      required: [version, container]
       properties:
         version:
           type: string
@@ -1619,6 +1619,9 @@ components:
         latest:
           type: string
           description: The newest released version, when it is newer than `version`.
+        container:
+          type: boolean
+          description: Whether flowgen runs in a container, updated by its image rather than `flowgen update`.
 
     ConfigInfo:
       type: object

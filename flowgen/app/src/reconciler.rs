@@ -614,7 +614,7 @@ fn test_context() -> ReconcilerContext {
         flows: crate::config::FlowOptions {
             path: None,
             cache: Some(crate::config::FlowCacheOptions { enabled: true }),
-            system: false,
+            ..crate::config::FlowOptions::default()
         },
         resources: None,
         http_server: None,
@@ -815,7 +815,7 @@ flow:
             flows: crate::config::FlowOptions {
                 path: None,
                 cache: Some(crate::config::FlowCacheOptions { enabled: true }),
-                system: false,
+                ..crate::config::FlowOptions::default()
             },
             resources: None,
             http_server: None,

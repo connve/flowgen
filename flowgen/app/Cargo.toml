@@ -54,6 +54,8 @@ serde_yaml = { workspace = true }
 similar = { workspace = true }
 subtle = { workspace = true }
 sha2 = { workspace = true }
+flate2 = { workspace = true }
+tar = { workspace = true }
 base64 = { workspace = true }
 age = { workspace = true }
 tokio-retry = { workspace = true }

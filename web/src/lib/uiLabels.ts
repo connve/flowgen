@@ -28,4 +28,7 @@ export function setUiLabels() {
 	labels.search = m.search_open();
 	labels.searchPlaceholder = m.search_bar();
 	labels.searchEmpty = m.search_no_results();
+	labels.updateAvailable = m.nav_update_available();
+	labels.updateVersions = (latest, version) => m.nav_update_versions({ latest, version });
+	labels.releaseNotes = m.nav_release_notes();
 }

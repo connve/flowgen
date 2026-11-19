@@ -107,6 +107,25 @@ fn system_flows_run_from_flowgen_with_their_variables_and_credentials() {
 }
 
 #[test]
+fn system_flows_leave_out_the_release_flow_when_ci_releases() {
+    let values = |release: &str| {
+        format!(
+            "flowgen:\n  systemFlows:\n    enabled: true\n    repository: https://git.example.com/a.git\n    releases: registry.example.com/a\n    release: {release}\n"
+        )
+    };
+
+    let config = app_config(&render(&values("false")));
+    assert_eq!(config.flows.system_exclude, ["system/release_workspace"]);
+    config
+        .validate()
+        .expect("the release flow is a system flow");
+    assert!(app_config(&render(&values("true")))
+        .flows
+        .system_exclude
+        .is_empty());
+}
+
+#[test]
 fn system_flows_require_a_repository_and_releases() {
     for (missing, values) in [
         ("repository", "releases: registry.example.com/a"),

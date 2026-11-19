@@ -47,6 +47,9 @@ flows:
   # release, deploy, Flowgen Agent, hubs); a flow at `path` with the same
   # identity takes their place.
   # system: true
+  # Optional: system flows left out, such as the release flow when the
+  # repository's CI pushes the releases.
+  # system_exclude: ["system/release_workspace"]
 
 # Resource loading configuration (optional, shared across worker and server).
 # Enables loading external files (SQL queries, templates, etc.) instead of embedding content in YAML.

@@ -749,7 +749,11 @@ impl App {
         let mut filesystem_flows = Self::load_flows_from_filesystem(&app_config)?;
         info!("Loaded {} flows from filesystem.", filesystem_flows.len());
         if app_config.flows.system {
-            for flow in crate::local::system_flows() {
+            let excluded = &app_config.flows.system_exclude;
+            for flow in crate::local::system_flows()
+                .into_iter()
+                .filter(|flow| !excluded.iter().any(|identity| identity == flow.identity()))
+            {
                 match filesystem_flows
                     .iter()
                     .any(|mounted| mounted.identity() == flow.identity())

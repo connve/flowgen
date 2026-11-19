@@ -120,9 +120,8 @@ spec:
         resources:
           {{- toYaml $worker.resources | nindent 12 }}
         volumeMounts:
-        # Writable /tmp for tasks that need scratch space (e.g. git_sync
-        # cloning into /tmp/flowgen-repo). Required because the container
-        # runs with readOnlyRootFilesystem: true.
+        # The one writable folder of a read-only root filesystem: git_sync
+        # reads a repository by its URL into a temporary folder here.
         - name: tmp
           mountPath: /tmp
         {{- if and $system.enabled $system.gitCredentials.secretName }}
@@ -217,10 +216,7 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
       volumes:
-      # Ephemeral writable /tmp paired with the volumeMount above. Cleared
-      # on pod restart, which doubles as a guarantee that git_sync re-clones
-      # the repository on every restart instead of trying to pull a stale
-      # working tree from a previous pod.
+      # The pod's own /tmp, gone with the pod.
       - name: tmp
         emptyDir: {}
       {{- if and $system.enabled $system.gitCredentials.secretName }}

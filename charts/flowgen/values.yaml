@@ -200,6 +200,9 @@ flowgen:
     # FLOWGEN_RELEASES: the registry repository releases are pushed to and
     # deployed from, e.g. registry.example.com/acme/workspace.
     releases: ""
+    # Whether flowgen releases each commit; false when the repository's CI
+    # pushes the releases and flowgen only deploys them.
+    release: true
     # Secret holding the git credentials file ({token, username?}).
     gitCredentials:
       secretName: ""

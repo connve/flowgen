@@ -10,6 +10,7 @@
 		Logo,
 		SearchTrigger,
 		ThemeToggle,
+		UpdateNotice,
 		isSearchShortcut,
 		theme,
 		type NavItem
@@ -52,8 +53,11 @@
 		})
 	);
 
+	const UPDATE_COMMAND = 'flowgen update';
+
 	let version = $state<string | null>(null);
 	let latest = $state<string | null>(null);
+	let container = $state(false);
 
 	// Hides outer chrome when embedded (e.g. console.connve.dev); nav stays.
 	const chromeless = env.PUBLIC_FLOWGEN_CHROME === 'embedded';
@@ -90,6 +94,7 @@
 			const { data } = await getVersion();
 			version = data.version ?? null;
 			latest = data.latest ?? null;
+			container = data.container;
 		} catch {
 			// version is optional
 		}
@@ -122,43 +127,43 @@
 {/snippet}
 
 {#snippet railFooter({ compact }: { compact: boolean })}
-	<div class="flex items-center gap-2">
-		{#if version && !compact}
-			<div class="tooltip tooltip-right" data-tip={m.nav_release_notes()}>
-				<a
-					href="https://github.com/connve/flowgen/releases/tag/v{version}"
-					target="_blank"
-					rel="noopener noreferrer"
-					class="flex h-7 items-center transition-opacity hover:opacity-80"
-				>
-					<Badge>{version}</Badge>
-				</a>
-			</div>
-			{#if latest}
-				<div class="tooltip tooltip-right" data-tip={m.nav_update_available({ version: latest })}>
+	<div class={['flex w-full flex-col gap-2', compact && 'items-center']}>
+		{#if version && latest}
+			<UpdateNotice
+				{version}
+				{latest}
+				command={container ? undefined : UPDATE_COMMAND}
+				note={container ? m.nav_update_image({ latest }) : undefined}
+				releaseNotes="https://github.com/connve/flowgen/releases/tag/v{latest}"
+				{compact}
+			/>
+		{/if}
+		<div class="flex items-center gap-2">
+			{#if version && !compact}
+				<div class="tooltip tooltip-right" data-tip={m.nav_release_notes()}>
 					<a
-						href="https://github.com/connve/flowgen/releases/tag/v{latest}"
+						href="https://github.com/connve/flowgen/releases/tag/v{version}"
 						target="_blank"
 						rel="noopener noreferrer"
 						class="flex h-7 items-center transition-opacity hover:opacity-80"
 					>
-						<Badge variant="success">{m.nav_update_badge()}</Badge>
+						<Badge>{version}</Badge>
 					</a>
 				</div>
 			{/if}
-		{/if}
-		<div class="tooltip tooltip-right" data-tip={m.nav_system()}>
-			<a
-				href="{base}/system"
-				class="flex h-8 w-8 items-center justify-center rounded-md transition-colors hover:bg-base-200 hover:text-base-content {currentPath.startsWith(
-					base + '/system'
-				)
-					? 'bg-base-200 text-base-content'
-					: 'text-base-content/50'}"
-				aria-label={m.nav_system()}
-			>
-				<Icon icon="tabler:adjustments" class="h-5 w-5" />
-			</a>
+			<div class="tooltip tooltip-right" data-tip={m.nav_system()}>
+				<a
+					href="{base}/system"
+					class="flex h-8 w-8 items-center justify-center rounded-md transition-colors hover:bg-base-200 hover:text-base-content {currentPath.startsWith(
+						base + '/system'
+					)
+						? 'bg-base-200 text-base-content'
+						: 'text-base-content/50'}"
+					aria-label={m.nav_system()}
+				>
+					<Icon icon="tabler:adjustments" class="h-5 w-5" />
+				</a>
+			</div>
 		</div>
 	</div>
 {/snippet}

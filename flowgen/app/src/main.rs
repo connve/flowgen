@@ -61,6 +61,34 @@ enum Command {
         /// The workspace folder, as for a run; the default one when omitted.
         workspace: Option<std::path::PathBuf>,
     },
+    /// Updates flowgen to the newest release: through Homebrew when it
+    /// installed flowgen, else by replacing this binary.
+    Update,
+}
+
+/// Updates flowgen to the newest release and exits.
+async fn update() -> ! {
+    use flowgen::update::Outcome;
+    let updated = match flowgen::update::install() {
+        Ok(install) => flowgen::update::run(&install).await,
+        Err(e) => Err(e),
+    };
+    match updated {
+        Ok(Outcome::UpToDate) => println!(
+            "flowgen {} is up to date",
+            flowgen::releases::CURRENT_VERSION
+        ),
+        Ok(Outcome::Homebrew) => {}
+        Ok(Outcome::Container { latest }) => {
+            println!("flowgen runs from an image here; update the image to {latest}")
+        }
+        Ok(Outcome::Updated { version }) => println!("Updated flowgen to {version}"),
+        Err(e) => {
+            eprintln!("{e}");
+            process::exit(1)
+        }
+    }
+    process::exit(0)
 }
 
 /// Prints the issues of the workspace at `root` and exits with 1 when there are any.
@@ -345,6 +373,7 @@ enum Mode {
         data: std::path::PathBuf,
     },
     Bootstrap(Workspace),
+    Update,
     Config(Box<AppConfig>),
     Local(Workspace, Box<AppConfig>),
 }
@@ -380,6 +409,7 @@ fn main() {
         (Some(Command::Bootstrap { workspace }), _) => {
             Mode::Bootstrap(resolve_workspace(workspace.as_deref()))
         }
+        (Some(Command::Update), _) => Mode::Update,
         (None, Some(path)) => Mode::Config(config_or_exit(AppConfig::load(
             config::File::with_name(&path),
             flowgen::config::env_source(),
@@ -428,6 +458,7 @@ async fn run(mode: Mode) {
         Mode::Validate { workspace, json } => validate(&workspace, json),
         Mode::Test { script, data } => test(&script, &data).await,
         Mode::Bootstrap(workspace) => bootstrap(&workspace).await,
+        Mode::Update => update().await,
         Mode::Config(app_config) => (*app_config, false),
         Mode::Local(workspace, app_config) => {
             local_workspace(&workspace).await;
