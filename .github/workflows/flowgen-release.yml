@@ -249,14 +249,15 @@ jobs:
           VERSION="${{ needs.detect-version.outputs.version }}"
           IMAGE="ghcr.io/${{ github.repository }}:${VERSION}"
           docker create --platform ${{ matrix.platform }} --name extract "${IMAGE}"
-          docker cp extract:/bin/flowgen ./flowgen
+          mkdir -p dist
+          docker cp extract:/bin/flowgen dist/flowgen
           docker rm extract
 
       - name: Package binary
         run: |
           VERSION="${{ needs.detect-version.outputs.version }}"
           ARCHIVE="${{ matrix.name }}-${VERSION}.tar.gz"
-          tar -czf "$ARCHIVE" flowgen
+          tar -czf "$ARCHIVE" -C dist flowgen
           sha256sum "$ARCHIVE" | awk '{print $1}' > "$ARCHIVE.sha256"
           echo "ARCHIVE=$ARCHIVE" >> $GITHUB_ENV
 

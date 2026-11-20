@@ -1,6 +1,6 @@
 {
 	"name": "flowgen-web",
-	"version": "0.158.0",
+	"version": "0.158.1",
 	"private": true,
 	"scripts": {
 		"gen-api": "svelte-kit sync && openapi-ts",
