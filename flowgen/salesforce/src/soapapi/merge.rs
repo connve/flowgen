@@ -43,7 +43,7 @@ use std::path::{Path, PathBuf};
 ///     Phone: "{{event.data.preferred_phone}}"
 ///   allow_duplicate_save: true
 /// ```
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema, TaskConfig)]
 #[serde(deny_unknown_fields)]
 pub struct Merge {
     /// Unique task identifier.

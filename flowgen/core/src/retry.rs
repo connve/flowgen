@@ -16,7 +16,7 @@ pub const DEFAULT_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 pub const DEFAULT_MAX_ATTEMPTS: usize = 10;
 
 /// Retry configuration with exponential backoff and jitter.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Hash, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RetryConfig {
     /// Maximum number of attempts per event (default: 10 = ~15 minutes total).
@@ -30,6 +30,7 @@ pub struct RetryConfig {
     /// Accepts human-readable durations like "500ms", "2s", "1m".
     /// Each subsequent retry doubles this delay with jitter applied.
     #[serde(default = "default_initial_backoff", with = "humantime_serde")]
+    #[schemars(with = "crate::schema::Duration")]
     pub initial_backoff: Duration,
 }
 

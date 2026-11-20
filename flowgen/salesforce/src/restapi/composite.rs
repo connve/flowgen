@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use tracing::warn;
 
 /// Composite operations.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CompositeOperation {
     /// Create records.
@@ -36,7 +36,7 @@ pub enum CompositeOperation {
 }
 
 /// The records of a composite call: written in the config, or the event data.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum CompositePayload {
     /// Use the incoming event data, an array of records.
@@ -59,7 +59,7 @@ pub enum CompositePayload {
 ///   payload:
 ///     from_event: true
 /// ```
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema, TaskConfig)]
 #[serde(deny_unknown_fields)]
 pub struct Composite {
     /// Unique task identifier.

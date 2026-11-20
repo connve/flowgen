@@ -91,7 +91,7 @@ use tracing::{error, warn};
 ///   stream_name: "projects/my-project/datasets/realtime/tables/metrics/streams/stream1"
 ///   trace_id: "webhook-{{event.id}}"
 /// ```
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema, TaskConfig)]
 #[serde(deny_unknown_fields)]
 pub struct StorageWrite {
     /// The unique name / identifier of the task.
@@ -131,7 +131,7 @@ pub struct StorageWrite {
 }
 
 /// BigQuery CDC change type for Storage Write API.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ChangeType {
     /// Insert or update row by primary key.

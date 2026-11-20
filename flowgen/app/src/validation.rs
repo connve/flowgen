@@ -290,7 +290,7 @@ pub(crate) fn flow_identity(path: &str) -> &str {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     const VALID: &str = r#"
@@ -534,7 +534,7 @@ flow:
     }
 
     /// Every flow file under `examples/` and `config/`, as `(path, content)`.
-    fn example_flows() -> Vec<(String, String)> {
+    pub(crate) fn example_flows() -> Vec<(String, String)> {
         let folders = [
             concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples"),
             concat!(env!("CARGO_MANIFEST_DIR"), "/../../config"),

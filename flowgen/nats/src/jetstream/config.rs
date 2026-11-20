@@ -31,7 +31,7 @@ fn default_batch_expires() -> Duration {
 }
 
 /// Unified configuration for both NATS JetStream publisher and subscriber tasks.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema, TaskConfig)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     /// The unique name / identifier of the task.
@@ -61,6 +61,7 @@ pub struct Config {
     /// hold the request open until messages arrive or the timeout elapses.
     /// Accepts duration strings: "5s", "30s", "1m", etc.
     #[serde(default = "default_batch_expires", with = "humantime_serde")]
+    #[schemars(with = "flowgen_core::schema::Duration")]
     pub batch_expires: Duration,
     /// Maximum number of unacknowledged messages allowed (subscriber only).
     /// Limits concurrent in-flight messages across all consumer instances.
@@ -80,11 +81,13 @@ pub struct Config {
     /// Kept for backward compatibility and ignored by the handler.
     /// Accepts duration strings: "100ms", "1s", "5m", etc.
     #[serde(default, with = "humantime_serde")]
+    #[schemars(with = "Option<flowgen_core::schema::Duration>")]
     pub delay: Option<Duration>,
     /// Throttle individual message processing (subscriber only).
     /// Enforces a fixed delay between each message.
     /// Accepts duration strings: "100ms", "1s", etc.
     #[serde(default, with = "humantime_serde")]
+    #[schemars(with = "Option<flowgen_core::schema::Duration>")]
     pub throttle: Option<Duration>,
     /// Acknowledgment timeout used for both publisher and subscriber contexts.
     /// For publishers: timeout for receiving publish acknowledgments from the server.
@@ -94,6 +97,7 @@ pub struct Config {
     /// specified, NATS waits 30s and the flow has no time limit.
     /// Accepts duration strings: "5s", "30s", "1m", "2m", etc.
     #[serde(default, with = "humantime_serde")]
+    #[schemars(with = "Option<flowgen_core::schema::Duration>")]
     pub ack_timeout: Option<Duration>,
     /// Maximum number of times a message will be delivered before being discarded
     /// or sent to a dead letter subject (subscriber only).
@@ -148,7 +152,7 @@ impl Default for Config {
 
 impl ConfigExt for Config {}
 
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct StreamOptions {
     /// Stream name.
@@ -160,6 +164,7 @@ pub struct StreamOptions {
     pub subjects: Vec<String>,
     /// Maximum age of messages (e.g., "30d", "24h", "7200s").
     #[serde(default, with = "humantime_serde")]
+    #[schemars(with = "Option<flowgen_core::schema::Duration>")]
     pub max_age: Option<Duration>,
     /// Maximum number of messages per subject.
     pub max_messages_per_subject: Option<i64>,
@@ -186,6 +191,7 @@ pub struct StreamOptions {
     /// Duplicate window (e.g., "120s", "2m", "1h").
     /// Prevents duplicate messages within this time window.
     #[serde(default, with = "humantime_serde")]
+    #[schemars(with = "Option<flowgen_core::schema::Duration>")]
     pub duplicate_window: Option<Duration>,
     /// Allows publishing multiple messages in a single batch operation.
     pub allow_batch_publish: Option<bool>,
@@ -200,7 +206,7 @@ pub struct StreamOptions {
 }
 
 /// NATS JetStream retention policies.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum RetentionPolicy {
     /// Limits retention based on stream limits (messages, bytes, age).
@@ -214,7 +220,7 @@ pub enum RetentionPolicy {
 }
 
 /// NATS JetStream discard policies.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum DiscardPolicy {
     /// Discard old messages when stream is full.

@@ -26,7 +26,9 @@ const DEFAULT_PROGRESS_INTERVAL: Duration = Duration::from_secs(15);
 const FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// `nats_jetstream_subscribe` task config; unknown fields are rejected by the transparent inner `Config`.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, TaskConfig)]
+#[derive(
+    PartialEq, Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema, TaskConfig,
+)]
 #[serde(transparent)]
 pub struct Subscribe(pub super::config::Config);
 

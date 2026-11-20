@@ -94,7 +94,7 @@ impl From<braze::Error> for Error {
 }
 
 /// The request body: written in the config, or the event data.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum Payload {
     /// Use the incoming event data as the request body.

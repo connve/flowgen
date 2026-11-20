@@ -49,7 +49,7 @@ fn default_connect_timeout() -> Option<Duration> {
 ///       email: "{{event.data.author.email}}"
 ///     message: "{{event.data.title}}"
 /// ```
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema, TaskConfig)]
 #[serde(deny_unknown_fields)]
 pub struct GitPush {
     /// Task name.
@@ -108,11 +108,13 @@ pub struct GitPush {
     ///
     /// Example: `timeout: "60s"`
     #[serde(default = "default_timeout", with = "humantime_serde")]
+    #[schemars(with = "Option<flowgen_core::schema::Duration>")]
     pub timeout: Option<Duration>,
     /// TCP/TLS connect timeout for the receive-pack requests. Defaults to 10s.
     ///
     /// Example: `connect_timeout: "5s"`
     #[serde(default = "default_connect_timeout", with = "humantime_serde")]
+    #[schemars(with = "Option<flowgen_core::schema::Duration>")]
     pub connect_timeout: Option<Duration>,
     /// Optional list of upstream task names this task depends on.
     ///
@@ -130,7 +132,7 @@ pub struct GitPush {
 }
 
 /// Commit author or committer.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Author {
     /// Name.

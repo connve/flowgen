@@ -11,6 +11,9 @@
 	import ConfigFields from '$lib/flow/ConfigFields.svelte';
 	import ConfigViewSwitch from '$lib/ConfigViewSwitch.svelte';
 	import { configView } from '$lib/configView.svelte';
+	import { getFlowSchema } from '$lib/api';
+	import FlowForm from '$lib/form/FlowForm.svelte';
+	import type { Schema } from '$lib/form/schema';
 	import { m } from '$lib/paraglide/messages.js';
 
 	interface Props {
@@ -96,8 +99,25 @@
 	let highlightTimeout: ReturnType<typeof setTimeout> | null = null;
 	let flashedEl: HTMLElement | null = null;
 
+	// The flow schema the form is built from, fetched once the form is shown.
+	let flowSchema = $state<Schema | null>(null);
+	let formTask = $state<string | null>(null);
+	$effect(() => {
+		if (!editable || configView.value !== 'fields' || flowSchema) return;
+		getFlowSchema()
+			.then(({ data }) => (flowSchema = data as Schema))
+			.catch(() => (configView.value = 'yaml'));
+	});
+
 
 	function onNodeClick(name: string) {
+		if (editable && configView.value === 'fields') {
+			formTask = name;
+			queueMicrotask(() =>
+				yamlPane?.querySelector(`#form-task-${CSS.escape(name)}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+			);
+			return;
+		}
 		scrollToTask(name);
 		if (!activityExpanded) activityExpanded = true;
 		queueMicrotask(() => activityPanel?.scrollToLatestFor(name));
@@ -211,20 +231,20 @@
 					<span class="text-xs font-medium text-base-content/50">{m.flow_config_heading()}</span>
 				{/if}
 				<div class="flex items-center gap-2">
-					{#if !editable}
-						<ConfigViewSwitch />
-					{/if}
+					<ConfigViewSwitch />
 					<CopyButton text={yaml} label={m.flow_copy_yaml()} />
 					{@render foldToggle()}
 				</div>
 			</div>
 			<div
 				bind:this={yamlPane}
-				class="min-h-0 flex-1 flex-col overflow-auto {folded ? 'hidden' : 'flex'} {!editable && configView.value === 'fields'
+				class="min-h-0 flex-1 flex-col overflow-auto {folded ? 'hidden' : 'flex'} {configView.value === 'fields'
 					? 'bg-base-100'
 					: 'bg-base-200'}"
 			>
-				{#if editable}
+				{#if editable && configView.value === 'fields' && flowSchema}
+					<FlowForm bind:yaml schema={flowSchema} focusTask={formTask} />
+				{:else if editable}
 					<CodeEditor bind:value={yaml} extension="yaml" label={m.flow_config_editor_label()} />
 				{:else if configView.value === 'fields'}
 					<ConfigFields {yaml} onResourceClick={openResource} />

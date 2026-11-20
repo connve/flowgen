@@ -181,6 +181,7 @@ fn key_may_call(api_prefix: &str, method: &axum::http::Method, path: &str) -> bo
             "/version",
             "/workspace/file",
             "/workspace/templates",
+            "/schemas",
             "/docs",
             "/hubs",
         ]
@@ -392,6 +393,7 @@ fn router(path: &str, mut state: WebState) -> Router {
             &format!("{api_prefix}/workspace/templates"),
             get(crate::hubs::list_installed),
         )
+        .route(&format!("{api_prefix}/schemas/flow"), get(get_flow_schema))
         .route(
             &format!("{api_prefix}/changes"),
             get(crate::authoring::list_changes).post(crate::authoring::propose_change),
@@ -1491,6 +1493,11 @@ async fn regenerate_cluster_token(
             ))
         }
     }
+}
+
+/// Returns the JSON Schema of a flow file, which the web UI's forms are built from.
+async fn get_flow_schema() -> Json<&'static serde_json::Value> {
+    Json(crate::schema::flow())
 }
 
 /// Returns the running flowgen version, and a newer released one, for the sidebar.
@@ -2705,6 +2712,7 @@ pub(crate) mod tests {
             (Method::GET, "/f/api/changes/abc"),
             (Method::GET, "/f/api/workspace/file"),
             (Method::GET, "/f/api/workspace/templates"),
+            (Method::GET, "/f/api/schemas/flow"),
             (Method::GET, "/f/api/docs/ai/mcp"),
             (Method::GET, "/f/api/hubs/connve/templates"),
             (Method::POST, "/f/api/changes"),

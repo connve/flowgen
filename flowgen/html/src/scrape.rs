@@ -43,7 +43,9 @@ const ATTRIBUTE_SEPARATOR: char = '@';
 /// (e.g. `a@href`) instead of the text content. Use `.` as the selector to
 /// refer to the row element itself — typically combined with `@attr` to read
 /// an attribute off the row (e.g. `.@data-url`).
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, TaskConfig)]
+#[derive(
+    PartialEq, Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema, TaskConfig,
+)]
 #[serde(deny_unknown_fields)]
 pub struct Scrape {
     /// Unique task name.
@@ -80,7 +82,7 @@ pub struct Scrape {
 impl ConfigExt for Scrape {}
 
 /// Controls the shape of the emitted event data.
-#[derive(PartialEq, Eq, Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(PartialEq, Eq, Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum EmitStrategy {
     /// Emit a JSON array of extracted row objects.

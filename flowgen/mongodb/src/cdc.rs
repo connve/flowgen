@@ -17,7 +17,9 @@ use tokio::sync::mpsc::Sender;
 use tracing::{error, info, warn};
 
 /// MongoDB Change Data Capture reader configuration.
-#[derive(PartialEq, Default, Clone, Debug, Deserialize, Serialize, TaskConfig)]
+#[derive(
+    PartialEq, Default, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema, TaskConfig,
+)]
 #[serde(deny_unknown_fields)]
 pub struct Cdc {
     /// Optional list of upstream task names this task depends on.
@@ -36,6 +38,7 @@ pub struct Cdc {
     /// How long to wait for the flow to complete a change. Waits
     /// indefinitely when omitted.
     #[serde(default, with = "humantime_serde")]
+    #[schemars(with = "Option<flowgen_core::schema::Duration>")]
     pub ack_timeout: Option<std::time::Duration>,
     /// How many times a change is sent through the flow before it is skipped.
     /// Delivered until the flow completes it when omitted.

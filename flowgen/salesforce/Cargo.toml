@@ -20,6 +20,7 @@ salesforce_core = { workspace = true }
 oauth2 = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+schemars = { workspace = true }
 tonic = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }

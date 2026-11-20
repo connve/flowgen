@@ -18,7 +18,9 @@ use tokio::sync::{
 use tracing::error;
 
 /// Configuration for convert processor tasks that transform event data formats.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, TaskConfig)]
+#[derive(
+    PartialEq, Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema, TaskConfig,
+)]
 #[serde(deny_unknown_fields)]
 pub struct Convert {
     /// The unique name / identifier of the task.
@@ -42,7 +44,7 @@ pub struct Convert {
 }
 
 /// Supported target formats for event data conversion.
-#[derive(PartialEq, Eq, Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(PartialEq, Eq, Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum TargetFormat {
     /// Convert to Apache Avro binary format.

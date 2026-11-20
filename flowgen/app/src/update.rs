@@ -225,7 +225,8 @@ fn verify(bytes: &[u8], checksum: &[u8], archive: &str) -> Result<(), Error> {
     }
 }
 
-/// The flowgen binary in the tar.gz `archive`.
+/// The flowgen binary in the tar.gz `archive`: a regular file at its root,
+/// never a folder of the same name.
 fn extract(bytes: &[u8], archive: &str) -> Result<Vec<u8>, Error> {
     let read = |source| Error::Archive {
         archive: archive.to_string(),
@@ -234,7 +235,9 @@ fn extract(bytes: &[u8], archive: &str) -> Result<Vec<u8>, Error> {
     let mut entries = tar::Archive::new(flate2::read::GzDecoder::new(bytes));
     for entry in entries.entries().map_err(read)? {
         let mut entry = entry.map_err(read)?;
-        if entry.path().map_err(read)?.as_os_str() == BINARY {
+        let is_binary = entry.header().entry_type().is_file()
+            && entry.path().map_err(read)?.as_os_str() == BINARY;
+        if is_binary {
             let mut binary = Vec::new();
             entry.read_to_end(&mut binary).map_err(read)?;
             return Ok(binary);
@@ -325,6 +328,31 @@ mod tests {
         assert_eq!(extract(&archive, "a.tar.gz").unwrap(), b"binary");
         assert!(matches!(
             extract(&archive_of("other", b"x"), "a.tar.gz"),
+            Err(Error::MissingBinary { .. })
+        ));
+    }
+
+    #[test]
+    fn a_folder_named_like_the_binary_is_not_taken_for_it() {
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        let mut folder = tar::Header::new_gnu();
+        folder.set_entry_type(tar::EntryType::Directory);
+        folder.set_size(0);
+        folder.set_mode(0o755);
+        builder
+            .append_data(&mut folder, "flowgen", std::io::empty())
+            .unwrap();
+        let mut file = tar::Header::new_gnu();
+        file.set_size(6);
+        file.set_mode(0o755);
+        builder
+            .append_data(&mut file, "flowgen/flowgen", &b"binary"[..])
+            .unwrap();
+        let archive = builder.into_inner().unwrap().finish().unwrap();
+
+        assert!(matches!(
+            extract(&archive, "a.tar.gz"),
             Err(Error::MissingBinary { .. })
         ));
     }

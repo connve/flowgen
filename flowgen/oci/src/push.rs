@@ -29,7 +29,7 @@ use tokio::sync::mpsc::{Receiver, Sender};
 ///     tags: ["{{event.data.commit}}", "latest"]
 ///     credentials_path: /etc/registry/credentials.json
 /// ```
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema, TaskConfig)]
 #[serde(deny_unknown_fields)]
 pub struct OciPush {
     /// Task name.

@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 ///   credentials_path: /path/to/salesforce_creds.json
 ///   query: "SELECT Id, Name FROM Account WHERE LastModifiedDate = TODAY"
 /// ```
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema, TaskConfig)]
 #[serde(deny_unknown_fields)]
 pub struct Query {
     /// Unique task identifier.

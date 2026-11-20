@@ -46,7 +46,7 @@ const MAX_NAME_LEN: usize = 63;
 ///     publication: orders_pub
 ///     slot: flowgen_orders
 /// ```
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TaskConfig)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, schemars::JsonSchema, TaskConfig)]
 #[serde(deny_unknown_fields)]
 pub struct Cdc {
     /// Unique task identifier.
@@ -67,6 +67,7 @@ pub struct Cdc {
     /// How long to wait for the flow to complete a change. Waits
     /// indefinitely when omitted.
     #[serde(default, with = "humantime_serde")]
+    #[schemars(with = "Option<flowgen_core::schema::Duration>")]
     pub ack_timeout: Option<Duration>,
     /// How many times a change is sent through the flow before it is skipped.
     /// Delivered until the flow completes it when omitted.
@@ -74,10 +75,12 @@ pub struct Cdc {
     pub max_deliver: Option<NonZeroU32>,
     /// Maximum time to open the replication connection and log in.
     #[serde(default = "default_connection_timeout", with = "humantime_serde")]
+    #[schemars(with = "flowgen_core::schema::Duration")]
     pub connection_timeout: Duration,
     /// Longest time between two reports of the position to the server; must
     /// stay below the server's `wal_sender_timeout`.
     #[serde(default = "default_status_interval", with = "humantime_serde")]
+    #[schemars(with = "flowgen_core::schema::Duration")]
     pub status_interval: Duration,
     /// Optional list of upstream task names this task depends on.
     #[serde(default)]

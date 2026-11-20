@@ -5,7 +5,7 @@ info:
     HTTP API for flowgen. Two listeners: `web` (flow / resource /
     SSE endpoints under `web.path`) and `health` (Kubernetes probes
     on the root path).
-  version: 0.158.0
+  version: 0.159.0
   license:
     name: MPL-2.0
 servers:
@@ -837,6 +837,24 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/InstalledTemplates"
+
+  /api/schemas/flow:
+    get:
+      operationId: getFlowSchema
+      summary: The JSON Schema of a flow file.
+      description: |
+        Generated from the task configs of this version. Fields carry hints
+        for forms: `x-widget` (`credentials`, `source`), `x-advanced` and
+        `x-hidden`; a duration is a string with `format: duration`.
+      tags: [workspace]
+      responses:
+        "200":
+          description: A JSON Schema (draft 2020-12).
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
 
   /api/workspace/file:
     get:

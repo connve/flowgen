@@ -154,7 +154,7 @@ impl AuthConfig {
 }
 
 /// Task-level auth configuration.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TaskAuthConfig {
     /// When true, reject requests without a valid auth token.

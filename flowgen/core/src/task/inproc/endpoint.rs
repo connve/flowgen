@@ -16,7 +16,7 @@ fn default_ack_timeout() -> Duration {
 }
 
 /// Source that makes its flow callable in-process at the flow's identity.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema, TaskConfig)]
 #[serde(deny_unknown_fields)]
 pub struct Endpoint {
     /// The unique name of the task.
@@ -24,6 +24,7 @@ pub struct Endpoint {
     /// How long a call may take, from handing its event to the flow until the
     /// flow finishes.
     #[serde(default = "default_ack_timeout", with = "humantime_serde")]
+    #[schemars(with = "crate::schema::Duration")]
     pub ack_timeout: Duration,
     /// Flows allowed to call, e.g. `["user/", "platform/"]`: each entry admits the
     /// flow of that identity and every flow in it as a folder, and `""` admits

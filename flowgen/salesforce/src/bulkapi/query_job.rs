@@ -27,7 +27,7 @@ const fn default_has_header() -> bool {
 }
 
 /// Query job operations.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum QueryJobOperation {
     /// Create a new bulk query job.
@@ -78,7 +78,7 @@ pub enum QueryJobOperation {
 ///   batch_size: 10000
 ///   has_header: true
 /// ```
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema, TaskConfig)]
 #[serde(deny_unknown_fields)]
 pub struct QueryJob {
     /// Unique task identifier.
@@ -130,7 +130,7 @@ pub struct QueryJob {
 impl ConfigExt for QueryJob {}
 
 /// Output file content types.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
 pub enum ContentType {
     #[default]
     #[serde(rename = "csv")]
@@ -146,7 +146,7 @@ impl From<&ContentType> for sdk::ContentType {
 }
 
 /// CSV column delimiters.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
 pub enum ColumnDelimiter {
     #[default]
     #[serde(rename = "comma")]
@@ -177,7 +177,7 @@ impl From<&ColumnDelimiter> for sdk::ColumnDelimiter {
 }
 
 /// Line ending styles for cross-platform compatibility.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
 pub enum LineEnding {
     /// Unix/Linux style (\n).
     #[default]

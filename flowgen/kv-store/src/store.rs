@@ -61,7 +61,9 @@ pub(crate) fn literal(value: &str) -> Option<&str> {
 ///     key_prefix: "flows."
 ///     prune: true
 /// ```
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, TaskConfig)]
+#[derive(
+    PartialEq, Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema, TaskConfig,
+)]
 #[serde(deny_unknown_fields)]
 pub struct KvStore {
     /// Task name.
@@ -116,6 +118,7 @@ pub struct KvStore {
     ///
     /// Example: `ttl: "1h"`
     #[serde(default, with = "humantime_serde")]
+    #[schemars(with = "Option<flowgen_core::schema::Duration>")]
     pub ttl: Option<std::time::Duration>,
     /// Options of a NATS server `url`.
     ///
@@ -140,7 +143,7 @@ pub struct KvStore {
 impl ConfigExt for KvStore {}
 
 /// Options of a NATS server `url`.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NatsOptions {
     /// Values the bucket keeps per key, 1 to 64, set when this task creates it.
@@ -149,7 +152,7 @@ pub struct NatsOptions {
 }
 
 /// Key-value store operations.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Operation {
     /// Write `event.data.content` to `key`, or, without `key`, every entry of

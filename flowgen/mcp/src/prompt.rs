@@ -47,7 +47,7 @@ use tracing::{error, info};
 ///       - role: user
 ///         content: "{{arguments.message}}"
 /// ```
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema, TaskConfig)]
 #[serde(deny_unknown_fields)]
 pub struct Prompt {
     /// Prompt identifier. Becomes the slash command in MCP clients.
@@ -74,7 +74,7 @@ pub struct Prompt {
 }
 
 /// A prompt argument definition.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Argument {
     /// Argument identifier, referenced in the template as
@@ -97,7 +97,7 @@ pub struct Argument {
 }
 
 /// A message in a multi-message prompt template.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Message {
     /// Message role — MCP spec defines `user` and `assistant`.
@@ -107,7 +107,7 @@ pub struct Message {
 }
 
 /// Message role.
-#[derive(PartialEq, Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Copy, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     User,

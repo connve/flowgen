@@ -13,6 +13,7 @@ path = "src/lib.rs"
 
 [dependencies]
 serde_json = { workspace = true }
+schemars = { workspace = true }
 futures-util = { workspace = true }
 flowgen_core = { path = "../core" }
 tokio = { workspace = true, features = ["sync"] }

@@ -24,7 +24,7 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::error;
 
 /// Data format for BigQuery Storage Read API.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 #[derive(Default)]
 pub enum DataFormat {
@@ -36,7 +36,7 @@ pub enum DataFormat {
 }
 
 /// Response compression codec for BigQuery Storage Read API.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 #[derive(Default)]
 pub enum CompressionCodec {
@@ -138,7 +138,9 @@ pub enum CompressionCodec {
 ///   dataset_id: warehouse
 ///   table_id: large_table
 /// ```
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, TaskConfig)]
+#[derive(
+    PartialEq, Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema, TaskConfig,
+)]
 #[serde(deny_unknown_fields)]
 pub struct StorageRead {
     /// The unique name / identifier of the task.

@@ -35,7 +35,7 @@ const DEFAULT_BRANCH: &str = "main";
 ///     path: "configs/"
 ///     credentials_path: /etc/git/credentials.json
 /// ```
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema, TaskConfig)]
 #[serde(deny_unknown_fields)]
 pub struct GitSync {
     /// Task name.

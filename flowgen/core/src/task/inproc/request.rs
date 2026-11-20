@@ -9,7 +9,9 @@ use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
 
 /// Processor that calls a flow with an `inproc_endpoint` and emits its result.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, TaskConfig)]
+#[derive(
+    PartialEq, Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema, TaskConfig,
+)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
     /// The unique name of the task.

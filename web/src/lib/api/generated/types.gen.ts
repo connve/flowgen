@@ -1859,6 +1859,24 @@ export type ListInstalledTemplatesResponses = {
 
 export type ListInstalledTemplatesResponse = ListInstalledTemplatesResponses[keyof ListInstalledTemplatesResponses];
 
+export type GetFlowSchemaData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/schemas/flow';
+};
+
+export type GetFlowSchemaResponses = {
+    /**
+     * A JSON Schema (draft 2020-12).
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type GetFlowSchemaResponse = GetFlowSchemaResponses[keyof GetFlowSchemaResponses];
+
 export type GetWorkspaceFileData = {
     body?: never;
     path?: never;

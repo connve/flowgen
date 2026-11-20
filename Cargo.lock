@@ -2627,7 +2627,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen"
-version = "0.158.0"
+version = "0.159.0"
 dependencies = [
  "age",
  "arrow",
@@ -2664,12 +2664,14 @@ dependencies = [
  "futures-util",
  "glob",
  "humantime-serde",
+ "jsonschema",
  "mime_guess",
  "native-tls",
  "oauth2",
  "reqwest 0.13.2",
  "rust-embed",
  "rustls",
+ "schemars 1.2.1",
  "secrecy",
  "serde",
  "serde_ignored",
@@ -2697,7 +2699,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen-chart-tests"
-version = "0.158.0"
+version = "0.159.0"
 dependencies = [
  "config",
  "flowgen",
@@ -2707,7 +2709,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_ai_agent"
-version = "0.158.0"
+version = "0.159.0"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
@@ -2746,12 +2748,13 @@ dependencies = [
 
 [[package]]
 name = "flowgen_braze"
-version = "0.158.0"
+version = "0.159.0"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
  "braze",
  "flowgen_core",
+ "schemars 1.2.1",
  "serde",
  "serde_json",
  "tempfile",
@@ -2763,7 +2766,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_client"
-version = "0.158.0"
+version = "0.159.0"
 dependencies = [
  "bytes",
  "chrono",
@@ -2780,7 +2783,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_core"
-version = "0.158.0"
+version = "0.159.0"
 dependencies = [
  "aes-gcm",
  "age",
@@ -2814,6 +2817,7 @@ dependencies = [
  "regex",
  "reqwest 0.13.2",
  "rhai",
+ "schemars 1.2.1",
  "secrecy",
  "serde",
  "serde_avro_fast",
@@ -2839,7 +2843,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_gcp"
-version = "0.158.0"
+version = "0.159.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -2857,6 +2861,7 @@ dependencies = [
  "prost-types",
  "reqwest 0.13.2",
  "reqwest-middleware",
+ "schemars 1.2.1",
  "serde",
  "serde_json",
  "tempfile",
@@ -2869,7 +2874,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_git"
-version = "0.158.0"
+version = "0.159.0"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
@@ -2878,6 +2883,7 @@ dependencies = [
  "gix",
  "humantime-serde",
  "reqwest 0.13.2",
+ "schemars 1.2.1",
  "secrecy",
  "serde",
  "serde_json",
@@ -2893,10 +2899,11 @@ dependencies = [
 
 [[package]]
 name = "flowgen_html"
-version = "0.158.0"
+version = "0.159.0"
 dependencies = [
  "async-trait",
  "flowgen_core",
+ "schemars 1.2.1",
  "scraper",
  "serde",
  "serde_json",
@@ -2908,7 +2915,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_http"
-version = "0.158.0"
+version = "0.159.0"
 dependencies = [
  "arrow-json",
  "async-trait",
@@ -2920,6 +2927,7 @@ dependencies = [
  "handlebars",
  "humantime-serde",
  "reqwest 0.13.2",
+ "schemars 1.2.1",
  "secrecy",
  "serde",
  "serde_json",
@@ -2935,7 +2943,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_kafka"
-version = "0.158.0"
+version = "0.159.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -2948,6 +2956,7 @@ dependencies = [
  "rskafka",
  "rustls",
  "rustls-native-certs",
+ "schemars 1.2.1",
  "secrecy",
  "serde",
  "serde_json",
@@ -2963,12 +2972,13 @@ dependencies = [
 
 [[package]]
 name = "flowgen_klaviyo"
-version = "0.158.0"
+version = "0.159.0"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
  "flowgen_core",
  "klaviyo",
+ "schemars 1.2.1",
  "serde",
  "serde_json",
  "tempfile",
@@ -2980,7 +2990,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_kv_store"
-version = "0.158.0"
+version = "0.159.0"
 dependencies = [
  "async-nats",
  "async-trait",
@@ -2989,6 +2999,7 @@ dependencies = [
  "flowgen_nats",
  "futures-util",
  "humantime-serde",
+ "schemars 1.2.1",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -3002,7 +3013,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_macros"
-version = "0.158.0"
+version = "0.159.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3011,7 +3022,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_mcp"
-version = "0.158.0"
+version = "0.159.0"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
@@ -3026,6 +3037,7 @@ dependencies = [
  "humantime-serde",
  "jsonschema",
  "reqwest 0.13.2",
+ "schemars 1.2.1",
  "secrecy",
  "serde",
  "serde_json",
@@ -3041,7 +3053,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_mongodb"
-version = "0.158.0"
+version = "0.159.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -3057,6 +3069,7 @@ dependencies = [
  "humantime-serde",
  "mongodb",
  "object_store",
+ "schemars 1.2.1",
  "serde",
  "serde_json",
  "tempfile",
@@ -3072,7 +3085,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_mssql"
-version = "0.158.0"
+version = "0.159.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -3081,6 +3094,7 @@ dependencies = [
  "flowgen_core",
  "futures-util",
  "humantime-serde",
+ "schemars 1.2.1",
  "secrecy",
  "serde",
  "serde_json",
@@ -3097,7 +3111,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_nats"
-version = "0.158.0"
+version = "0.159.0"
 dependencies = [
  "arrow",
  "async-nats",
@@ -3111,6 +3125,7 @@ dependencies = [
  "oauth2",
  "prost 0.13.5",
  "reqwest 0.13.2",
+ "schemars 1.2.1",
  "serde",
  "serde_json",
  "tempfile",
@@ -3127,7 +3142,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_object_store"
-version = "0.158.0"
+version = "0.159.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -3139,6 +3154,7 @@ dependencies = [
  "futures-util",
  "object_store",
  "parquet",
+ "schemars 1.2.1",
  "serde",
  "serde_json",
  "tempfile",
@@ -3152,7 +3168,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_oci"
-version = "0.158.0"
+version = "0.159.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3163,6 +3179,7 @@ dependencies = [
  "http",
  "humantime-serde",
  "oci-client",
+ "schemars 1.2.1",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -3177,7 +3194,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_postgres"
-version = "0.158.0"
+version = "0.159.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -3190,6 +3207,7 @@ dependencies = [
  "postgres-replication",
  "rustls",
  "rustls-native-certs",
+ "schemars 1.2.1",
  "secrecy",
  "serde",
  "serde_json",
@@ -3208,7 +3226,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_salesforce"
-version = "0.158.0"
+version = "0.159.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -3223,6 +3241,7 @@ dependencies = [
  "oauth2",
  "reqwest 0.13.2",
  "salesforce_core",
+ "schemars 1.2.1",
  "serde",
  "serde_avro_fast",
  "serde_json",

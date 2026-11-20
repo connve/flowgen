@@ -43,7 +43,7 @@ use tokio::sync::mpsc;
 /// ```
 ///
 /// Clients then send `model: "proxy/<downstream-model>"` to reach this proxy.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema, TaskConfig)]
 #[serde(deny_unknown_fields)]
 pub struct LlmProxy {
     /// The unique name / identifier of the task. Used as the routing key
@@ -73,6 +73,7 @@ pub struct LlmProxy {
     pub auth: Option<flowgen_core::auth::TaskAuthConfig>,
     /// Timeout for waiting on pipeline completion before responding.
     #[serde(default, with = "humantime_serde")]
+    #[schemars(with = "Option<flowgen_core::schema::Duration>")]
     pub ack_timeout: Option<std::time::Duration>,
     /// Optional list of upstream task names this task depends on.
     #[serde(default)]

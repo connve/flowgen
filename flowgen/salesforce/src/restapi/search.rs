@@ -33,7 +33,7 @@ const SOSL_RESERVED: &[char] = &[
 ///   query:
 ///     resource: salesforce/search.sosl
 /// ```
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema, TaskConfig)]
 #[serde(deny_unknown_fields)]
 pub struct Search {
     /// Unique task identifier.

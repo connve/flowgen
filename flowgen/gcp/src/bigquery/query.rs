@@ -65,7 +65,7 @@ fn default_use_legacy_sql() -> bool {
 /// untagged enum below also matches an inline object that merely carries a
 /// `resource` field, silently dropping that object's other fields and binding
 /// a file's contents where the flow asked for its own data.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct QueryParameterResource {
     /// Resource path, loaded and parsed as JSON.
@@ -75,7 +75,7 @@ pub struct QueryParameterResource {
 /// A query parameter value: either given inline, or loaded from a resource
 /// file. `Resource` is tried first so `{ resource: "..." }` is read as a file
 /// reference rather than as a one-key JSON object.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum QueryParameterSource {
     /// Loads the file and parses it as JSON. A non-JSON file is passed
@@ -191,7 +191,7 @@ pub enum QueryParameterSource {
 ///   query:
 ///     inline: "SELECT * FROM `data-project-id.dataset.table` LIMIT 100"
 /// ```
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema, TaskConfig)]
 #[serde(deny_unknown_fields)]
 pub struct Query {
     /// The unique name / identifier of the task.
@@ -229,6 +229,7 @@ pub struct Query {
     pub max_results: Option<u64>,
     /// Optional query timeout (e.g., "30s", "5m", "1h"). Default: 10 seconds.
     #[serde(default = "default_timeout", with = "humantime_serde")]
+    #[schemars(with = "Option<flowgen_core::schema::Duration>")]
     pub timeout: Option<Duration>,
     /// Whether to use query cache. Default: true.
     #[serde(default = "default_use_query_cache")]

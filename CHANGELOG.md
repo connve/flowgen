@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.159.0
+
+### Added
+
+- Flows are edited with forms: in the editor, Fields shows the flow's
+  labels and each task's settings, built from the task's config, with
+  credentials and resources picked from lists and the rare settings under
+  Advanced. Tasks are added from a picker of task types by connector, and
+  renamed or removed with the tasks that take events from them updated.
+  A change touches only the values it sets, so comments and layout stay.
+- `GET /api/schemas/flow`, the JSON Schema of a flow file, generated from
+  the task configs of the running version.
+
 ## 0.158.0
 
 ### Added

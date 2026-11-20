@@ -18,7 +18,9 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::error;
 
 /// `http_request` task config; unknown fields are rejected by the transparent inner `Processor`.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, TaskConfig)]
+#[derive(
+    PartialEq, Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema, TaskConfig,
+)]
 #[serde(transparent)]
 pub struct Request(pub super::config::Processor);
 

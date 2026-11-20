@@ -16,7 +16,7 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::error;
 
 /// Operation performed against a MongoDB collection.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Operation {
     /// Find documents matching `filter` and emit each as an event.
@@ -29,7 +29,7 @@ pub enum Operation {
 }
 
 /// MongoDB collection task configuration: read, write, or upsert documents.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema, TaskConfig)]
 #[serde(deny_unknown_fields)]
 pub struct Collection {
     /// The unique name / identifier of the task.

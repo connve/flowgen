@@ -47,7 +47,7 @@ use tracing::{error, Instrument};
 ///   timeout: "10s"
 ///   partition_key: "{{event.data.program_id}}.{{event.data.country}}"
 /// ```
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema, TaskConfig)]
 #[serde(deny_unknown_fields)]
 pub struct Buffer {
     /// Unique name identifier for this buffer task.
@@ -58,6 +58,7 @@ pub struct Buffer {
     /// measured from the first event in the batch.
     /// Accepts duration strings: "100ms", "30s", "5m", etc.
     #[serde(default = "default_timeout", with = "humantime_serde")]
+    #[schemars(with = "Option<crate::schema::Duration>")]
     pub timeout: Option<Duration>,
     /// Optional key template for partitioning events into separate buffers.
     /// When specified, events are partitioned by the rendered key value and each partition

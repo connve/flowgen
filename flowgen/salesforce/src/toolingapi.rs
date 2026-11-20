@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Tooling API operations.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolingOperation {
     /// Create a managed event subscription.
@@ -17,7 +17,7 @@ pub enum ToolingOperation {
 }
 
 /// Replay preset for managed event subscriptions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ReplayPreset {
     /// Start from the latest event.
@@ -36,7 +36,7 @@ impl From<ReplayPreset> for sdk::ReplayPreset {
 }
 
 /// State of a managed event subscription.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum SubscriptionState {
     /// Subscription is actively running.
@@ -72,7 +72,7 @@ impl From<SubscriptionState> for sdk::SubscriptionState {
 ///     state: run
 ///     error_recovery_replay: latest
 /// ```
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema, TaskConfig)]
 #[serde(deny_unknown_fields)]
 pub struct Tooling {
     /// Unique task identifier.
@@ -101,7 +101,7 @@ pub struct Tooling {
 }
 
 /// Metadata for a managed event subscription.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedEventSubscriptionMetadata {
     /// Human-readable label for the subscription.
