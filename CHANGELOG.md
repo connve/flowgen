@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.158.1
+
+### Added
+
+- `flowgen run [<folder>]` runs the workspace in an existing folder, or the
+  default workspace.
+
+### Fixed
+
+- The Linux release archives hold the `flowgen` binary at their root rather
+  than a folder of the sources; `flowgen update` reads only a file named
+  `flowgen` from an archive.
+
 ## 0.158.0
 
 ### Added
