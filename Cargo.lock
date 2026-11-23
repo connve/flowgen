@@ -3121,7 +3121,6 @@ dependencies = [
  "flowgen_core",
  "futures-util",
  "humantime-serde",
- "oauth2",
  "prost 0.13.5",
  "reqwest 0.13.2",
  "schemars 1.2.1",

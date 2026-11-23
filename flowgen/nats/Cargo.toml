@@ -11,7 +11,6 @@ name = "flowgen_nats"
 path = "src/lib.rs"
 
 [dependencies]
-oauth2 = { workspace = true }
 prost = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
