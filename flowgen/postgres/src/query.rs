@@ -33,7 +33,7 @@ use tracing::error;
 ///       - "{{event.data.status}}"
 ///       - "{{event.data.since}}"
 /// ```
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TaskConfig)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, schemars::JsonSchema, TaskConfig)]
 #[serde(deny_unknown_fields)]
 pub struct Query {
     /// Unique task identifier.
@@ -53,10 +53,12 @@ pub struct Query {
     pub max_connections: u32,
     /// Maximum time to open a connection.
     #[serde(default = "default_connection_timeout", with = "humantime_serde")]
+    #[schemars(with = "flowgen_core::schema::Duration")]
     pub connection_timeout: Duration,
     /// Maximum time a statement runs on the server, and to wait for a
     /// connection from the pool and the first rows.
     #[serde(default = "default_query_timeout", with = "humantime_serde")]
+    #[schemars(with = "flowgen_core::schema::Duration")]
     pub query_timeout: Duration,
     /// Optional list of upstream task names this task depends on.
     #[serde(default)]

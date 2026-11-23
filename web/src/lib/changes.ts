@@ -10,10 +10,12 @@ import {
 	isStatus,
 	listChanges,
 	proposeChange,
+	removeChangeFile,
 	type AuthoringTarget,
 	type Change,
 	type ChangeSummary,
-	type ConfigInfo
+	type ConfigInfo,
+	type TemplateSource
 } from '$lib/api';
 import { auth } from '$lib/auth.svelte';
 import { m } from '$lib/paraglide/messages.js';
@@ -78,17 +80,18 @@ export function draftChange(
 	return latest;
 }
 
-// Adds `files` to the pending change `id`; null when the change can no longer
-// take them. A title the editor generated follows the files; one a person or
-// agent wrote stays.
+// Adds `files`, and the `template` they come from, to the pending change `id`;
+// null when the change can no longer take them. A title the editor generated
+// follows the files; one a person or agent wrote stays.
 export async function addToDraft(
 	id: string,
-	files: { path: string; content?: string | null }[]
+	files: { path: string; content?: string | null }[],
+	template?: TemplateSource
 ): Promise<Change | null> {
 	const before = await loadChange(id);
 	let after: Change;
 	try {
-		after = (await addChangeFiles({ path: { id }, body: { files } })).data;
+		after = (await addChangeFiles({ path: { id }, body: { files, template } })).data;
 	} catch (err) {
 		if (isStatus(err, 403) || isStatus(err, 409)) return null;
 		throw err;
@@ -100,18 +103,51 @@ export async function addToDraft(
 	return after;
 }
 
-// Adds `file` to the change `draftId`, else to the user's pending change in its
-// target, or proposes a new change titled `title` when there is none or it was
-// decided meanwhile.
-export async function proposeFile(
+export async function removeFromChange(id: string, path: string): Promise<Change> {
+	const before = await loadChange(id);
+	const after = (await removeChangeFile({ path: { id }, query: { path } })).data;
+	const title = generatedTitle(after.files);
+	const generated = before && before.title === generatedTitle(before.files);
+	if (generated && after.status === 'pending' && title !== after.title) {
+		await editChange({ path: { id }, body: { title } }).catch(() => undefined);
+	}
+	return after;
+}
+
+// Adds `files` to the change `draftId`, else to the user's pending change in
+// their target, or proposes a new change titled `title` when there is none or
+// it was decided meanwhile.
+export async function proposeFiles(
+	files: { path: string; content: string | null }[],
+	targets: AuthoringTarget[],
+	{
+		title = generatedTitle(files),
+		draftId = null,
+		template
+	}: { title?: string; draftId?: string | null; template?: TemplateSource } = {}
+): Promise<Change> {
+	const target = files[0] ? targetOf(targets, files[0].path)?.name : undefined;
+	const draft = draftId ?? draftChange(await pendingChanges(), target)?.id;
+	const added = draft ? await addToDraft(draft, files, template) : null;
+	if (added !== null) return added;
+	const templates = template ? [template] : undefined;
+	return (await proposeChange({ body: { title, files, templates } })).data;
+}
+
+export function proposeFile(
 	file: { path: string; content: string | null },
 	targets: AuthoringTarget[],
-	{ title = generatedTitle([file]), draftId = null }: { title?: string; draftId?: string | null } = {}
+	options: { title?: string; draftId?: string | null } = {}
 ): Promise<Change> {
-	const draft = draftId ?? draftChange(await pendingChanges(), targetOf(targets, file.path)?.name)?.id;
-	const added = draft ? await addToDraft(draft, [file]) : null;
-	if (added !== null) return added;
-	return (await proposeChange({ body: { title, files: [file] } })).data;
+	return proposeFiles([file], targets, options);
+}
+
+export function ownChanges(pending: ChangeSummary[]): ChangeSummary[] {
+	const me = ownLabel();
+	const edited = (change: ChangeSummary) => change.updatedAt ?? change.createdAt;
+	return pending
+		.filter((change) => change.proposedBy === me)
+		.sort((a, b) => edited(b) - edited(a));
 }
 
 // A change with its files, or null when it cannot be loaded.
@@ -192,6 +228,16 @@ export function stripFlowExtension(path: string): string {
 
 export function editUrl(base: string, path: string): string {
 	return `${base}/edit/${encodePath(path)}`;
+}
+
+export function viewUrl(base: string, path: string): string | null {
+	if (path.startsWith('flows/')) {
+		return `${base}/flows/${encodePath(stripFlowExtension(path.slice('flows/'.length)))}`;
+	}
+	if (path.startsWith('resources/')) {
+		return `${base}/resources/${encodePath(path.slice('resources/'.length))}`;
+	}
+	return null;
 }
 
 // The version a change to `path` is based on: what runs, with committed

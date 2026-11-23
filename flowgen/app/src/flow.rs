@@ -490,6 +490,15 @@ impl Tenure {
         while let Some(result) = self.tasks.join_next().await {
             match result {
                 Ok(Ok(())) => {}
+                Ok(Err(Error::Task {
+                    task,
+                    task_type,
+                    source,
+                })) => {
+                    tracing::error_span!("task.run", task = %task, task_type = %task_type)
+                        .in_scope(|| error!(error = %source, "Task failed"));
+                    return Exit::Failed;
+                }
                 Ok(Err(e)) => {
                     error!(error = %e, "Task failed");
                     return Exit::Failed;

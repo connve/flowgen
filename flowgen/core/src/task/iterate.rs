@@ -20,7 +20,9 @@ pub const ITERATE_COUNT_META: &str = "iterate_count";
 pub const ITERATE_ID_META: &str = "iterate_id";
 
 /// Configuration for loop processor tasks that iterate over JSON arrays.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, TaskConfig)]
+#[derive(
+    PartialEq, Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema, TaskConfig,
+)]
 #[serde(deny_unknown_fields)]
 pub struct Iterate {
     /// The unique name / identifier of the task.

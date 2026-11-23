@@ -42,7 +42,9 @@ pub enum ConfigError {
 pub const MAX_INTERVAL: Duration = Duration::from_secs(3_155_760_000);
 
 /// Configuration for generate subscriber tasks that produce scheduled events.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, Hash, Default, TaskConfig)]
+#[derive(
+    PartialEq, Clone, Debug, Deserialize, Serialize, Hash, Default, schemars::JsonSchema, TaskConfig,
+)]
 #[serde(deny_unknown_fields)]
 pub struct Generate {
     /// The unique name / identifier of the task.
@@ -57,6 +59,7 @@ pub struct Generate {
     /// Accepts duration strings: "100ms", "30s", "5m", etc.
     /// Mutually exclusive with `cron`.
     #[serde(default, with = "humantime_serde")]
+    #[schemars(with = "Option<crate::schema::Duration>")]
     pub interval: Option<Duration>,
     /// Cron expression for calendar-based scheduling.
     /// First event fires at the NEXT time matching the cron expression.
@@ -84,6 +87,7 @@ pub struct Generate {
     /// Timeout for waiting on flow completion before considering the event failed.
     /// If not specified, waits indefinitely for flow completion.
     #[serde(default, with = "humantime_serde")]
+    #[schemars(with = "Option<crate::schema::Duration>")]
     pub ack_timeout: Option<Duration>,
     /// Optional list of upstream task names this task depends on.
     /// When set, this task only receives events from the named tasks.

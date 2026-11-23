@@ -48,7 +48,7 @@
 	<PendingChanges changes={data.pending} />
 
 	<div
-		class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-base-200 bg-base-100"
+		class="flex min-h-0 flex-1 flex-col overflow-clip rounded-lg border border-base-200 bg-base-100"
 	>
 		<div class="flex h-10 shrink-0 items-center justify-between bg-base-100 px-4">
 			<span class="text-xs font-medium text-base-content/50">

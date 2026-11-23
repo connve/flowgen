@@ -32,7 +32,7 @@ use tracing::error;
 ///     table: public.orders
 ///     change_type: upsert
 /// ```
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TaskConfig)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, schemars::JsonSchema, TaskConfig)]
 #[serde(deny_unknown_fields)]
 pub struct Write {
     /// Unique task identifier.
@@ -50,9 +50,11 @@ pub struct Write {
     pub max_connections: u32,
     /// Maximum time to open a connection.
     #[serde(default = "default_connection_timeout", with = "humantime_serde")]
+    #[schemars(with = "flowgen_core::schema::Duration")]
     pub connection_timeout: Duration,
     /// Maximum time a statement runs on the server and to wait for a connection.
     #[serde(default = "default_query_timeout", with = "humantime_serde")]
+    #[schemars(with = "flowgen_core::schema::Duration")]
     pub query_timeout: Duration,
     /// Optional list of upstream task names this task depends on.
     #[serde(default)]
@@ -68,7 +70,7 @@ pub struct Write {
 impl ConfigExt for Write {}
 
 /// How the rows change the table.
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ChangeType {
     /// Inserts each row, or updates the row with its primary key.

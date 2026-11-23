@@ -2,7 +2,7 @@
 	// A workspace path as folders and a name, the way a code host names a new
 	// file: typing `/` turns the name into a folder, Backspace on an empty
 	// name steps back out of the last folder. `root` (`flows/`, `resources/`)
-	// stays fixed, and so does a flow's extension.
+	// stays fixed, and a flow's extension is hidden.
 	interface Props {
 		/** The whole path, e.g. `flows/orders/sync.yaml`. */
 		path: string;
@@ -76,7 +76,4 @@
 		{oninput}
 		{onkeydown}
 	/>
-	{#if isFlow}
-		<span class="text-base-content/40">{extension}</span>
-	{/if}
 </div>

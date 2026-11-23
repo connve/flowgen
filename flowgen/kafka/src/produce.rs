@@ -38,7 +38,7 @@ fn default_replication_factor() -> i32 {
 }
 
 /// Settings for a topic created by `create_or_update`.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TopicOptions {
     /// Number of partitions for the new topic.
@@ -50,6 +50,7 @@ pub struct TopicOptions {
     pub replication_factor: i32,
     /// How long the topic retains a message (e.g. "7d", "24h").
     #[serde(default, with = "humantime_serde")]
+    #[schemars(with = "Option<flowgen_core::schema::Duration>")]
     pub retention: Option<Duration>,
     /// Any other topic-level setting, passed to the broker verbatim
     /// (e.g. `cleanup.policy`, `max.message.bytes`). Values are rendered as
@@ -94,7 +95,7 @@ impl Default for TopicOptions {
 }
 
 /// Kafka produce task configuration.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema, TaskConfig)]
 #[serde(deny_unknown_fields)]
 pub struct Produce {
     /// The unique name / identifier of the task.
@@ -121,6 +122,7 @@ pub struct Produce {
     pub topic_options: TopicOptions,
     /// How long to wait for the broker to acknowledge a message.
     #[serde(default = "default_ack_timeout", with = "humantime_serde")]
+    #[schemars(with = "flowgen_core::schema::Duration")]
     pub ack_timeout: Duration,
     /// Optional list of upstream task names this task depends on.
     /// When set, this task only receives events from the named tasks.

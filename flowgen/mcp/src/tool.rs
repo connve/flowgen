@@ -31,7 +31,9 @@ use tracing::{error, info};
 ///           description: "User ID to send welcome to"
 ///       required: [user_id]
 /// ```
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, TaskConfig)]
+#[derive(
+    PartialEq, Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema, TaskConfig,
+)]
 #[serde(deny_unknown_fields)]
 pub struct Tool {
     /// Tool name as clients list and call it, unique on the server.
@@ -49,6 +51,7 @@ pub struct Tool {
     /// If not specified, waits indefinitely for flow completion.
     /// Accepts human-readable durations (e.g., "30s", "5m", "1h").
     #[serde(default, with = "humantime_serde")]
+    #[schemars(with = "Option<flowgen_core::schema::Duration>")]
     pub ack_timeout: Option<std::time::Duration>,
     /// Optional user authentication configuration.
     /// When `auth.required` is true, requests must include a valid bearer token

@@ -1,8 +1,8 @@
 # Hubs
 
-A hub is a catalog of templates that new flows start from. In the web UI, Templates in the editor of a new flow lists the templates of every hub that returns some; using one proposes a change with its files, which opens for review and is validated and approved like any other.
+A hub is a catalog of templates that new flows start from. In the web UI, Templates in the editor of a new flow lists the templates of every hub that returns some; using one adds its files to your open change, like an edit in the editor, where they are validated and deployed with the rest.
 
-When that change is committed, flowgen records the template in `flowgen.lock` at the root of the workspace, with the digest of its files and their paths:
+When that change is committed, flowgen records the template in `flowgen.lock` at the root of the workspace, with the digest of its files and the paths of those the change writes:
 
 ```yaml
 # Written by flowgen: the hub templates this workspace installed.
@@ -16,9 +16,9 @@ templates:
 
 A template shows **Update available** when the hub's version differs from the locked one, whatever you changed in its files since. **Update** proposes the hub's version and deletes the locked files it lacks; the change shows how it differs from yours. The release and deploy flows carry `flowgen.lock` with the flows and resources.
 
-A change from a template takes no other files. flowgen writes `flowgen.lock` from the deployed one, so a second template change committed before the first is deployed fails with a conflict; retry it once the first is deployed.
+A change can hold several templates along with other files, so a template's files can be edited before it is deployed. flowgen writes `flowgen.lock` from the deployed one, so a second change with a template committed before the first is deployed fails with a conflict; retry it once the first is deployed.
 
-A template whose files are partly gone from the workspace shows **Incomplete**; **Restore** proposes the missing ones. **Uninstall** proposes a change that deletes the locked files and drops the template from `flowgen.lock`.
+A template whose files are partly gone from the workspace shows **Incomplete**; **Restore** proposes the missing ones. **Delete**, on the template or on any of its files, deletes the locked files and drops the template from `flowgen.lock`.
 
 ## Hub flow
 

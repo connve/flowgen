@@ -436,7 +436,7 @@ impl PubSub {
 }
 
 /// Operation of `query` and `queryAll` queries.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
 pub enum QueryOperation {
     /// Query active records only.
     #[default]
@@ -448,7 +448,7 @@ pub enum QueryOperation {
 }
 
 /// Record data: written in the config, or the event data.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum Payload {
     /// Use the incoming event data.

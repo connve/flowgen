@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Which users the task exports.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ExportOperation {
     /// Users named by identifier in `payload`, returned in the response.
@@ -31,7 +31,7 @@ pub enum ExportOperation {
 ///       external_ids: ["{{event.data.user_id}}"]
 ///       fields_to_export: [external_id, email]
 /// ```
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema, TaskConfig)]
 #[serde(deny_unknown_fields)]
 pub struct ExportUserData {
     /// Task name.

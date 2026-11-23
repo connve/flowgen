@@ -1,21 +1,25 @@
 <script lang="ts">
 	import { base } from '$app/paths';
-	import { page } from '$app/state';
+	import { beforeNavigate } from '$app/navigation';
+	import { page, updated } from '$app/state';
 	import { onMount } from 'svelte';
 	import { env } from '$env/dynamic/public';
 	import {
 		AppShell,
+		IconButton,
 		Badge,
 		Loading,
 		Logo,
 		SearchTrigger,
 		ThemeToggle,
 		UpdateNotice,
+		icons,
 		isSearchShortcut,
 		theme,
 		type NavItem
 	} from '@connve/ui';
-	import { getVersion, type UserContext } from '$lib/api';
+	import { getVersion, type ChangeSummary, type UserContext } from '$lib/api';
+	import { authoringEnabled, ownChanges, pendingChanges } from '$lib/changes';
 	import { logoutUrl } from '$lib/urls';
 	import { allMetrics } from '$lib/activityStore.svelte';
 	import { agentSessions, followAgentSessions } from '$lib/agentSessions.svelte';
@@ -39,6 +43,21 @@
 		{ href: '/monitor/logs', icon: 'tabler:activity', label: m.nav_monitor(), match: (p: string) => p.startsWith(base + '/monitor') }
 	];
 	let currentPath = $derived(page.url.pathname);
+
+	let authoring = $state(false);
+	let own = $state<ChangeSummary[]>([]);
+	let toDeploy = $derived(own[0]?.fileCount ?? 0);
+	let ownRequest = 0;
+	$effect(() => {
+		void currentPath;
+		void page.data;
+		if (!authoring || data.login) return;
+		const request = ++ownRequest;
+		pendingChanges().then((pending) => {
+			if (request === ownRequest) own = ownChanges(pending);
+		});
+	});
+
 	let nav = $derived<NavItem[]>(
 		NAV.filter((item) => data.agents || item.href !== '/agents').map((item) => {
 			const unread = item.href === '/agents' ? agentSessions.unread : 0;
@@ -87,6 +106,15 @@
 	});
 
 	onMount(() => theme.start());
+
+	// A tab opened before an update loads the new version on its next click.
+	beforeNavigate(({ willUnload, to }) => {
+		if (updated.current && !willUnload && to?.url) location.href = to.url.href;
+	});
+
+	onMount(async () => {
+		if (!data.login) authoring = await authoringEnabled();
+	});
 
 	async function loadVersion() {
 		if (data.login) return;
@@ -170,6 +198,19 @@
 
 <!-- Embedded, the host shows the theme and user; search stays here. -->
 {#snippet actions()}
+	{#if own[0] && toDeploy > 0}
+		<a
+			href="{base}/changes/{encodeURIComponent(own[0].id)}"
+			class="btn btn-ghost btn-sm gap-1.5"
+			aria-label={m.nav_review_files({ count: toDeploy })}
+		>
+			<span class="h-2 w-2 rounded-full bg-warning"></span>
+			{m.nav_review()}
+			<span class="text-base-content/50 tabular-nums">{toDeploy}</span>
+		</a>
+	{:else if authoring}
+		<IconButton icon={icons.gitPullRequest} href="{base}/changes" label={m.nav_changes()} />
+	{/if}
 	<SearchTrigger onclick={() => (searching = true)} />
 	{#if !chromeless}
 		<div class="max-sm:hidden">

@@ -29,7 +29,9 @@ use tracing::{error, warn};
 ///     bucket: flowgen_system
 ///     key: releases.latest
 /// ```
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, TaskConfig)]
+#[derive(
+    PartialEq, Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema, TaskConfig,
+)]
 #[serde(deny_unknown_fields)]
 pub struct KvWatch {
     /// Task name.
@@ -50,6 +52,7 @@ pub struct KvWatch {
     /// How long to wait for the flow to complete a value. Waits
     /// indefinitely when omitted.
     #[serde(default, with = "humantime_serde")]
+    #[schemars(with = "Option<flowgen_core::schema::Duration>")]
     pub ack_timeout: Option<Duration>,
     /// How many times a value is sent through the flow before it is skipped.
     /// Delivered until the flow completes it when omitted.

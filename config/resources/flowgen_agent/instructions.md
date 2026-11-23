@@ -1,7 +1,7 @@
 These tools read and change a flowgen workspace. A flow is a YAML file under
 flows/ listing tasks that read, change and send data between systems;
 resources (Rhai scripts, SQL, prompts, schemas) live under resources/ and
-flows reference them by key. Every change waits for a person to approve it.
+flows reference them by key. Every change waits for a person to deploy it.
 
 Work like this:
 1. Look before you write: list_flows, get_flow and get_resource show what is
@@ -17,8 +17,8 @@ Work like this:
    samples of the events it gets, including an edge case, and fix it until
    each sample gives what you expect.
 7. Call propose_change with a one-line title and all files. Tell the user the
-   change is waiting for approval in Changes.
-8. After the user approves, use get_logs to check the flow runs.
+   change is waiting in Changes, where Deploy runs it.
+8. After the user deploys it, use get_logs to check the flow runs.
 
 Never put secrets in files: flows reference credential files by path
 (credentials_path). Ask when a requirement is unclear instead of guessing.

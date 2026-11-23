@@ -20,7 +20,7 @@ pub const DEFAULT_PARQUET_EXTENSION: &str = "parquet";
 pub const DEFAULT_BYTES_EXTENSION: &str = "bin";
 
 /// Object store operation type.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Operation {
     /// Read files from object storage.
@@ -78,7 +78,9 @@ pub enum Operation {
 ///     source: gs://my-bucket/incoming/*.csv
 ///     destination: gs://my-bucket/processed/
 /// ```
-#[derive(PartialEq, Default, Clone, Debug, Deserialize, Serialize, TaskConfig)]
+#[derive(
+    PartialEq, Default, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema, TaskConfig,
+)]
 #[serde(deny_unknown_fields)]
 pub struct Processor {
     /// Unique task identifier.
@@ -143,7 +145,7 @@ pub struct Processor {
 impl ConfigExt for Processor {}
 
 /// Output format for writing data to object storage.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum WriteFormat {
     /// Automatically determine format based on event data type.
@@ -162,7 +164,9 @@ pub enum WriteFormat {
 }
 
 /// Options of `s3://` paths; unset ones other than `virtual_hosted_style_request` come from the `AWS_*` environment variables.
-#[derive(PartialEq, Eq, Hash, Default, Clone, Debug, Deserialize, Serialize)]
+#[derive(
+    PartialEq, Eq, Hash, Default, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema,
+)]
 #[serde(deny_unknown_fields)]
 pub struct S3Options {
     /// AWS region, such as `eu-west-1`.
@@ -176,7 +180,7 @@ pub struct S3Options {
 }
 
 /// Configuration for Hive-style directory partitioning.
-#[derive(PartialEq, Default, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Default, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HivePartitionOptions {
     /// Whether to enable Hive partitioning.
@@ -186,7 +190,7 @@ pub struct HivePartitionOptions {
 }
 
 /// Available partition keys for Hive-style partitioning.
-#[derive(PartialEq, Default, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Default, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub enum HiveParitionKeys {
     /// Partitions data by event date (year/month/day format).
     #[default]

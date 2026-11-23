@@ -16,7 +16,7 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::error;
 
 /// Script processor configuration.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema, TaskConfig)]
 #[serde(deny_unknown_fields)]
 pub struct Script {
     /// Task name for identification.
@@ -84,7 +84,7 @@ impl Default for Script {
 }
 
 /// Supported script engine types.
-#[derive(PartialEq, Eq, Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(PartialEq, Eq, Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ScriptEngine {
     /// Rhai scripting engine.
@@ -118,7 +118,7 @@ fn default_max_function_expr_depth() -> usize {
 ///
 /// Bounds the CPU and memory a single script invocation can consume,
 /// preventing a malicious or buggy script from stalling the worker.
-#[derive(PartialEq, Eq, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Eq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RhaiLimits {
     /// Maximum number of operations the script may execute before

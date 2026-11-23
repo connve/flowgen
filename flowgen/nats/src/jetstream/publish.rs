@@ -12,7 +12,9 @@ use tokio::sync::{
 use tracing::error;
 
 /// `nats_jetstream_publish` task config; unknown fields are rejected by the transparent inner `Config`.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, TaskConfig)]
+#[derive(
+    PartialEq, Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema, TaskConfig,
+)]
 #[serde(transparent)]
 pub struct Publish(pub super::config::Config);
 

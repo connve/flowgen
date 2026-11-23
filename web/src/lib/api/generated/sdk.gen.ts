@@ -2,7 +2,7 @@
 
 import type { Client, ClientMeta, Options as Options2, RequestResult, ServerSentEventsResult, TDataShape } from './client';
 import { client } from './client.gen';
-import type { AddChangeFilesData, AddChangeFilesErrors, AddChangeFilesResponses, AgentsModelsData, AgentsModelsErrors, AgentsModelsResponses, ApproveChangeData, ApproveChangeErrors, ApproveChangeResponses, AuthCallbackData, AuthCallbackErrors, AuthLoginData, AuthLoginErrors, AuthLogoutData, AuthLogoutErrors, AuthMeData, AuthMeErrors, AuthMeResponses, DeleteSessionData, DeleteSessionErrors, DeleteSessionResponses, EditChangeData, EditChangeErrors, EditChangeResponses, EncryptCredentialData, EncryptCredentialErrors, EncryptCredentialResponses, FollowReplyData, FollowReplyErrors, FollowReplyResponse, FollowReplyResponses, GetChangeData, GetChangeErrors, GetChangeResponses, GetClusterStatusData, GetClusterStatusResponses, GetConfigData, GetConfigResponses, GetConnectionData, GetConnectionErrors, GetConnectionResponses, GetConnectorIconData, GetConnectorIconErrors, GetConnectorIconResponses, GetFlowData, GetFlowErrors, GetFlowResponses, GetResourceData, GetResourceErrors, GetResourceResponses, GetSessionData, GetSessionErrors, GetSessionResponses, GetVersionData, GetVersionResponses, GetWorkspaceFileData, GetWorkspaceFileErrors, GetWorkspaceFileResponses, HealthzData, HealthzResponses, ListAgentToolsData, ListAgentToolsErrors, ListAgentToolsResponses, ListChangesData, ListChangesErrors, ListChangesResponses, ListConnectionsData, ListConnectionsResponses, ListConnectorsData, ListConnectorsResponses, ListDocsData, ListDocsResponses, ListFlowsData, ListFlowsResponses, ListHubsData, ListHubsResponses, ListHubTemplatesData, ListHubTemplatesErrors, ListHubTemplatesResponses, ListInstalledTemplatesData, ListInstalledTemplatesResponses, ListLogsData, ListLogsResponses, ListResourcesData, ListResourcesResponses, ListSessionsData, ListSessionsErrors, ListSessionsResponses, LivezData, LivezResponses, MarkSessionReadData, MarkSessionReadErrors, MarkSessionReadResponses, MarkSessionUnreadData, MarkSessionUnreadErrors, MarkSessionUnreadResponses, ProposeChangeData, ProposeChangeErrors, ProposeChangeResponses, PutSessionData, PutSessionErrors, PutSessionResponses, ReadDocData, ReadDocErrors, ReadDocResponses, ReadyzData, ReadyzErrors, ReadyzResponses, RegenerateClusterTokenData, RegenerateClusterTokenErrors, RegenerateClusterTokenResponses, RejectChangeData, RejectChangeErrors, RejectChangeResponses, StartReplyData, StartReplyErrors, StartReplyResponses, StopReplyData, StopReplyErrors, StopReplyResponses, StreamDeploymentsData, StreamDeploymentsResponse, StreamDeploymentsResponses, StreamFlowsData, StreamFlowsResponse, StreamFlowsResponses, StreamLogsData, StreamLogsResponse, StreamLogsResponses, StreamSessionsData, StreamSessionsErrors, StreamSessionsResponse, StreamSessionsResponses, TestScriptData, TestScriptErrors, TestScriptResponses, UpdateSessionData, UpdateSessionErrors, UpdateSessionResponses, ValidateWorkspaceFilesData, ValidateWorkspaceFilesErrors, ValidateWorkspaceFilesResponses } from './types.gen';
+import type { AddChangeFilesData, AddChangeFilesErrors, AddChangeFilesResponses, AgentsModelsData, AgentsModelsErrors, AgentsModelsResponses, ApproveChangeData, ApproveChangeErrors, ApproveChangeResponses, AuthCallbackData, AuthCallbackErrors, AuthLoginData, AuthLoginErrors, AuthLogoutData, AuthLogoutErrors, AuthMeData, AuthMeErrors, AuthMeResponses, DeleteSessionData, DeleteSessionErrors, DeleteSessionResponses, EditChangeData, EditChangeErrors, EditChangeResponses, EncryptCredentialData, EncryptCredentialErrors, EncryptCredentialResponses, FollowReplyData, FollowReplyErrors, FollowReplyResponse, FollowReplyResponses, GetChangeData, GetChangeErrors, GetChangeResponses, GetClusterStatusData, GetClusterStatusResponses, GetConfigData, GetConfigResponses, GetConnectionData, GetConnectionErrors, GetConnectionResponses, GetConnectorIconData, GetConnectorIconErrors, GetConnectorIconResponses, GetFlowData, GetFlowErrors, GetFlowResponses, GetFlowSchemaData, GetFlowSchemaResponses, GetResourceData, GetResourceErrors, GetResourceResponses, GetSessionData, GetSessionErrors, GetSessionResponses, GetVersionData, GetVersionResponses, GetWorkspaceFileData, GetWorkspaceFileErrors, GetWorkspaceFileResponses, HealthzData, HealthzResponses, ListAgentToolsData, ListAgentToolsErrors, ListAgentToolsResponses, ListChangesData, ListChangesErrors, ListChangesResponses, ListConnectionsData, ListConnectionsResponses, ListConnectorsData, ListConnectorsResponses, ListDocsData, ListDocsResponses, ListFlowsData, ListFlowsResponses, ListHubsData, ListHubsResponses, ListHubTemplatesData, ListHubTemplatesErrors, ListHubTemplatesResponses, ListInstalledTemplatesData, ListInstalledTemplatesResponses, ListLogsData, ListLogsResponses, ListResourcesData, ListResourcesResponses, ListSessionsData, ListSessionsErrors, ListSessionsResponses, LivezData, LivezResponses, MarkSessionReadData, MarkSessionReadErrors, MarkSessionReadResponses, MarkSessionUnreadData, MarkSessionUnreadErrors, MarkSessionUnreadResponses, ProposeChangeData, ProposeChangeErrors, ProposeChangeResponses, PutSessionData, PutSessionErrors, PutSessionResponses, ReadDocData, ReadDocErrors, ReadDocResponses, ReadyzData, ReadyzErrors, ReadyzResponses, RegenerateClusterTokenData, RegenerateClusterTokenErrors, RegenerateClusterTokenResponses, RejectChangeData, RejectChangeErrors, RejectChangeResponses, RemoveChangeFileData, RemoveChangeFileErrors, RemoveChangeFileResponses, StartReplyData, StartReplyErrors, StartReplyResponses, StopReplyData, StopReplyErrors, StopReplyResponses, StreamDeploymentsData, StreamDeploymentsResponse, StreamDeploymentsResponses, StreamFlowsData, StreamFlowsResponse, StreamFlowsResponses, StreamLogsData, StreamLogsResponse, StreamLogsResponses, StreamSessionsData, StreamSessionsErrors, StreamSessionsResponse, StreamSessionsResponses, TestScriptData, TestScriptErrors, TestScriptResponses, UpdateSessionData, UpdateSessionErrors, UpdateSessionResponses, ValidateWorkspaceFilesData, ValidateWorkspaceFilesErrors, ValidateWorkspaceFilesResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -388,6 +388,16 @@ export const listHubTemplates = <ThrowOnError extends boolean = true>(options: O
 export const listInstalledTemplates = <ThrowOnError extends boolean = true>(options?: Options<ListInstalledTemplatesData, ThrowOnError>): RequestResult<ListInstalledTemplatesResponses, unknown, ThrowOnError> => (options?.client ?? client).get<ListInstalledTemplatesResponses, unknown, ThrowOnError>({ url: '/api/workspace/templates', ...options });
 
 /**
+ * The JSON Schema of a flow file.
+ *
+ * Generated from the task configs of this version. Fields carry hints
+ * for forms: `x-widget` (`credentials`, `source`), `x-advanced` and
+ * `x-hidden`; a duration is a string with `format: duration`.
+ *
+ */
+export const getFlowSchema = <ThrowOnError extends boolean = true>(options?: Options<GetFlowSchemaData, ThrowOnError>): RequestResult<GetFlowSchemaResponses, unknown, ThrowOnError> => (options?.client ?? client).get<GetFlowSchemaResponses, unknown, ThrowOnError>({ url: '/api/schemas/flow', ...options });
+
+/**
  * The version of a file a change to it is based on.
  *
  * What the instance runs, with every committed change that is not
@@ -452,12 +462,23 @@ export const editChange = <ThrowOnError extends boolean = true>(options: Options
 });
 
 /**
+ * Take a file out of a pending change.
+ *
+ * Only its proposer may remove files; without `web.auth`, anyone. A file
+ * of a template in the change goes with the template and its other
+ * files. A change left without files is rejected.
+ *
+ */
+export const removeChangeFile = <ThrowOnError extends boolean = true>(options: Options<RemoveChangeFileData, ThrowOnError>): RequestResult<RemoveChangeFileResponses, RemoveChangeFileErrors, ThrowOnError> => (options.client ?? client).delete<RemoveChangeFileResponses, RemoveChangeFileErrors, ThrowOnError>({ url: '/api/changes/{id}/files', ...options });
+
+/**
  * Add files to a pending change, or replace files it already has.
  *
  * Only its proposer may add files; without `web.auth`, anyone. Every
  * file must belong to the change's target. A replaced file keeps the
  * deployed content recorded when it was first added, so committing
  * fails when the file changed since. All files are validated again.
+ * A `template` replaces the change's entry for the same template.
  *
  */
 export const addChangeFiles = <ThrowOnError extends boolean = true>(options: Options<AddChangeFilesData, ThrowOnError>): RequestResult<AddChangeFilesResponses, AddChangeFilesErrors, ThrowOnError> => (options.client ?? client).post<AddChangeFilesResponses, AddChangeFilesErrors, ThrowOnError>({

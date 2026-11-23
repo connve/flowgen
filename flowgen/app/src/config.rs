@@ -96,7 +96,7 @@ pub use flowgen_core::identity::FlowIdentity;
 /// serde deserializes the flow body without an identity, which the loader
 /// supplies from the path. The loader wraps this into a `FlowConfig` via
 /// [`FlowConfig::from_path`].
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FlowConfigRaw {
     /// Flow definition (tasks and optional labels).
@@ -200,7 +200,7 @@ fn default_parallel_instances() -> usize {
 /// Flow definition with task list. Identity always comes from the flow's
 /// path (see [`FlowIdentity`]); `name` is a pure display override and does
 /// not affect identity.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Flow {
     /// Optional display-name override for the UI and log fields. Does not
@@ -223,6 +223,7 @@ pub struct Flow {
     pub parallel_instances: usize,
     /// How long a stop lets the events in flight finish; the app's `shutdown_timeout` when unset.
     #[serde(default, with = "humantime_serde")]
+    #[schemars(with = "Option<flowgen_core::schema::Duration>")]
     pub shutdown_timeout: Option<Duration>,
 }
 
@@ -238,7 +239,7 @@ macro_rules! task_types {
         /// Each variant corresponds to a specific processor type from the
         /// various flowgen worker crates. Task configurations are embedded
         /// within each variant.
-        #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+        #[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
         // YAML configs reference task types by their lowercase tag (e.g. `convert:`,
         // `script:`). The serde-driven variant naming therefore has to use the same
         // shape — Rust's CamelCase convention does not apply to this public API.

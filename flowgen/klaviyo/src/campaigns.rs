@@ -12,7 +12,7 @@ use serde_json::Map;
 use std::path::{Path, PathBuf};
 
 /// What the task does with a campaign.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CampaignOperation {
     /// Get a campaign by `campaign_id`.
@@ -46,7 +46,7 @@ pub enum CampaignOperation {
 ///     credentials_path: /etc/klaviyo/credentials.json
 ///     filter: "contains(name,'{{event.data.name}}')"
 /// ```
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema, TaskConfig)]
 #[serde(deny_unknown_fields)]
 pub struct Campaigns {
     /// Task name.

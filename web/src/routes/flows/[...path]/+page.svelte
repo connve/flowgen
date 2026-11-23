@@ -62,7 +62,7 @@
 
 	<PendingChanges changes={data.pending} />
 
-	<div class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-base-200 bg-base-100">
+	<div class="flex min-h-0 flex-1 flex-col overflow-clip rounded-lg border border-base-200 bg-base-100">
 		<FlowInspector
 			yaml={data.detail.yaml}
 			{activities}

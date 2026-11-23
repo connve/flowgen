@@ -783,7 +783,7 @@
 	{/if}
 {/snippet}
 
-<section class="relative flex h-[calc(100vh-4rem)] min-w-0 overflow-hidden">
+<section class="relative flex h-[calc(100vh-4rem)] min-w-0 overflow-clip">
 	<SidePane
 		open={historyPaneOpen}
 		title={m.agents_sessions()}
@@ -881,7 +881,7 @@
 			</div>
 	</SidePane>
 
-	<div class="relative flex min-w-0 flex-1 flex-col overflow-hidden">
+	<div class="relative flex min-w-0 flex-1 flex-col overflow-clip">
 	<div class="flex min-h-8 shrink-0 items-center gap-2 bg-base-100 px-6 pb-4 pt-6">
 		<div class="min-w-0 flex-1">
 			{#if activeSummary?.folder}
@@ -1097,7 +1097,7 @@
 		<Loading />
 	{:else if messages.length === 0}
 		<!-- Empty state: greeting + composer centred, like a landing prompt. -->
-		<div class="relative flex flex-1 flex-col items-center justify-center gap-7 overflow-hidden px-6">
+		<div class="relative flex flex-1 flex-col items-center justify-center gap-7 overflow-clip px-6">
 			<!-- Connve brand glow: three drifting blurred blobs behind the prompt. -->
 			<div class="hero-gradient pointer-events-none absolute inset-0" aria-hidden="true">
 				<div class="hero-blob hero-blob-1"></div>

@@ -432,6 +432,11 @@ export type WorkspaceFiles = {
     files: Array<WorkspaceFile>;
 };
 
+export type ChangeFiles = {
+    files: Array<WorkspaceFile>;
+    template?: TemplateSource;
+};
+
 export type Hub = {
     /**
      * The hub's name before `_hub` in its flow, `system/<id>_hub`.
@@ -506,6 +511,10 @@ export type TemplateSource = {
      * The change uninstalls the template, so flowgen.lock drops it.
      */
     removed?: boolean;
+    /**
+     * The paths the template installs; flowgen.lock records those the change writes.
+     */
+    files: Array<string>;
 };
 
 export type DocPage = {
@@ -592,7 +601,10 @@ export type ChangeProposal = {
      * The files to change, each path at most once.
      */
     files: Array<WorkspaceFile>;
-    template?: TemplateSource;
+    /**
+     * The hub templates the change installs, updates or removes.
+     */
+    templates?: Array<TemplateSource>;
 };
 
 export type ChangeEdit = {
@@ -675,7 +687,10 @@ export type Change = {
      * Committing ran past the `ack_timeout` of the commit flow's `inproc_endpoint`, so approving the change again retries it.
      */
     stalled?: boolean;
-    template?: TemplateSource;
+    /**
+     * The hub templates the change installs, updates or removes.
+     */
+    templates?: Array<TemplateSource>;
 };
 
 export type ChangeSummary = {
@@ -1859,6 +1874,24 @@ export type ListInstalledTemplatesResponses = {
 
 export type ListInstalledTemplatesResponse = ListInstalledTemplatesResponses[keyof ListInstalledTemplatesResponses];
 
+export type GetFlowSchemaData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/schemas/flow';
+};
+
+export type GetFlowSchemaResponses = {
+    /**
+     * A JSON Schema (draft 2020-12).
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type GetFlowSchemaResponse = GetFlowSchemaResponses[keyof GetFlowSchemaResponses];
+
 export type GetWorkspaceFileData = {
     body?: never;
     path?: never;
@@ -2054,8 +2087,54 @@ export type EditChangeResponses = {
 
 export type EditChangeResponse = EditChangeResponses[keyof EditChangeResponses];
 
+export type RemoveChangeFileData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query: {
+        /**
+         * The workspace path of the file.
+         */
+        path: string;
+    };
+    url: '/api/changes/{id}/files';
+};
+
+export type RemoveChangeFileErrors = {
+    /**
+     * The `path` query parameter is missing.
+     */
+    400: unknown;
+    /**
+     * The caller did not propose the change.
+     */
+    403: unknown;
+    /**
+     * No change with that id or no such file in it, or `web.authoring` is not configured.
+     */
+    404: unknown;
+    /**
+     * The change is no longer pending, or was edited by another request.
+     */
+    409: unknown;
+    /**
+     * The change store is unavailable.
+     */
+    503: unknown;
+};
+
+export type RemoveChangeFileResponses = {
+    /**
+     * The change without the file.
+     */
+    200: Change;
+};
+
+export type RemoveChangeFileResponse = RemoveChangeFileResponses[keyof RemoveChangeFileResponses];
+
 export type AddChangeFilesData = {
-    body: WorkspaceFiles;
+    body: ChangeFiles;
     path: {
         id: string;
     };

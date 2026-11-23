@@ -28,7 +28,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 /// Where the partitions start when none of them has a stored offset.
-#[derive(PartialEq, Eq, Clone, Copy, Debug, Default, Deserialize, Serialize)]
+#[derive(
+    PartialEq, Eq, Clone, Copy, Debug, Default, Deserialize, Serialize, schemars::JsonSchema,
+)]
 #[serde(try_from = "String", into = "String")]
 pub enum StartOffset {
     /// The oldest record the topic still retains.
@@ -71,7 +73,7 @@ impl From<StartOffset> for String {
 }
 
 /// Kafka subscribe task configuration.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema, TaskConfig)]
 #[serde(deny_unknown_fields)]
 pub struct Subscribe {
     /// The unique name / identifier of the task.
@@ -92,6 +94,7 @@ pub struct Subscribe {
     /// How long to wait for the flow to complete a record. Waits
     /// indefinitely when omitted.
     #[serde(default, with = "humantime_serde")]
+    #[schemars(with = "Option<flowgen_core::schema::Duration>")]
     pub ack_timeout: Option<Duration>,
     /// How many times a record is sent through the flow before it is skipped.
     /// Delivered until the flow completes it when omitted.

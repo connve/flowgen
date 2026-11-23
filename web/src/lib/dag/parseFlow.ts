@@ -1,15 +1,19 @@
 import { load } from 'js-yaml';
 
+export type Mark = 'added' | 'removed' | 'changed';
+
 export interface DagNode {
 	id: string;
 	name: string;
 	taskType: string;
+	mark?: Mark;
 }
 
 export interface DagEdge {
 	id: string;
 	source: string;
 	target: string;
+	mark?: Exclude<Mark, 'changed'>;
 }
 
 export interface Dag {

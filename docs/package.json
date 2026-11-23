@@ -1,7 +1,7 @@
 {
 	"name": "docs",
 	"private": true,
-	"version": "0.158.1",
+	"version": "0.159.0",
 	"type": "module",
 	"scripts": {
 		"sync-icons": "node scripts/sync-icons.mjs",
@@ -31,7 +31,7 @@
 		"vite": "^7.3.1"
 	},
 	"dependencies": {
-		"@connve/ui": "^0.3.2",
+		"@connve/ui": "^0.4.0",
 		"@iconify/svelte": "^5.2.4",
 		"github-slugger": "^2.0.0",
 		"lucide-svelte": "^1.0.1",
@@ -39,5 +39,13 @@
 		"posthog-js": "^1.373.2",
 		"rehype-autolink-headings": "^7.1.0",
 		"rehype-slug": "^6.0.0"
+	},
+	"overrides": {
+		"@sveltejs/kit": {
+			"cookie": "0.7.2"
+		},
+		"mermaid": {
+			"katex": "0.18.11"
+		}
 	}
 }

@@ -30,7 +30,9 @@ use tracing::{error, warn, Instrument};
 ///     Order_ID__c: "{{event.data.order_id}}"
 ///     Status__c: Shipped
 /// ```
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, TaskConfig)]
+#[derive(
+    PartialEq, Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema, TaskConfig,
+)]
 #[serde(deny_unknown_fields)]
 pub struct Publish {
     /// The unique name / identifier of the task.

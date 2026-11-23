@@ -5,7 +5,7 @@ info:
     HTTP API for flowgen. Two listeners: `web` (flow / resource /
     SSE endpoints under `web.path`) and `health` (Kubernetes probes
     on the root path).
-  version: 0.158.1
+  version: 0.159.0
   license:
     name: MPL-2.0
 servers:
@@ -838,6 +838,24 @@ paths:
               schema:
                 $ref: "#/components/schemas/InstalledTemplates"
 
+  /api/schemas/flow:
+    get:
+      operationId: getFlowSchema
+      summary: The JSON Schema of a flow file.
+      description: |
+        Generated from the task configs of this version. Fields carry hints
+        for forms: `x-widget` (`credentials`, `source`), `x-advanced` and
+        `x-hidden`; a duration is a string with `format: duration`.
+      tags: [workspace]
+      responses:
+        "200":
+          description: A JSON Schema (draft 2020-12).
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
   /api/workspace/file:
     get:
       operationId: getWorkspaceFile
@@ -1013,13 +1031,14 @@ paths:
         file must belong to the change's target. A replaced file keeps the
         deployed content recorded when it was first added, so committing
         fails when the file changed since. All files are validated again.
+        A `template` replaces the change's entry for the same template.
       tags: [workspace]
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/WorkspaceFiles"
+              $ref: "#/components/schemas/ChangeFiles"
       responses:
         "200":
           description: The change with the files added.
@@ -1037,6 +1056,38 @@ paths:
           description: The change is no longer pending, or was edited by another request.
         "503":
           description: The change store or the deployed content is unavailable.
+    delete:
+      operationId: removeChangeFile
+      summary: Take a file out of a pending change.
+      description: |
+        Only its proposer may remove files; without `web.auth`, anyone. A file
+        of a template in the change goes with the template and its other
+        files. A change left without files is rejected.
+      tags: [workspace]
+      parameters:
+        - name: path
+          in: query
+          required: true
+          description: The workspace path of the file.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The change without the file.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Change"
+        "400":
+          description: The `path` query parameter is missing.
+        "403":
+          description: The caller did not propose the change.
+        "404":
+          description: No change with that id or no such file in it, or `web.authoring` is not configured.
+        "409":
+          description: The change is no longer pending, or was edited by another request.
+        "503":
+          description: The change store is unavailable.
 
   /api/changes/{id}/approve:
     parameters:
@@ -1777,6 +1828,17 @@ components:
           items:
             $ref: "#/components/schemas/WorkspaceFile"
 
+    ChangeFiles:
+      type: object
+      required: [files]
+      properties:
+        files:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkspaceFile"
+        template:
+          $ref: "#/components/schemas/TemplateSource"
+
     Hub:
       type: object
       required: [id, name]
@@ -1863,7 +1925,7 @@ components:
     TemplateSource:
       type: object
       description: The hub template a change installs, updates or removes, recorded in `flowgen.lock` when it is committed.
-      required: [hub, slug, digest]
+      required: [hub, slug, digest, files]
       properties:
         hub:
           type: string
@@ -1875,6 +1937,11 @@ components:
           type: boolean
           default: false
           description: The change uninstalls the template, so flowgen.lock drops it.
+        files:
+          type: array
+          description: The paths the template installs; flowgen.lock records those the change writes.
+          items:
+            type: string
 
     DocPage:
       type: object
@@ -1990,8 +2057,11 @@ components:
           description: The files to change, each path at most once.
           items:
             $ref: "#/components/schemas/WorkspaceFile"
-        template:
-          $ref: "#/components/schemas/TemplateSource"
+        templates:
+          type: array
+          description: The hub templates the change installs, updates or removes.
+          items:
+            $ref: "#/components/schemas/TemplateSource"
 
     ChangeEdit:
       type: object
@@ -2087,8 +2157,11 @@ components:
         stalled:
           type: boolean
           description: Committing ran past the `ack_timeout` of the commit flow's `inproc_endpoint`, so approving the change again retries it.
-        template:
-          $ref: "#/components/schemas/TemplateSource"
+        templates:
+          type: array
+          description: The hub templates the change installs, updates or removes.
+          items:
+            $ref: "#/components/schemas/TemplateSource"
 
     ChangeSummary:
       type: object

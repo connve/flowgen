@@ -20,7 +20,7 @@ pub(crate) fn default_connect_timeout() -> Option<Duration> {
 }
 
 /// HTTP processor configuration.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema, TaskConfig)]
 #[serde(deny_unknown_fields)]
 pub struct Processor {
     /// The unique name / identifier of the task.
@@ -38,15 +38,18 @@ pub struct Processor {
     /// Timeout for waiting on flow completion before responding to webhook (webhook only).
     /// If not specified, waits indefinitely for flow completion.
     #[serde(default, with = "humantime_serde")]
+    #[schemars(with = "Option<flowgen_core::schema::Duration>")]
     pub ack_timeout: Option<Duration>,
     /// Outbound request timeout (http_request only). Total time budget
     /// from request start to response body received. Defaults to 30s
     /// to keep slow upstreams from pinning worker tasks.
     #[serde(default = "default_request_timeout", with = "humantime_serde")]
+    #[schemars(with = "Option<flowgen_core::schema::Duration>")]
     pub timeout: Option<Duration>,
     /// Outbound TCP/TLS connect timeout (http_request only). Defaults
     /// to 10s.
     #[serde(default = "default_connect_timeout", with = "humantime_serde")]
+    #[schemars(with = "Option<flowgen_core::schema::Duration>")]
     pub connect_timeout: Option<Duration>,
     /// Maximum accepted request body size in bytes (webhook only).
     /// Defaults to 10 MiB. Requests larger than this are rejected
@@ -110,7 +113,7 @@ impl Default for Processor {
 }
 
 /// HTTP request payload configuration.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Payload {
     /// JSON object to send as payload.
@@ -126,7 +129,7 @@ pub struct Payload {
 }
 
 /// Payload encoding format options.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum PayloadSendAs {
     /// Send payload as JSON (default).
@@ -139,7 +142,7 @@ pub enum PayloadSendAs {
 }
 
 /// HTTP method types supported by the processor.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum Method {
     /// HTTP GET method (default).
@@ -158,7 +161,7 @@ pub enum Method {
 }
 
 /// How to decode outbound HTTP response bodies.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ResponseType {
     /// Parse body as JSON (default).

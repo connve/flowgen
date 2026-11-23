@@ -45,7 +45,6 @@ config = { workspace = true }
 glob = { workspace = true }
 serde_ignored = { workspace = true }
 serde_json = { workspace = true }
-native-tls = { workspace = true }
 humantime-serde = { workspace = true }
 url = { workspace = true }
 rustls = { workspace = true }
@@ -54,6 +53,7 @@ serde_yaml = { workspace = true }
 similar = { workspace = true }
 subtle = { workspace = true }
 sha2 = { workspace = true }
+schemars = { workspace = true }
 flate2 = { workspace = true }
 tar = { workspace = true }
 base64 = { workspace = true }
@@ -75,6 +75,7 @@ webbrowser = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+jsonschema = { workspace = true }
 testcontainers = { workspace = true }
 async-nats = { workspace = true }
 bytes = { workspace = true }

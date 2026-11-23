@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 /// completion:
 ///   resource: "completions/languages.txt"
 /// ```
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(
     deny_unknown_fields,
     untagged,

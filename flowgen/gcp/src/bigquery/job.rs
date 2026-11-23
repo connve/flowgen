@@ -29,7 +29,7 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::error;
 
 /// Job operation type for unified job processor.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum JobOperation {
     /// Create a new job (load, query, extract, copy).
@@ -98,7 +98,7 @@ pub enum JobOperation {
 ///   project_id: my-project-id
 ///   job_id: "{{event.data.job_id}}"
 /// ```
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema, TaskConfig)]
 #[serde(deny_unknown_fields)]
 pub struct Job {
     /// Unique task identifier.
@@ -159,9 +159,11 @@ pub struct Job {
     // Fields for get operation.
     /// Polling interval between status checks (get operation only).
     #[serde(default = "default_poll_interval", with = "humantime_serde")]
+    #[schemars(with = "flowgen_core::schema::Duration")]
     pub poll_interval: Duration,
     /// Maximum duration to poll before giving up (get operation only).
     #[serde(default = "default_max_poll_duration", with = "humantime_serde")]
+    #[schemars(with = "flowgen_core::schema::Duration")]
     pub max_poll_duration: Duration,
 
     /// Optional list of upstream task names this task depends on.
@@ -187,7 +189,7 @@ impl Job {
 }
 
 /// BigQuery table reference.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TableReference {
     /// GCP project ID containing the table.
@@ -199,7 +201,7 @@ pub struct TableReference {
 }
 
 /// Source file formats for BigQuery load jobs.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum SourceFormat {
     Parquet,
@@ -222,7 +224,7 @@ impl SourceFormat {
 }
 
 /// BigQuery field type for schema definitions.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum FieldType {
     String,
@@ -265,7 +267,7 @@ impl From<FieldType> for google_cloud_bigquery::http::table::TableFieldType {
 }
 
 /// BigQuery field mode for schema definitions.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum FieldMode {
     #[default]
@@ -285,7 +287,7 @@ impl From<FieldMode> for google_cloud_bigquery::http::table::TableFieldMode {
 }
 
 /// Table field schema definition.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TableField {
     /// Field name.
@@ -321,7 +323,7 @@ impl From<TableField> for google_cloud_bigquery::http::table::TableFieldSchema {
 }
 
 /// Write disposition for BigQuery load jobs.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum WriteDisposition {
     /// Append data to existing table. Create table if it doesn't exist.
@@ -347,7 +349,7 @@ impl WriteDisposition {
 }
 
 /// Create disposition for BigQuery load jobs.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum CreateDisposition {
     /// Create table if it doesn't exist (default).

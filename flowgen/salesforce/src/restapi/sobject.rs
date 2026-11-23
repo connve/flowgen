@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use tracing::warn;
 
 /// SObject CRUD operations.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SObjectOperation {
     /// Create a new record.
@@ -99,7 +99,7 @@ pub enum SObjectOperation {
 ///   start: "{{event.data.start_iso}}"
 ///   end: "{{event.data.end_iso}}"
 /// ```
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema, TaskConfig)]
 #[serde(deny_unknown_fields)]
 pub struct SObject {
     /// Unique task identifier.

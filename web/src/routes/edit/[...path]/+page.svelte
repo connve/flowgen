@@ -10,7 +10,8 @@
 	import CodeEditor from '$lib/CodeEditor.svelte';
 	import FileActions from '$lib/FileActions.svelte';
 	import PathField from '$lib/PathField.svelte';
-	import { StatusDot } from '@connve/ui';
+	import IssueList from '$lib/IssueList.svelte';
+	import { Select, StatusDot } from '@connve/ui';
 	import { activitiesFor, releaseFlowSubscription } from '$lib/activityStore.svelte';
 	import {
 		encodePath,
@@ -92,6 +93,7 @@
 		return `${base}/resources/${encodePath(data.file.slice('resources/'.length))}`;
 	});
 	let resource = $state<string | null>(null);
+	let inspector = $state<FlowInspector | null>(null);
 	let activity = $state<Activity | null>(null);
 	let activities = $derived(
 		data.file?.startsWith('flows/') && !isNew
@@ -345,19 +347,17 @@
 
 	<div class="mb-3 flex shrink-0 items-center gap-2">
 		{#if isNew && data.targets.length > 1}
-			<select
-				class="select select-sm w-auto border border-base-300 bg-base-100 outline-none focus:border-primary"
-				aria-label={m.editor_target_label()}
-				value={target?.name ?? ''}
-				onchange={(e) => {
-					const chosen = data.targets.find((t) => t.name === e.currentTarget.value);
-					if (chosen) path = startPath(chosen, path);
-				}}
-			>
-				{#each data.targets as option (option.name)}
-					<option value={option.name}>{option.name}</option>
-				{/each}
-			</select>
+			<div class="w-40 shrink-0">
+				<Select
+					label={m.editor_target_label()}
+					value={target?.name ?? ''}
+					options={data.targets.map((option) => ({ value: option.name }))}
+					onchange={(name) => {
+						const chosen = data.targets.find((t) => t.name === name);
+						if (chosen) path = startPath(chosen, path);
+					}}
+				/>
+			</div>
 		{/if}
 		<PathField
 			bind:path
@@ -367,19 +367,19 @@
 		/>
 	</div>
 
-	<div class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-base-200 bg-base-100">
+	<div class="flex min-h-0 flex-1 flex-col overflow-clip rounded-lg border border-base-200 bg-base-100">
 		{#if issues && issues.length > 0}
-			<ul class="max-h-32 shrink-0 space-y-0.5 overflow-auto border-b border-error/40 bg-error/5 px-4 py-2">
-				{#each issues as issue, i (i)}
-					<li class="font-mono text-xs">
-						{issue.location ? `${issue.location}: ` : ''}{issue.message}
-					</li>
-				{/each}
-			</ul>
+			<div class="max-h-40 shrink-0 overflow-auto bg-error/5 p-2">
+				<IssueList
+					{issues}
+					contentOf={() => (isFlow ? content : null)}
+					onselect={(task) => inspector?.showTask(task)}
+				/>
+			</div>
 		{/if}
 		{#key data}
 			{#if isFlow}
-				<FlowInspector bind:yaml={content} {activities} editable bind:resource bind:activity />
+				<FlowInspector bind:this={inspector} bind:yaml={content} {activities} editable bind:resource bind:activity />
 			{:else}
 				<div class="flex h-10 shrink-0 items-center px-4 text-xs font-medium text-base-content/50">
 					{m.editor_content_heading()}

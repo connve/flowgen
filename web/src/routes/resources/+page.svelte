@@ -29,7 +29,6 @@
 		isStatus,
 		listResources,
 		type AuthoringTarget,
-		type ChangeSummary,
 		type ResourceSummary as Resource,
 		type ResourceContent
 	} from '$lib/api';
@@ -37,14 +36,12 @@
 		authoringEnabled,
 		authoringTargets,
 		editUrl,
-		pendingChanges,
 		targetOf
 	} from '$lib/changes';
 
 	let resources = $state<Resource[]>([]);
 	let authoring = $state(false);
 	let targets = $state<AuthoringTarget[]>([]);
-	let pending = $state<ChangeSummary[]>([]);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 
@@ -77,7 +74,6 @@
 
 		authoringEnabled().then((enabled) => (authoring = enabled));
 		authoringTargets().then((found) => (targets = found));
-		pendingChanges().then((changes) => (pending = changes));
 
 		try {
 			resources = (await listResources()).data;
@@ -93,7 +89,6 @@
 		visibleEventSource(deploymentsStream(), (source) =>
 			source.addEventListener('deployment', () => {
 				listResources().then(({ data }) => (resources = data), () => undefined);
-				pendingChanges().then((changes) => (pending = changes));
 			})
 		)
 	);
@@ -237,10 +232,9 @@
 				folder={selectedFolder}
 				onselect={selectFolder}
 				count={m.resources_item_count({ count: visibleResources.length })}
-				pending={authoring ? pending.length : null}
-				pendingLabel={m.resources_pending_changes({ count: pending.length })}
-				pendingHref="{base}/changes"
-				newHref="{base}/edit?new=resource{selectedFolder ? `&folder=${encodePath(selectedFolder)}` : ''}"
+				newHref={authoring
+					? `${base}/edit?new=resource${selectedFolder ? `&folder=${encodePath(selectedFolder)}` : ''}`
+					: null}
 			/>
 		</div>
 

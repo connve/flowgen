@@ -2,6 +2,7 @@
 	import { base } from '$app/paths';
 	import { goto } from '$app/navigation';
 	import Icon from '@iconify/svelte';
+	import { Select } from '@connve/ui';
 	import CodeEditor from '$lib/CodeEditor.svelte';
 	import { encryptCredential, errorMessage, type CredentialsField } from '$lib/api';
 	import { authoringTargets, proposeFile } from '$lib/changes';
@@ -161,22 +162,22 @@
 <div class="space-y-3">
 	{#if open}
 		{#if forms.length > 1}
-			<label class="block space-y-1">
+			<div class="space-y-1">
 				<span class="text-xs text-base-content/60">{m.credentials_way()}</span>
-				<select
-					class="select select-sm w-full border border-base-300 bg-base-100 outline-none focus:border-primary"
-					bind:value={chosen}
-					onchange={reset}
-				>
-					{#each forms as option, index (option.label)}
-						<option value={index}>{option.label}</option>
-					{/each}
-				</select>
-			</label>
+				<Select
+					label={m.credentials_way()}
+					value={String(chosen)}
+					options={forms.map((option, index) => ({ value: String(index), label: option.label }))}
+					onchange={(index) => {
+						chosen = Number(index);
+						reset();
+					}}
+				/>
+			</div>
 		{/if}
 
 		{#if other}
-			<div class="h-48 overflow-hidden rounded-md border border-base-300">
+			<div class="h-48 overflow-clip rounded-md border border-base-300">
 				<CodeEditor bind:value={file} extension="json" label={m.credentials_content()} />
 			</div>
 		{:else if upload}
@@ -200,25 +201,22 @@
 						{field.label}
 					</label>
 				{:else}
-					<label class="block space-y-1">
+					<div class="space-y-1">
 						{#if labelled(field.label)}
-							<span class="text-xs text-base-content/60">
+							<span class="block text-xs text-base-content/60">
 								{field.label}{field.required ? '' : ` · ${m.credentials_optional()}`}
 							</span>
 						{/if}
 						{#if field.kind === 'choice'}
-							<select
-								class="select select-sm w-full border border-base-300 bg-base-100 outline-none focus:border-primary"
-								aria-label={field.label}
-								bind:value={values[field.key]}
-							>
-								{#if !field.required}
-									<option value="">{m.credentials_default()}</option>
-								{/if}
-								{#each field.choices ?? [] as choice (choice)}
-									<option value={choice}>{choice}</option>
-								{/each}
-							</select>
+							<Select
+								label={field.label}
+								value={String(values[field.key] ?? '')}
+								options={[
+									...(field.required ? [] : [{ value: '', label: m.credentials_default() }]),
+									...(field.choices ?? []).map((choice) => ({ value: choice }))
+								]}
+								onchange={(choice) => (values[field.key] = choice)}
+							/>
 						{:else if field.kind === 'list'}
 							<textarea
 								class="textarea textarea-sm w-full border border-base-300 bg-base-100 font-mono outline-none focus:border-primary"
@@ -240,7 +238,7 @@
 								<span class="block text-xs text-error">{m.credentials_invalid_url()}</span>
 							{/if}
 						{/if}
-					</label>
+					</div>
 				{/if}
 			{/each}
 		{/if}

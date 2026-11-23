@@ -34,6 +34,8 @@ pub enum Error {
     NotConfigured,
     #[error("No change with id '{id}'")]
     NotFound { id: String },
+    #[error("The change has no file '{path}'")]
+    FileNotInChange { path: String },
     #[error("Invalid path '{path}': {reason}")]
     InvalidPath {
         path: String,
@@ -62,8 +64,6 @@ pub enum Error {
     TargetGone { target: String },
     #[error("The change's files moved from target '{stored}' to '{current}'")]
     TargetChanged { stored: String, current: String },
-    #[error("A change from a template takes no other files")]
-    TemplateChange,
     #[error("Only a signed-in user can approve or reject changes")]
     UserRequired,
     #[error("Only the proposer can edit this change")]
@@ -140,7 +140,9 @@ pub enum Error {
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
         let (status, fixed) = match &self {
-            Error::NotConfigured | Error::NotFound { .. } => (StatusCode::NOT_FOUND, None),
+            Error::NotConfigured | Error::NotFound { .. } | Error::FileNotInChange { .. } => {
+                (StatusCode::NOT_FOUND, None)
+            }
             Error::InvalidPath { .. }
             | Error::DuplicatePath { .. }
             | Error::Credentials { .. }
@@ -157,8 +159,7 @@ impl IntoResponse for Error {
             | Error::Concurrent
             | Error::EditedSinceReview
             | Error::TargetGone { .. }
-            | Error::TargetChanged { .. }
-            | Error::TemplateChange => (StatusCode::CONFLICT, None),
+            | Error::TargetChanged { .. } => (StatusCode::CONFLICT, None),
             Error::UserRequired | Error::NotApprover { .. } | Error::NotProposer => {
                 (StatusCode::FORBIDDEN, None)
             }
@@ -1032,7 +1033,7 @@ pub(crate) async fn propose_change(
         error: None,
         deployment: None,
         stalled: None,
-        template: proposal.template,
+        templates: proposal.templates,
     };
     store(&state, &change).await?;
     Ok((StatusCode::CREATED, Json(with_diffs(change).await?)).into_response())
@@ -1113,19 +1114,17 @@ pub(crate) async fn edit_change(
 }
 
 /// `POST /api/changes/{id}/files`: a file already in the change gets the new
-/// content and keeps the deployed content recorded when it was first added.
+/// content and keeps the deployed content recorded when it was first added,
+/// and a template replaces the change's entry for the same template.
 pub(crate) async fn add_change_files(
     State(state): State<Arc<WebState>>,
     caller: Option<Extension<Caller>>,
     Path(id): Path<String>,
-    Json(body): Json<api::WorkspaceFiles>,
+    Json(body): Json<api::ChangeFiles>,
 ) -> Result<Json<api::Change>, Error> {
     let authoring = require_authoring(&state)?;
     let caller = caller.map(|Extension(caller)| caller);
     let (mut change, revision) = load_editable(&state, caller.as_ref(), &id).await?;
-    if change.template.is_some() {
-        return Err(Error::TemplateChange);
-    }
     let locations = check_paths(&body.files)?;
     let target = target_for(
         authoring,
@@ -1160,7 +1159,61 @@ pub(crate) async fn add_change_files(
             }
         }
     }
+    if let Some(template) = body.template {
+        let same = |known: &api::TemplateSource| {
+            (&known.hub, &known.slug) == (&template.hub, &template.slug)
+        };
+        let dropped: Vec<String> = change
+            .templates
+            .iter()
+            .filter(|known| same(known))
+            .flat_map(|known| known.files.iter())
+            .filter(|path| !template.files.contains(path))
+            .cloned()
+            .collect();
+        change.files.retain(|file| !dropped.contains(&file.path));
+        change.templates.retain(|known| !same(known));
+        change.templates.push(template);
+    }
     change.issues = validate_blocking(workspace_files(&change)).await?;
+    touch(&mut change);
+    transition(&state, &change, revision).await?;
+    Ok(Json(with_diffs(change).await?))
+}
+
+/// `DELETE /api/changes/{id}/files?path=`: takes the file out of the change,
+/// along with a template it belongs to and that template's other files. A
+/// change left without files is rejected.
+pub(crate) async fn remove_change_file(
+    State(state): State<Arc<WebState>>,
+    caller: Option<Extension<Caller>>,
+    Path(id): Path<String>,
+    Query(query): Query<FileQuery>,
+) -> Result<Json<api::Change>, Error> {
+    require_authoring(&state)?;
+    let caller = caller.map(|Extension(caller)| caller);
+    let (mut change, revision) = load_editable(&state, caller.as_ref(), &id).await?;
+    if !change.files.iter().any(|file| file.path == query.path) {
+        return Err(Error::FileNotInChange { path: query.path });
+    }
+    let (gone, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut change.templates)
+        .into_iter()
+        .partition(|template| template.files.contains(&query.path));
+    change.templates = kept;
+    change.files.retain(|file| {
+        file.path != query.path
+            && !gone
+                .iter()
+                .any(|template| template.files.contains(&file.path))
+    });
+    match change.files.is_empty() {
+        true => {
+            change.status = api::ChangeStatus::Rejected;
+            change.decided_by = Some(caller_label(caller.as_ref()));
+            change.decided_at = Some(now_ms());
+        }
+        false => change.issues = validate_blocking(workspace_files(&change)).await?,
+    }
     touch(&mut change);
     transition(&state, &change, revision).await?;
     Ok(Json(with_diffs(change).await?))
@@ -1359,22 +1412,23 @@ async fn run_commit_flow(
             previous: None,
         });
     }
-    let deployed_lock = match (&change.template, state.flows_cache.as_deref()) {
-        (Some(_), Some(cache)) => Some(crate::lock::deployed(cache).await),
+    let installs = !change.templates.is_empty();
+    let deployed_lock = match (installs, state.flows_cache.as_deref()) {
+        (true, Some(cache)) => Some(crate::lock::deployed(cache).await),
         _ => None,
     };
     let base = match &deployed_lock {
         Some(Some(content)) => Some(content.as_str()),
         _ => None,
     };
-    let lock = match &change.template {
-        Some(_) => Some(
+    let lock = match installs {
+        true => Some(
             crate::lock::Lock::parse(base)
                 .with(change)
                 .render()
                 .map_err(|source| Error::Lock { source })?,
         ),
-        None => None,
+        false => None,
     };
     if let Some(lock) = &lock {
         files.push(CommitFile {
@@ -1638,7 +1692,7 @@ mod tests {
             error: None,
             deployment: None,
             stalled: None,
-            template: None,
+            templates: Vec::new(),
         };
         let timeout = Some(std::time::Duration::from_secs(60));
         assert!(can_commit(
@@ -1795,7 +1849,7 @@ mod tests {
             error: None,
             deployment: None,
             stalled: None,
-            template: None,
+            templates: Vec::new(),
         };
 
         assert_eq!(
@@ -1843,7 +1897,7 @@ mod tests {
             error: None,
             deployment: None,
             stalled: None,
-            template: None,
+            templates: Vec::new(),
         };
 
         assert_eq!(

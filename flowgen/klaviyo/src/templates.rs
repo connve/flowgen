@@ -12,7 +12,7 @@ use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 
 /// What the task does with a template.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TemplateOperation {
     /// Get a template by `template_id`.
@@ -43,7 +43,7 @@ pub enum TemplateOperation {
 ///     payload:
 ///       from_event: true
 /// ```
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema, TaskConfig)]
 #[serde(deny_unknown_fields)]
 pub struct Templates {
     /// Task name.

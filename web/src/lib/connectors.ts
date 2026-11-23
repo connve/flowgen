@@ -16,6 +16,7 @@ const CORE = connector('core', 'Core');
 
 let connectors: Record<string, Connector> = {};
 let taskConnectors: Record<string, string> = {};
+let taskTypesByConnector: { connector: Connector; taskTypes: string[] }[] = [];
 let loading: Promise<void> | null = null;
 
 export function loadConnectors(fetcher: typeof fetch): Promise<void> {
@@ -27,6 +28,10 @@ export function loadConnectors(fetcher: typeof fetch): Promise<void> {
 			taskConnectors = Object.fromEntries(
 				found.flatMap((c) => c.taskTypes.map((taskType) => [taskType, c.name]))
 			);
+			taskTypesByConnector = found.map((c) => ({
+				connector: connectors[c.name],
+				taskTypes: c.taskTypes
+			}));
 		})
 		.catch(() => {
 			loading = null;
@@ -37,6 +42,11 @@ export function loadConnectors(fetcher: typeof fetch): Promise<void> {
 export function connectorFor(taskType: string): Connector {
 	const name = taskConnectors[taskType];
 	return name ? connectorByName(name) : CORE;
+}
+
+/** Every connector with its task types, once `loadConnectors` is done. */
+export function connectorTaskTypes(): { connector: Connector; taskTypes: string[] }[] {
+	return taskTypesByConnector;
 }
 
 export function connectorByName(name: string): Connector {

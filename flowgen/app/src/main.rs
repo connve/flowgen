@@ -435,7 +435,7 @@ fn main() {
             Some(Command::Run {
                 workspace: Some(folder),
             }),
-            _,
+            None,
         ) if !folder.is_dir() => {
             eprintln!(
                 "No folder at {0}; `flowgen {0}` creates a workspace there",

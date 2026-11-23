@@ -42,6 +42,8 @@ pub mod registry;
 pub mod resource;
 /// Retry configuration and utilities for task execution.
 pub mod retry;
+/// JSON Schema of config values serde reads in a way of its own.
+pub mod schema;
 /// Custom serialization and deserialization utilities.
 pub mod serde;
 /// Service discovery and connection management.

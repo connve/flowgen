@@ -38,7 +38,7 @@ use tokio::fs;
 /// query:
 ///   resource: "queries/get_orders.sql"
 /// ```
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(
     untagged,
     deny_unknown_fields,

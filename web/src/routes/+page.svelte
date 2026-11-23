@@ -28,7 +28,6 @@
 	import { connectorByName } from '$lib/connectors';
 	import type {
 		AuthoringTarget,
-		ChangeSummary,
 		Connection,
 		FlowStatus,
 		FlowSummary as Flow,
@@ -39,7 +38,6 @@
 		authoringTargets,
 		editUrl,
 		flowFilePath,
-		pendingChanges,
 		targetOf
 	} from '$lib/changes';
 
@@ -52,7 +50,6 @@
 	let scopedFlows = $derived(
 		connection === null ? flows : flows.filter((f) => connection?.flows.includes(f.path)),
 	);
-	let pending = $state<ChangeSummary[]>([]);
 	let authoring = $state(false);
 	let targets = $state<AuthoringTarget[]>([]);
 	let loading = $state(true);
@@ -175,7 +172,6 @@
 	// Loads the list again each time a flow starts or stops, such as a deployed change.
 	function reloadFlows() {
 		listFlows().then(({ data }) => (flows = data), () => undefined);
-		pendingChanges().then((changes) => (pending = changes));
 	}
 
 	onMount(() => {
@@ -191,7 +187,6 @@
 			}
 		}
 
-		pendingChanges().then((changes) => (pending = changes));
 		authoringEnabled().then((enabled) => (authoring = enabled));
 		authoringTargets().then((found) => (targets = found));
 
@@ -453,10 +448,9 @@
 		folder={selectedFolder}
 		onselect={selectFolder}
 		count={m.flows_count({ count: visibleFlows.length })}
-		pending={authoring ? pending.length : null}
-		pendingLabel={m.flows_pending_changes({ count: pending.length })}
-		pendingHref="{base}/changes"
-		newHref="{base}/edit?new=flow{selectedFolder ? `&folder=${encodePath(selectedFolder)}` : ''}"
+		newHref={authoring
+			? `${base}/edit?new=flow${selectedFolder ? `&folder=${encodePath(selectedFolder)}` : ''}`
+			: null}
 	/>
 	<div class="flex flex-wrap items-center gap-2">
 		<div class="flex items-center gap-1">

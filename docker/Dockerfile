@@ -37,16 +37,19 @@ FROM rust_base AS builder
 ARG SERVICE_NAME
 ARG CARGO_FEATURES=""
 
-# Copy recipe and cook dependencies (cached layer).
+# Copy recipe and cook dependencies (cached layer). `target` is a cache
+# mount, so a changed manifest rebuilds only the dependencies it changed.
 COPY --from=planner /app/recipe.json recipe.json
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/tmp \
+    --mount=type=cache,target=/app/target \
     cargo chef cook --release --locked --features "$CARGO_FEATURES" --recipe-path recipe.json
 
 # Copy source and build application.
 COPY ./ ./
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/tmp \
+    --mount=type=cache,target=/app/target \
     cargo build --release --locked --bin $SERVICE_NAME && \
     cp ./target/release/$SERVICE_NAME /bin/$SERVICE_NAME
 

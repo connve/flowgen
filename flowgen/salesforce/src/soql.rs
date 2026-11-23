@@ -31,7 +31,7 @@ pub enum Error {
 }
 
 /// A value bound to `:name` in a SOQL query.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum Parameter {
     /// A date such as `2024-01-15`, bound unquoted.

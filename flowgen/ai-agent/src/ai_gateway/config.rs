@@ -19,7 +19,7 @@ pub use super::protocol::completions::{
 /// Determines the URL layout the AI gateway server mounts for this task. The
 /// task's `name` is used as the per-protocol routing key (e.g. for OpenAI it
 /// is the prefix in the request body's `model` field).
-#[derive(PartialEq, Clone, Copy, Debug, Default, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Copy, Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Protocol {
     /// OpenAI-compatible chat completions API.

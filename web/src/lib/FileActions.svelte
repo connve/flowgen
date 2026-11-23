@@ -6,11 +6,10 @@
 		encodePath,
 		errorMessage,
 		listInstalledTemplates,
-		proposeChange,
 		type AuthoringTarget,
 		type InstalledTemplate
 	} from '$lib/api';
-	import { proposeFile, targetOf } from '$lib/changes';
+	import { proposeFile, proposeFiles, targetOf } from '$lib/changes';
 	import { m } from '$lib/paraglide/messages.js';
 	import { onMount } from 'svelte';
 
@@ -18,7 +17,7 @@
 		/** The file, by its path in the workspace. */
 		file: string;
 		targets: AuthoringTarget[];
-		/** Proposes the deletion; by default as a change of its own or in the user's pending one. */
+		/** Proposes the deletion; by default in the user's pending change, or a new one. */
 		ondelete?: () => Promise<void>;
 		disabled?: boolean;
 	}
@@ -29,7 +28,7 @@
 	let name = $derived(file.split('/').pop() ?? file);
 	let installed = $state<InstalledTemplate[]>([]);
 	let template = $derived(installed.find((template) => template.files.includes(file)));
-	let confirming = $state<'delete' | 'uninstall' | null>(null);
+	let confirming = $state(false);
 	let busy = $state(false);
 	let failure = $state<string | null>(null);
 	let cancelButton = $state<HTMLButtonElement | null>(null);
@@ -47,42 +46,32 @@
 		}
 	});
 
-	async function run(action: () => Promise<void>, fallback: string) {
+	async function remove() {
 		busy = true;
 		failure = null;
 		try {
-			await action();
-			confirming = null;
-		} catch (err) {
-			failure = errorMessage(err, fallback);
-		} finally {
-			busy = false;
-		}
-	}
-
-	function remove() {
-		return run(async () => {
-			if (ondelete) {
+			if (template) {
+				const change = await proposeFiles(
+					template.files.map((path) => ({ path, content: null })),
+					targets,
+					{
+						title: m.hub_template_change_title_delete({ name: template.slug }),
+						template: { ...template, removed: true }
+					}
+				);
+				await goto(`${base}/changes/${encodeURIComponent(change.id)}`);
+			} else if (ondelete) {
 				await ondelete();
 			} else {
 				const change = await proposeFile({ path: file, content: null }, targets);
 				await goto(`${base}/changes/${encodeURIComponent(change.id)}`);
 			}
-		}, m.file_delete_failed({ name }));
-	}
-
-	// Deletes the files flowgen.lock holds for the template and drops it from flowgen.lock.
-	function uninstall(template: InstalledTemplate) {
-		return run(async () => {
-			const { data: change } = await proposeChange({
-				body: {
-					title: m.hub_template_change_title_uninstall({ name: template.slug }),
-					files: template.files.map((path) => ({ path, content: null })),
-					template: { hub: template.hub, slug: template.slug, digest: template.digest, removed: true }
-				}
-			});
-			await goto(`${base}/changes/${encodeURIComponent(change.id)}`);
-		}, m.hub_template_uninstall_failed({ name: template.slug }));
+			confirming = false;
+		} catch (err) {
+			failure = errorMessage(err, m.file_delete_failed({ name: template?.slug ?? name }));
+		} finally {
+			busy = false;
+		}
 	}
 </script>
 
@@ -105,25 +94,12 @@
 				{m.editor_duplicate()}
 			</a>
 		</li>
-		{#if template && canDelete}
-			<li>
-				<button
-					type="button"
-					class="text-error"
-					{disabled}
-					onclick={() => (confirming = 'uninstall')}
-				>
-					<Icon icon="tabler:package-off" class="h-4 w-4" />
-					{m.hub_template_uninstall()}
-				</button>
-			</li>
-		{/if}
 		<li class={canDelete ? '' : 'menu-disabled'}>
 			<button
 				type="button"
 				class="text-error"
 				disabled={disabled || !canDelete}
-				onclick={() => (confirming = 'delete')}
+				onclick={() => (confirming = true)}
 			>
 				<Icon icon="tabler:trash" class="h-4 w-4" />
 				{m.common_delete()}
@@ -140,22 +116,25 @@
 		class="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4"
 		role="dialog"
 		aria-modal="true"
-		aria-label={confirming === 'uninstall' ? m.hub_template_uninstall() : m.common_delete()}
+		aria-label={m.common_delete()}
 		tabindex="-1"
 		onclick={(e) => {
-			if (e.target === e.currentTarget && !busy) confirming = null;
+			if (e.target === e.currentTarget && !busy) confirming = false;
 		}}
 		onkeydown={(e) => {
 			if (e.key !== 'Escape' || busy) return;
 			e.stopPropagation();
-			confirming = null;
+			confirming = false;
 		}}
 	>
 		<div class="w-full max-w-sm space-y-4 rounded-xl bg-base-100 p-5 shadow-2xl">
-			{#if confirming === 'uninstall' && template}
+			{#if template}
 				<h2 class="text-[0.9375rem] font-semibold">
-					{m.hub_template_uninstall_title({ name: template.slug })}
+					{m.file_delete_title({ name: template.slug })}
 				</h2>
+				<p class="text-sm text-base-content/70">
+					{m.file_delete_template({ file: name, template: template.slug })}
+				</p>
 				<ul class="space-y-1 font-mono text-xs text-base-content/70">
 					{#each template.files as path (path)}
 						<li class="[overflow-wrap:anywhere]">{path}</li>
@@ -173,25 +152,13 @@
 					class="btn btn-ghost btn-sm"
 					bind:this={cancelButton}
 					disabled={busy}
-					onclick={() => (confirming = null)}
+					onclick={() => (confirming = false)}
 				>
 					{m.common_cancel()}
 				</button>
-				{#if confirming === 'uninstall' && template}
-					{@const installedTemplate = template}
-					<button
-						type="button"
-						class="btn btn-error btn-sm"
-						disabled={busy}
-						onclick={() => uninstall(installedTemplate)}
-					>
-						{m.hub_template_uninstall()}
-					</button>
-				{:else}
-					<button type="button" class="btn btn-error btn-sm" disabled={busy} onclick={remove}>
-						{m.common_delete()}
-					</button>
-				{/if}
+				<button type="button" class="btn btn-error btn-sm" disabled={busy} onclick={remove}>
+					{m.common_delete()}
+				</button>
 			</div>
 		</div>
 	</div>

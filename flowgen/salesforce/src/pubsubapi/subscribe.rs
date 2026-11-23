@@ -62,7 +62,9 @@ const REPLAY_PRESET_CUSTOM: i32 = 2;
 ///       managed_subscription: false
 ///       name: OpportunityProcessor
 /// ```
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, TaskConfig)]
+#[derive(
+    PartialEq, Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema, TaskConfig,
+)]
 #[serde(deny_unknown_fields)]
 pub struct Subscribe {
     /// The unique name / identifier of the task.
@@ -76,6 +78,7 @@ pub struct Subscribe {
     /// Timeout for waiting on flow completion before considering the event failed.
     /// If not specified, waits indefinitely for flow completion.
     #[serde(default, with = "humantime_serde")]
+    #[schemars(with = "Option<flowgen_core::schema::Duration>")]
     pub ack_timeout: Option<Duration>,
     /// How many times an event is sent through the flow before it is skipped.
     /// Delivered until the flow completes it when omitted.
@@ -109,7 +112,7 @@ impl Subscribe {
 ///
 /// Topic names: `/event/CustomEvent__e` for platform events,
 /// `/data/AccountChangeEvent` for change data capture.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Topic {
     /// Full topic name including namespace (e.g., "/event/Account_Change__e").
@@ -121,7 +124,7 @@ pub struct Topic {
 }
 
 /// Where to start reading events when no replay ID is available.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ReplayPreset {
     /// Start from the latest events (default).
@@ -143,7 +146,7 @@ impl ReplayPreset {
 
 /// Durable consumer options: the position in the topic is kept, by
 /// Salesforce for a managed subscription, or as a cached replay ID.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DurableConsumerOptions {
     /// Whether to enable durable consumer functionality for reliable message processing.

@@ -34,7 +34,7 @@ use tracing::{error, info};
 ///     content: |
 ///       # Account {{id}}
 /// ```
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema, TaskConfig)]
 #[serde(deny_unknown_fields)]
 pub struct Resource {
     /// Task name; also the trailing segment of the auto-generated URI
@@ -74,7 +74,7 @@ pub struct Resource {
 }
 
 /// URI-template parameter descriptor.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Parameter {
     /// Parameter identifier — must match a `{name}` placeholder in

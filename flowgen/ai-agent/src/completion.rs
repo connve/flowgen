@@ -75,7 +75,7 @@ use tracing::{error, info, warn};
 ///     - "Inline context: Support email is support@example.com"
 ///   max_turns: 3
 /// ```
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema, TaskConfig)]
 #[serde(deny_unknown_fields)]
 pub struct Completion {
     /// The unique name / identifier of the task.
@@ -170,6 +170,7 @@ pub struct Completion {
     /// How long fetching one image may take; defaults to 30s.
     /// Example: `image_timeout: 10s`.
     #[serde(default = "default_image_timeout", with = "humantime_serde")]
+    #[schemars(with = "flowgen_core::schema::Duration")]
     pub image_timeout: std::time::Duration,
     /// Largest image sent to the model, in bytes; defaults to 20 MiB, the
     /// limit most providers accept.
@@ -190,7 +191,7 @@ fn default_image_max_bytes() -> usize {
 ///
 /// `effort` is the portable knob; it maps to `reasoning_effort` for
 /// OpenAI-shape providers and to a token budget for Anthropic/Gemini.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ThinkingConfig {
     pub effort: Effort,
@@ -209,7 +210,7 @@ fn default_max_turns() -> usize {
 }
 
 /// Reasoning intensity levels.
-#[derive(PartialEq, Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Copy, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Effort {
     Low,
@@ -312,7 +313,7 @@ struct ReasoningEffortParams {
 }
 
 /// Configuration for connecting to an MCP server.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct McpServerConfig {
     /// MCP server endpoint URL (e.g., "http://localhost:3001/mcp"); supports `{{env.VAR_NAME}}` templates.
@@ -402,7 +403,7 @@ impl ConfigExt for McpServerConfig {}
 ///
 /// Providers not listed here can be reached via `Provider::Custom` with
 /// an OpenAI-compatible endpoint in front.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
     /// OpenAI provider (GPT models).
@@ -733,7 +734,9 @@ impl From<CompletionUsage> for crate::ai_gateway::config::Usage {
 }
 
 /// Options of `provider: vertexai`.
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq, Hash)]
+#[derive(
+    Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq, Hash, schemars::JsonSchema,
+)]
 #[serde(deny_unknown_fields)]
 pub struct VertexAiOptions {
     /// Google Cloud project; defaults to `GOOGLE_CLOUD_PROJECT`, else the service account key's `project_id`.

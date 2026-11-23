@@ -28,7 +28,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use tracing::{error, info, Instrument};
 
 /// `http_endpoint` task config; unknown fields are rejected by the transparent inner `Processor`.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, TaskConfig)]
+#[derive(
+    PartialEq, Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema, TaskConfig,
+)]
 #[serde(transparent)]
 pub struct Endpoint(pub super::config::Processor);
 

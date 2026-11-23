@@ -8,7 +8,9 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{debug, error, info, trace, warn};
 
 /// Log processor that outputs event data to logs.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, Default, TaskConfig)]
+#[derive(
+    PartialEq, Clone, Debug, Deserialize, Serialize, Default, schemars::JsonSchema, TaskConfig,
+)]
 #[serde(deny_unknown_fields)]
 pub struct Log {
     /// Task name identifier.
@@ -39,7 +41,7 @@ pub struct Log {
 }
 
 /// Log level options.
-#[derive(PartialEq, Eq, Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(PartialEq, Eq, Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum LogLevel {
     /// Trace level logging.

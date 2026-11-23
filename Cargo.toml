@@ -22,7 +22,7 @@ debug = "line-tables-only"
 allow_attributes = "deny"
 
 [workspace.package]
-version = "0.158.1"
+version = "0.159.0"
 authors = ["CONNVE"]
 license = "MPL-2.0"
 edition = "2021"
@@ -166,7 +166,6 @@ zbus-secret-service-keyring-store = { version = "1", features = [
     "crypto-rust",
 ] }
 tower = { version = "0.5", features = ["util"] }
-native-tls = { version = "0.2.18" }
 opentelemetry = { version = "0.27" }
 opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.27", features = ["grpc-tonic", "metrics"] }

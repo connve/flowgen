@@ -79,8 +79,8 @@
 			<section class="space-y-3">
 				<h3 id="task-{task.name}" class="flex items-center gap-2 rounded">
 					<img src={connector.iconUrl} alt="" class="h-4 w-4 shrink-0" />
-					<span class="font-mono font-semibold">{task.name}</span>
-					<span class="text-xs text-base-content/50">{task.type}</span>
+					<span class="font-medium">{task.name}</span>
+					<span class="font-mono text-xs text-base-content/50">{task.type}</span>
 				</h3>
 				{#if Object.keys(task.fields).length > 0}
 					<YamlFields entries={task.fields} {onResourceClick} />

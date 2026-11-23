@@ -55,7 +55,7 @@ fn download_groups(layers: &[OciDescriptor], budget: u64) -> Vec<&[OciDescriptor
 ///     artifact: "registry.example.com/team/configs:prod"
 ///     credentials_path: /etc/registry/credentials.json
 /// ```
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, schemars::JsonSchema, TaskConfig)]
 #[serde(deny_unknown_fields)]
 pub struct OciSync {
     /// Task name.
