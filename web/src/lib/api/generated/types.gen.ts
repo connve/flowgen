@@ -2103,6 +2103,10 @@ export type RemoveChangeFileData = {
 
 export type RemoveChangeFileErrors = {
     /**
+     * The `path` query parameter is missing.
+     */
+    400: unknown;
+    /**
      * The caller did not propose the change.
      */
     403: unknown;
