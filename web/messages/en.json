@@ -2,21 +2,24 @@
 	"$schema": "https://inlang.com/schema/inlang-message-format",
 	"common_edit": "Edit",
 	"form_required": "Required",
+	"form_field_help": "About this field",
 	"form_inline": "Inline",
 	"form_resource": "Resource",
 	"form_resource_choose": "Choose a resource",
 	"form_credentials_choose": "Choose credentials",
 	"form_add": "Add",
 	"form_remove": "Remove",
+	"form_remove_item": "Remove {item}",
 	"form_key": "Key",
 	"form_value": "Value",
 	"form_advanced": "Advanced",
 	"form_tasks": "Tasks",
 	"form_add_task": "Add task",
-	"form_add_task_after": "Add task after",
+	"form_add_task_after": "Add task after {name}",
 	"form_task_type_search": "Search task types",
 	"form_task_rename": "Rename",
 	"form_task_remove": "Remove task",
+	"form_task_remove_named": "Remove {name}",
 	"form_yaml_invalid": "The YAML has an error. Fix it in YAML to use the form.",
 	"pane_resize": "Resize panel",
 	"common_save": "Save",
@@ -64,6 +67,23 @@
 	"search_no_results": "Nothing found",
 	"search_pages": "Pages",
 	"search_actions": "Actions",
+	"nav_changes": "Changes",
+	"nav_review": "Review",
+	"nav_review_files": [
+		{
+			"declarations": [
+				"input count",
+				"local countPlural = count: plural"
+			],
+			"selectors": [
+				"countPlural"
+			],
+			"match": {
+				"countPlural=one": "Review your change, {count} file to deploy",
+				"countPlural=other": "Review your change, {count} files to deploy"
+			}
+		}
+	],
 	"nav_flows": "Flows",
 	"nav_resources": "Resources",
 	"nav_connections": "Connections",
@@ -123,21 +143,6 @@
 	"flows_tag_filters_clear": "Clear",
 	"flows_connection_filter_remove": "Remove {connection} filter",
 	"flows_connection_load_failed": "Failed to load the connection",
-	"flows_pending_changes": [
-		{
-			"declarations": [
-				"input count",
-				"local countPlural = count: plural"
-			],
-			"selectors": [
-				"countPlural"
-			],
-			"match": {
-				"countPlural=one": "{count} pending change",
-				"countPlural=other": "{count} pending changes"
-			}
-		}
-	],
 	"flows_empty_title": "No flows yet",
 	"flows_empty_message": "Add a flow to flows/ in your workspace.",
 	"flows_no_match_title": "No flows match",
@@ -214,21 +219,6 @@
 			}
 		}
 	],
-	"resources_pending_changes": [
-		{
-			"declarations": [
-				"input count",
-				"local countPlural = count: plural"
-			],
-			"selectors": [
-				"countPlural"
-			],
-			"match": {
-				"countPlural=one": "{count} pending change",
-				"countPlural=other": "{count} pending changes"
-			}
-		}
-	],
 	"resources_load_failed": "Failed to load resources",
 	"resources_load_failed_reason": "Failed to list resources",
 	"resources_empty_title": "No resources yet",
@@ -261,13 +251,10 @@
 	"hub_template_change_title": "Add {name}",
 	"hub_template_change_title_update": "Update {name}",
 	"hub_template_change_title_restore": "Restore {name}",
-	"hub_template_change_title_uninstall": "Uninstall {name}",
+	"hub_template_change_title_delete": "Delete {name}",
 	"hub_template_update": "Update",
 	"hub_template_update_available": "Update available",
 	"hub_template_restore": "Restore",
-	"hub_template_uninstall": "Uninstall",
-	"hub_template_uninstall_title": "Uninstall {name}?",
-	"hub_template_uninstall_failed": "Failed to uninstall {name}",
 	"editor_outside_targets": "Changes can only be made under {folders}.",
 	"editor_empty_file": "The file is empty.",
 	"editor_validate_failed": "Failed to validate the file",
@@ -296,6 +283,7 @@
 	"editor_duplicate": "Duplicate",
 	"file_delete_title": "Delete {name}?",
 	"file_delete_failed": "Failed to delete {name}",
+	"file_delete_template": "{file} comes from the template {template}, which is deleted with all its files:",
 	"editor_issue_count": [
 		{
 			"declarations": [
@@ -356,23 +344,32 @@
 	"change_rejected": "rejected {when}",
 	"change_actor_anonymous": "Anonymous",
 	"change_actor_agent": "Agent",
-	"change_approve": "Approve",
+	"change_deploy": "Deploy",
 	"change_reject": "Reject",
-	"change_approve_blocked": "Fix the validation issues to approve",
-	"change_approve_failed": "Failed to approve the change",
+	"change_remove_file": "Remove from change",
+	"change_remove_template": "Remove {name} from change",
+	"change_remove_failed": "Failed to remove the file from the change",
+	"change_deploy_blocked": "Fix the validation issues to deploy",
+	"change_deploy_failed": "Failed to deploy the change",
 	"change_reject_failed": "Failed to reject the change",
 	"change_edit_details": "Edit title and description",
 	"change_edit_failed": "Failed to save the change",
 	"change_revert": "Revert",
 	"change_revert_title": "Revert \"{title}\"",
 	"change_revert_failed": "Failed to revert",
-	"change_revert_changed_since": "Edited since: {paths}",
+	"change_revert_changed_since": "Can't revert: {paths} changed since",
 	"change_title_label": "Title",
 	"change_description_label": "Description",
 	"change_commit_failed": "Commit failed: {error}",
-	"change_validation_issues": "Validation issues",
 	"change_file_deleted": "Deleted",
 	"change_file_new": "New",
+	"change_view_diff": "Diff",
+	"change_view_preview": "Preview",
+	"change_task_details": "Task changes",
+	"change_task_added": "Added",
+	"change_task_removed": "Removed",
+	"change_task_changed": "Changed",
+	"change_task_unchanged": "Unchanged",
 	"change_status_pending": "Pending",
 	"change_status_rejected": "Rejected",
 	"change_status_committing": "Committing",

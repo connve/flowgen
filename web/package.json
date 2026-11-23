@@ -46,7 +46,7 @@
 		"@codemirror/search": "^6.7.2",
 		"@codemirror/state": "^6.7.6",
 		"@codemirror/view": "^6.43.15",
-		"@connve/ui": "^0.3.2",
+		"@connve/ui": "^0.4.0",
 		"@dagrejs/dagre": "^3.0.0",
 		"@iconify/svelte": "^5.2.2",
 		"@lezer/highlight": "^1.2.5",
@@ -56,5 +56,16 @@
 		"marked": "^18.0.5",
 		"prismjs": "^1.30.0",
 		"yaml": "^2.9.1"
+	},
+	"overrides": {
+		"@hey-api/json-schema-ref-parser": {
+			"js-yaml": "4.3.2"
+		},
+		"@sveltejs/kit": {
+			"cookie": "0.7.2"
+		},
+		"@tailwindcss/typography": {
+			"postcss-selector-parser": "6.1.6"
+		}
 	}
 }

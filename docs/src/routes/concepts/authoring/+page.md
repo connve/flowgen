@@ -1,6 +1,6 @@
 # Authoring
 
-Flows and resources can be changed through the web API instead of editing the repository by hand. A change is proposed, reviewed in the web UI, and committed by a flow once a signed-in user approves it. Pending changes are linked from the Flows and Resources pages and from each flow or resource they touch.
+Flows and resources can be changed through the web API instead of editing the repository by hand. A change is proposed, reviewed in the web UI, and committed by a flow once a signed-in user approves it. Pending changes are linked from the Flows and Resources pages and from each flow or resource they touch. On a change, a flow shows as its graph with the tasks the change adds, removes or changes marked, and a task opens with its changed settings, before and after; a Markdown resource shows rendered. **Diff** shows the text of either.
 
 In the web UI, **New flow** and **New resource** on the list pages and **Edit** on a flow or resource open an editor that validates the file and proposes it as a change. A flow is edited as `flows/<identity>.yaml`; correct the path when the repository stores it as `.yml` or `.json`, or the change adds a second file next to it.
 
@@ -27,11 +27,11 @@ propose ──► validate + diff ──► approve (signed-in user) ──► c
 
 Paths start at the workspace root and must be under `flows/`, `resources/` or `credentials/`, all within one [target](#targets). Credentials must be [encrypted](/docs/flowgen/concepts/credentials#encrypted-credentials-in-the-workspace); a change with a credentials file that is not is refused. Each file is recorded with the version it is based on: the deployed content — for a flow, the source synced to the flows cache, so a flow that failed to start can be fixed too — with every committed change that is not deployed yet applied on top, so editing a file right after an approval builds on that commit. `GET {path}/api/workspace/file?path=` returns that version. The change carries a unified diff per file plus every validation issue. A change with issues can be reviewed but not approved.
 
-While a change is pending, its proposer can extend it: `POST {path}/api/changes/{id}/files` adds files or replaces ones it has, with the same body as `files` above, and `PATCH {path}/api/changes/{id}` sets its `title` and `description`. A replaced file keeps the version recorded when it was first added. Saving in the web UI editor adds the file to the user's most recently edited pending change in the same target, or proposes a new one.
+While a change is pending, its proposer can extend it: `POST {path}/api/changes/{id}/files` adds files or replaces ones it has, with the same body as `files` above, `DELETE {path}/api/changes/{id}/files?path=` takes one out, and `PATCH {path}/api/changes/{id}` sets its `title` and `description`. A replaced file keeps the version recorded when it was first added. A file of a hub template goes out with the template and its other files, and a change left without files is rejected. Saving in the web UI editor, using a template or deleting a file adds to the user's most recently edited pending change in the same target, or proposes a new one.
 
 `POST {path}/api/workspace/validate` runs the same validation without recording anything:
 
-- flows are parsed, and an unknown field is reported with the task it is in (for example ``unknown field `intreval` ... for key `flow.tasks[0]` ``);
+- flows are parsed, and a problem is reported at the field or task it is in (for example ``Unknown setting `intreval` `` at `flow.tasks.0`, or `Required` at `flow.tasks.1.endpoint`);
 - task wiring (`depends_on`, duplicate names) is checked, as are the settings of `generate`, `kafka_produce` and `kafka_subscribe`, and inline scripts must compile;
 - `.rhai` resources must compile and `.json` resources must parse.
 

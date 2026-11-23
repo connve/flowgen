@@ -3,7 +3,7 @@
 	import { afterNavigate, goto, invalidate } from '$app/navigation';
 	import Icon from '@iconify/svelte';
 	import Actor from '$lib/Actor.svelte';
-	import { IconButton, Inspector, InspectorSection, StateMessage, StatusDot } from '@connve/ui';
+	import { IconButton, Inspector, InspectorSection, Segmented, StateMessage, StatusDot } from '@connve/ui';
 	import {
 		approveChange,
 		editChange,
@@ -12,11 +12,19 @@
 		proposeChange,
 		rejectChange,
 		type Change,
-		type ChangeSummary
+		type ChangeSummary,
+		type TemplateSource
 	} from '$lib/api';
 	import { deploymentsStream } from '$lib/urls';
 	import { auth } from '$lib/auth.svelte';
-	import { actor, baseContent, editUrl, ownLabel } from '$lib/changes';
+	import { actor, baseContent, editUrl, ownLabel, removeFromChange, viewUrl } from '$lib/changes';
+	import IssueList from '$lib/IssueList.svelte';
+	import ResourceViewer from '$lib/ResourceViewer.svelte';
+	import FlowDag from '$lib/dag/FlowDag.svelte';
+	import type { Mark } from '$lib/dag/parseFlow';
+	import TaskChanges from '$lib/flow/TaskChanges.svelte';
+	import { compareFlows, markLabel } from '$lib/changePreview';
+	import { changeView } from '$lib/changeView.svelte';
 	import { m } from '$lib/paraglide/messages.js';
 	import { pageTitle } from '$lib/pageTitle';
 	import { MINUTE, formatAbsolute, formatRelative } from '$lib/time';
@@ -71,9 +79,23 @@
 		};
 	});
 
+	let comparisons = $derived(
+		new Map(
+			(data.change?.files ?? []).map((file) => [
+				file.path,
+				file.path.startsWith('flows/') && (file.content != null || file.previous != null)
+					? compareFlows(file.previous ?? null, file.content ?? '')
+					: null
+			])
+		)
+	);
+	let selectedTask = $state<{ path: string; name: string } | null>(null);
+	const MARK_VARIANT: Record<Mark, Variant> = { added: 'success', removed: 'error', changed: 'warning' };
+
 	afterNavigate(() => {
 		decideError = null;
 		editing = false;
+		selectedTask = null;
 	});
 
 	function startEdit(change: Change) {
@@ -97,8 +119,63 @@
 		}
 	}
 
+	let removing = $state(false);
+	let removeError = $state<string | null>(null);
+
+	async function removeFile(id: string, path: string) {
+		if (removing) return;
+		removing = true;
+		removeError = null;
+		try {
+			const change = await removeFromChange(id, path);
+			if (change.status === 'pending') await invalidate('app:changes');
+			else await goto(`${base}/changes`);
+		} catch (err) {
+			removeError = errorMessage(err, m.change_remove_failed());
+		} finally {
+			removing = false;
+		}
+	}
+
 	let reverting = $state(false);
 	let revertError = $state<string | null>(null);
+
+	// Null when the change updated a template, whose earlier digest is not kept.
+	function revertedTemplates(change: Change): TemplateSource[] | null {
+		const reverted: TemplateSource[] = [];
+		for (const template of change.templates ?? []) {
+			if (template.removed) {
+				reverted.push({ ...template, removed: false });
+				continue;
+			}
+			const installed = change.files.every(
+				(file) => !template.files.includes(file.path) || file.previous == null
+			);
+			if (!installed) return null;
+			reverted.push({ ...template, removed: true });
+		}
+		return reverted;
+	}
+
+	async function changedSince(change: Change): Promise<string[]> {
+		const current = await Promise.all(change.files.map((file) => baseContent(file.path)));
+		return change.files
+			.filter((file, i) => (file.content ?? null) !== current[i])
+			.map((file) => file.path);
+	}
+
+	let editedLater = $state<string[]>([]);
+	$effect(() => {
+		const change = data.change;
+		editedLater = [];
+		if (change?.status !== 'committed') return;
+		changedSince(change).then(
+			(paths) => {
+				if (data.change === change) editedLater = paths;
+			},
+			() => undefined
+		);
+	});
 
 	// A committed change is reverted by a new change restoring what each file
 	// held before it; a file changed since cannot be restored without losing
@@ -107,18 +184,16 @@
 		reverting = true;
 		revertError = null;
 		try {
-			const current = await Promise.all(change.files.map((file) => baseContent(file.path)));
-			const changed = change.files
-				.filter((file, i) => (file.content ?? null) !== current[i])
-				.map((file) => file.path);
+			const changed = await changedSince(change);
 			if (changed.length > 0) {
-				revertError = m.change_revert_changed_since({ paths: changed.join(', ') });
+				editedLater = changed;
 				return;
 			}
 			const { data: created } = await proposeChange({
 				body: {
 					title: m.change_revert_title({ title: change.title }),
-					files: change.files.map((file) => ({ path: file.path, content: file.previous ?? null }))
+					files: change.files.map((file) => ({ path: file.path, content: file.previous ?? null })),
+					templates: revertedTemplates(change) ?? []
 				}
 			});
 			await goto(`${base}/changes/${encodeURIComponent(created.id)}`);
@@ -135,7 +210,7 @@
 		editing = false;
 		deciding = true;
 		decideError = null;
-		const fallback = action === 'approve' ? m.change_approve_failed() : m.change_reject_failed();
+		const fallback = action === 'approve' ? m.change_deploy_failed() : m.change_reject_failed();
 		const updatedAt = data.change?.updatedAt ?? undefined;
 		try {
 			await (action === 'approve'
@@ -310,7 +385,7 @@
 							{/if}
 							<div
 								class="tooltip tooltip-bottom"
-								data-tip={change.issues.length > 0 ? m.change_approve_blocked() : undefined}
+								data-tip={change.issues.length > 0 ? m.change_deploy_blocked() : undefined}
 							>
 								<button
 									type="button"
@@ -321,36 +396,43 @@
 									{#if deciding}
 										<span class="loading loading-spinner loading-xs"></span>
 									{/if}
-									{change.status === 'pending' ? m.change_approve() : m.common_retry()}
+									{change.status === 'pending' ? m.change_deploy() : m.common_retry()}
 								</button>
 							</div>
 						</div>
-					{:else if change.status === 'committed' && !change.template}
-						<button
-							type="button"
-							class="btn btn-ghost btn-sm gap-1.5"
-							disabled={reverting}
-							onclick={() => revert(change)}
+					{:else if change.status === 'committed' && revertedTemplates(change) !== null}
+						<div
+							class="tooltip tooltip-left"
+							data-tip={editedLater.length > 0
+								? m.change_revert_changed_since({ paths: editedLater.join(', ') })
+								: undefined}
 						>
-							{#if reverting}
-								<span class="loading loading-spinner loading-xs"></span>
-							{:else}
-								<Icon icon="tabler:arrow-back-up" class="h-4 w-4" />
-							{/if}
-							{m.change_revert()}
-						</button>
+							<button
+								type="button"
+								class="btn btn-ghost btn-sm gap-1.5"
+								disabled={reverting || editedLater.length > 0}
+								onclick={() => revert(change)}
+							>
+								{#if reverting}
+									<span class="loading loading-spinner loading-xs"></span>
+								{:else}
+									<Icon icon="tabler:arrow-back-up" class="h-4 w-4" />
+								{/if}
+								{m.change_revert()}
+							</button>
+						</div>
 					{/if}
 				</div>
 
 				{#if revertError}
-					<div class="rounded-lg border border-error/40 bg-error/5 p-3 text-sm">{revertError}</div>
+					<div class="rounded-lg bg-error/5 p-3 text-sm">{revertError}</div>
 				{/if}
 
 				{#if decideError}
-					<div class="rounded-lg border border-error/40 bg-error/5 p-3 text-sm">{decideError}</div>
+					<div class="rounded-lg bg-error/5 p-3 text-sm">{decideError}</div>
 				{/if}
 				{#if change.error}
-					<div class="flex items-start gap-2 rounded-lg border border-error/40 bg-error/5 p-3 text-sm">
+					<div class="flex items-start gap-2 rounded-lg bg-error/5 p-3 text-sm">
 						<Icon icon="tabler:alert-triangle" class="h-5 w-5 shrink-0 text-error" />
 						<span>{m.change_commit_failed({ error: change.error })}</span>
 					</div>
@@ -375,42 +457,104 @@
 					</div>
 				{/if}
 				{#if change.issues.length > 0}
-					<div class="rounded-lg border border-error/40 bg-error/5 p-3 text-sm">
-						<div class="mb-1 font-medium text-error">{m.change_validation_issues()}</div>
-						<ul class="space-y-0.5">
-							{#each change.issues as issue, i (i)}
-								<li class="font-mono text-xs">
-									{issue.path}{issue.location ? ` · ${issue.location}` : ''}: {issue.message}
-								</li>
-							{/each}
-						</ul>
+					<div class="rounded-lg bg-error/5 p-2">
+						<IssueList
+							issues={change.issues}
+							contentOf={(path) => change.files.find((file) => file.path === path)?.content}
+							showPath={change.files.length > 1}
+						/>
 					</div>
 				{/if}
 
+				{#if removeError}
+					<div class="rounded-lg bg-error/5 p-3 text-sm">{removeError}</div>
+				{/if}
 				{#each change.files as file (file.path)}
-					<div class="overflow-hidden rounded-lg border border-base-200">
+					{@const view = viewUrl(base, file.path)}
+					{@const viewable =
+						view !== null &&
+						file.content != null &&
+						(file.previous != null || change.deployment === 'deployed')}
+					{@const graph = comparisons.get(file.path) != null}
+					{@const markdown = file.content != null && file.path.endsWith('.md')}
+					{@const shown = graph || markdown ? changeView.value : 'diff'}
+					<div class="overflow-clip rounded-lg border border-base-200">
 						<div class="flex items-center gap-2 px-3 py-2">
 							<Icon
 								icon={file.content == null ? 'tabler:file-minus' : file.previous == null ? 'tabler:file-plus' : 'tabler:file-diff'}
 								class="h-4 w-4 opacity-70"
 							/>
-							<span class="font-mono text-xs">{file.path}</span>
+							{#if viewable}
+								<a href={view} class="font-mono text-xs text-primary hover:underline">{file.path}</a>
+							{:else}
+								<span class="font-mono text-xs">{file.path}</span>
+							{/if}
 							{#if file.content == null}
 								<span class="text-xs text-error">{m.change_file_deleted()}</span>
 							{:else if file.previous == null}
 								<span class="text-xs text-primary">{m.change_file_new()}</span>
 							{/if}
-							{#if canEdit && file.content != null}
-								<a
-									href="{editUrl(base, file.path)}?change={encodeURIComponent(change.id)}"
-									class="btn btn-ghost btn-xs ml-auto gap-1"
-								>
-									<Icon icon="tabler:pencil" class="h-3.5 w-3.5" />
-									{m.common_edit()}
-								</a>
-							{/if}
+							<div class="ml-auto flex items-center gap-1">
+								{#if graph || markdown}
+									<Segmented
+										label={m.flow_view_label()}
+										options={[
+											{ id: 'preview', label: graph ? m.flow_graph_heading() : m.change_view_preview() },
+											{ id: 'diff', label: m.change_view_diff() }
+										]}
+										value={shown}
+										onchange={(next) => (changeView.value = next)}
+									/>
+								{/if}
+								{#if canEdit}
+									{@const template = change.templates?.find((t) => t.files.includes(file.path))}
+									<div class="dropdown dropdown-end">
+										<button
+											type="button"
+											tabindex="0"
+											class="flex h-8 w-8 items-center justify-center rounded-md text-base-content/60 hover:bg-base-200 hover:text-base-content"
+											aria-label={m.editor_more_actions()}
+										>
+											<Icon icon="tabler:dots" class="h-5 w-5" />
+										</button>
+										<ul
+											tabindex="-1"
+											class="menu dropdown-content z-10 mt-1 w-56 rounded-md border border-base-200 bg-base-100 p-1 text-sm shadow-lg"
+										>
+											{#if file.content != null}
+												<li>
+													<a href="{editUrl(base, file.path)}?change={encodeURIComponent(change.id)}">
+														<Icon icon="tabler:pencil" class="h-4 w-4" />
+														{m.common_edit()}
+													</a>
+												</li>
+											{/if}
+											<li>
+												<button type="button" class="text-error" onclick={() => removeFile(change.id, file.path)}>
+													<Icon icon="tabler:x" class="h-4 w-4" />
+													{template
+														? m.change_remove_template({ name: template.slug })
+														: m.change_remove_file()}
+												</button>
+											</li>
+										</ul>
+									</div>
+								{/if}
+							</div>
 						</div>
-						<pre class="overflow-x-auto text-xs leading-5">{#each file.diff.split('\n') as line, i (i)}<div class="px-3 {lineClass(line)}">{line || ' '}</div>{/each}</pre>
+						{#if shown === 'preview' && graph}
+							<div class="h-80">
+								<FlowDag
+									yaml={file.content ?? ''}
+									previous={file.previous ?? null}
+									onNodeClick={(name) => (selectedTask = { path: file.path, name })}
+								/>
+							</div>
+						{:else if shown === 'preview' && markdown && file.content != null}
+							<ResourceViewer content={file.content} extension="md" />
+						{:else}
+							<pre class="overflow-x-auto text-xs leading-5">{#each file.diff.split('\n') as line, i (i)}<div class="px-3 {lineClass(line)}">{line || ' '}</div>{/each}</pre>
+						{/if}
 					</div>
 				{/each}
 			</div>
@@ -471,6 +615,20 @@
 		{/if}
 	</div>
 </div>
+
+{#if data.change && selectedTask}
+	{@const file = data.change.files.find((f) => f.path === selectedTask?.path)}
+	{@const comparison = file ? comparisons.get(file.path) : null}
+	{@const task = comparison?.tasks.get(selectedTask.name)}
+	<Inspector title={selectedTask.name} label={m.change_task_details()} onclose={() => (selectedTask = null)}>
+		{#snippet subtitle()}
+			{#if task}
+				<StatusDot variant={MARK_VARIANT[task.mark]} label={markLabel(task.mark)} />
+			{/if}
+		{/snippet}
+		<TaskChanges mark={task?.mark} fields={task?.fields ?? []} />
+	</Inspector>
+{/if}
 
 {#if previewed && !data.change}
 	{@const shown = badge(previewed)}

@@ -38,6 +38,10 @@ macro_rules! braze_task {
                     vec![Connection::new(CONNECTOR, Some(&self.credentials_path))
                         .target(&[&self.base_url])]
                 }
+
+                fn validate(&self) -> Result<(), TaskError> {
+                    Ok(processor::Operation::validate(self)?)
+                }
             }
 
             impl Task for $config {

@@ -22,9 +22,10 @@
 		value: string;
 		extension: string | null;
 		label: string;
+		compact?: boolean;
 	}
 
-	let { value = $bindable(), extension, label }: Props = $props();
+	let { value = $bindable(), extension, label, compact = false }: Props = $props();
 
 	let host: HTMLDivElement;
 	let view: EditorView | undefined;
@@ -90,6 +91,12 @@
 		'.cm-panels': { backgroundColor: 'var(--color-base-200)', color: 'var(--color-base-content)' }
 	});
 
+	const compactTheme = EditorView.theme({
+		'&': { height: 'auto' },
+		'.cm-content': { padding: '0.5rem 0' },
+		'.cm-line': { padding: '0 0.75rem' }
+	});
+
 	onMount(() => {
 		view = new EditorView({
 			parent: host,
@@ -108,6 +115,7 @@
 					keymap.of([indentWithTab, ...defaultKeymap, ...historyKeymap, ...searchKeymap]),
 					syntaxHighlighting(colors),
 					theme,
+					compact ? compactTheme : [],
 					languageSlot.of(language(extension)),
 					EditorView.contentAttributes.of({ 'aria-label': label, spellcheck: 'false' }),
 					EditorView.updateListener.of((update) => {
@@ -133,4 +141,4 @@
 	});
 </script>
 
-<div class="min-h-0 flex-1 overflow-auto bg-base-200" bind:this={host}></div>
+<div class={compact ? 'bg-base-200' : 'min-h-0 flex-1 overflow-auto bg-base-200'} bind:this={host}></div>

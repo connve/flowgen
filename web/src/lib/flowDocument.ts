@@ -87,6 +87,15 @@ export class FlowDocument {
 		this.#doc.deleteIn([...TASKS, index]);
 	}
 
+	/** Moves the task at `from` to `to`, with the comments above it. */
+	moveTask(from: number, to: number): void {
+		const tasks = this.#doc.getIn(TASKS, true);
+		if (!isSeq(tasks) || from === to) return;
+		const items = (tasks as YAMLSeq).items;
+		const [moved] = items.splice(from, 1);
+		items.splice(to, 0, moved);
+	}
+
 	/** Renames the task at `index`, and the `depends_on` that name it. */
 	renameTask(index: number, name: string): void {
 		const tasks = this.tasks();
@@ -115,6 +124,21 @@ export class FlowDocument {
 		}
 		this.#doc.setIn(path, value);
 	}
+}
+
+export function locationParts(
+	location: string,
+	yaml: string | null | undefined
+): { task: string | null; field: string } {
+	const [, index, rest] = location.match(/^flow\.tasks\.(\d+)\.?(.*)$/) ?? [];
+	if (index === undefined) {
+		return { task: null, field: location.replace(/^flow\./, '').split('.').join(' › ') };
+	}
+	const flow = new FlowDocument(yaml ?? '');
+	const task = flow.valid ? flow.tasks()[Number(index)] : undefined;
+	if (!task) return { task: null, field: location };
+	const fields = rest.split('.').filter((part) => part !== '' && part !== task.type);
+	return { task: task.name, field: fields.join(' › ') };
 }
 
 /** The tasks the task at `index` takes events from: its `depends_on`, else

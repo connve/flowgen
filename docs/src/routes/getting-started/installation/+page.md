@@ -25,6 +25,7 @@ Then run `flowgen`.
 | Command | What it does |
 |---|---|
 | `flowgen [<folder>]` | Runs the workspace in `<folder>`, `FLOWGEN_HOME` or `~/flowgen`, and creates it when it is new. |
+| `flowgen run [<folder>]` | Runs the workspace in `<folder>`, which must exist, `FLOWGEN_HOME` or `~/flowgen`. |
 | `flowgen --config <file>` | Runs with an app config file, as in a cluster. `CONFIG_PATH` sets it too. |
 | `flowgen validate [<folder>] [--json]` | [Checks the flows and resources](/docs/flowgen/concepts/configuration#validating-a-workspace) of a workspace without running them. Exits with 1 when there are issues. |
 | `flowgen test <script> --data <samples>` | [Runs a Rhai script](/docs/flowgen/concepts/configuration#testing-a-script) on sample events and prints the events it emits. |

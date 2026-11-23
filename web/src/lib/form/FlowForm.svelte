@@ -1,6 +1,6 @@
 <script lang="ts">
 	import Icon from '@iconify/svelte';
-	import { onMount } from 'svelte';
+	import { onMount, tick } from 'svelte';
 	import { listConnections, listResources } from '$lib/api';
 	import { connectorFor } from '$lib/connectors';
 	import { FlowDocument, type Path } from '$lib/flowDocument';
@@ -12,11 +12,10 @@
 	interface Props {
 		yaml: string;
 		schema: Schema;
-		/** The task to open, such as one clicked in the graph. */
-		focusTask?: string | null;
+		picking?: number | 'end' | false;
 	}
 
-	let { yaml = $bindable(), schema, focusTask = null }: Props = $props();
+	let { yaml = $bindable(), schema, picking = $bindable(false) }: Props = $props();
 
 	let flow = $derived(new FlowDocument(yaml));
 	let tasks = $derived(flow.valid ? flow.tasks() : []);
@@ -24,7 +23,8 @@
 	let known = $derived(new Set(schemas.keys()));
 
 	let open = $state<string | null>(null);
-	let picking = $state<number | null | false>(false);
+	let dragged = $state<number | null>(null);
+	let target = $state<number | null>(null);
 	let renaming = $state<number | null>(null);
 	let renameDraft = $state('');
 	let resources = $state<string[]>([]);
@@ -41,9 +41,10 @@
 		}
 	});
 
-	$effect(() => {
-		if (focusTask) open = focusTask;
-	});
+	export async function reveal(task: string) {
+		open = task;
+		await tick();
+	}
 
 	/** The language of a task's inline code, by its type. */
 	function languageOf(taskType: string): string | null {
@@ -87,11 +88,20 @@
 	}
 
 	function addTask(taskType: string) {
-		const after = picking === false ? null : picking;
 		const name = freshName(taskType);
-		edit((next) => next.addTask(taskType, name, after));
+		const after = picking === 'end' || picking === false ? tasks.length - 1 : picking;
+		edit((next) => next.addTask(taskType, name, after < 0 ? null : after));
 		picking = false;
 		open = name;
+	}
+
+	function drop(to: number) {
+		if (dragged !== null && dragged !== to) {
+			const from = dragged;
+			edit((next) => next.moveTask(from, to));
+		}
+		dragged = null;
+		target = null;
 	}
 
 	function rename(index: number) {
@@ -128,21 +138,51 @@
 
 		<section class="space-y-2">
 			<h3 class="text-xs font-medium text-base-content/50">{m.form_tasks()}</h3>
+			<div role="list" class="space-y-2">
 			{#each tasks as task, index (task.name + index)}
 				{@const connector = connectorFor(task.type)}
 				{@const fields = fieldsFor(task.type)}
-				<div id="form-task-{task.name}" class="rounded-md border border-base-200">
-					<div class="flex h-10 items-center gap-2 px-2">
+				<div
+					id="form-task-{task.name}"
+					role="listitem"
+					class={[
+						'rounded-lg border',
+						target === index && dragged !== index ? 'border-primary' : 'border-base-200',
+						dragged === index && 'opacity-50'
+					]}
+					ondragover={(e) => {
+						if (dragged === null) return;
+						e.preventDefault();
+						target = index;
+					}}
+					ondrop={(e) => {
+						e.preventDefault();
+						drop(index);
+					}}
+				>
+					<div
+						role="group"
+						class="flex h-10 items-center gap-2 px-2 {renaming === index ? '' : 'cursor-grab active:cursor-grabbing'}"
+						draggable={renaming !== index}
+						ondragstart={(e) => {
+							dragged = index;
+							e.dataTransfer?.setData('text/plain', task.name);
+						}}
+						ondragend={() => {
+							dragged = null;
+							target = null;
+						}}
+					>
 						<button
 							type="button"
-							class="flex min-w-0 flex-1 items-center gap-2 text-left"
+							class="flex min-w-0 flex-1 cursor-[inherit] items-center gap-2 text-left"
 							aria-expanded={open === task.name}
 							onclick={() => (open = open === task.name ? null : task.name)}
 						>
 							<img src={connector.iconUrl} alt="" class="h-4 w-4 shrink-0" />
 							{#if renaming === index}
 								<input
-									class="input input-xs w-full border border-base-300 bg-base-100 outline-none focus:border-primary"
+									class="w-full border-b border-primary bg-transparent p-0 text-sm leading-5 font-medium outline-none"
 									aria-label={m.form_task_rename()}
 									bind:value={renameDraft}
 									onclick={(e) => e.stopPropagation()}
@@ -169,12 +209,6 @@
 									</button>
 								</li>
 								<li>
-									<button type="button" onclick={() => (picking = index)}>
-										<Icon icon="tabler:plus" class="h-4 w-4" />
-										{m.form_add_task_after()}
-									</button>
-								</li>
-								<li>
 									<button type="button" class="text-error" onclick={() => edit((next) => next.removeTask(index))}>
 										<Icon icon="tabler:trash" class="h-4 w-4" />
 										{m.form_task_remove()}
@@ -184,7 +218,7 @@
 						</div>
 					</div>
 					{#if open === task.name}
-						<div class="space-y-4 border-t border-base-200 p-3">
+						<div class="space-y-4 px-3 pt-1 pb-3">
 							{#each fields.main as field (field.name)}
 								<SchemaField {field} root={schema} value={task.values[field.name]} context={contextFor(task.type)} onchange={(value) => setTask(index, [field.name], value)} />
 							{/each}
@@ -205,10 +239,7 @@
 					{/if}
 				</div>
 			{/each}
-			<button type="button" class="flex h-9 items-center gap-1.5 rounded-md px-2 text-sm text-base-content/70 hover:bg-base-200" onclick={() => (picking = tasks.length ? tasks.length - 1 : null)}>
-				<Icon icon="tabler:plus" class="h-4 w-4" />
-				{m.form_add_task()}
-			</button>
+			</div>
 		</section>
 	</div>
 {/if}

@@ -3,8 +3,8 @@
 	import { goto } from '$app/navigation';
 	import Icon from '@iconify/svelte';
 	import { Badge, Inspector, InspectorSection, Loading, StateMessage } from '@connve/ui';
-	import { encodePath, proposeChange, type ChangeProposal, type HubTemplate } from '$lib/api';
-	import { baseContent, pendingChanges } from '$lib/changes';
+	import { encodePath, type ChangeSummary, type HubTemplate, type TemplateSource } from '$lib/api';
+	import { authoringTargets, baseContent, pendingChanges, proposeFiles } from '$lib/changes';
 	import { connectorFor, type Connector } from '$lib/connectors';
 	import { load } from 'js-yaml';
 	import { SvelteMap } from 'svelte/reactivity';
@@ -26,11 +26,11 @@
 	let previewed = $derived(templates.find((t) => t.slug === previewedSlug) ?? null);
 	let using = $state(false);
 	let useError = $state<string | null>(null);
-	let uninstalling = $state(false);
+	let deleting = $state(false);
 	let cancelButton = $state<HTMLButtonElement | null>(null);
 
 	$effect(() => {
-		if (uninstalling) cancelButton?.focus();
+		if (deleting) cancelButton?.focus();
 	});
 
 	let editorHref = $derived(
@@ -44,7 +44,7 @@
 		Incomplete: 'incomplete'
 	} as const;
 	type Installed = (typeof Installed)[keyof typeof Installed];
-	type Status = { state: Installed; missing: HubTemplate['files'] };
+	type Status = { state: Installed; missing: HubTemplate['files']; change?: string };
 	let installed = new SvelteMap<string, Status>();
 	let status = $derived(previewed && source ? installed.get(keyOf(source, previewed)) : undefined);
 
@@ -52,9 +52,10 @@
 		return `${hub}/${template.slug}`;
 	}
 
-	async function statusOf(template: HubTemplate, proposed: Set<string>): Promise<Status | null> {
+	async function statusOf(template: HubTemplate, pending: ChangeSummary[]): Promise<Status | null> {
 		const paths = [...template.files.map((file) => file.path), ...(template.installedFiles ?? [])];
-		if (paths.some((path) => proposed.has(path))) return { state: Installed.Pending, missing: [] };
+		const change = pending.find((change) => change.paths.some((path) => paths.includes(path)));
+		if (change) return { state: Installed.Pending, missing: [], change: change.id };
 		if (!template.installedDigest) return null;
 		if (template.installedDigest !== template.digest) return { state: Installed.Update, missing: [] };
 		const contents = await Promise.all(template.files.map((file) => baseContent(file.path)));
@@ -64,12 +65,11 @@
 
 	onMount(async () => {
 		const [loaded, pending] = await Promise.all([catalogsOf(data.hubs), pendingChanges()]);
-		const proposed = new Set(pending.flatMap((change) => change.paths));
 		const statuses = await Promise.all(
 			loaded.flatMap(({ hub, templates }) =>
 				templates.map(async (template) => ({
 					key: keyOf(hub.id, template),
-					status: await statusOf(template, proposed).catch(() => null)
+					status: await statusOf(template, pending).catch(() => null)
 				}))
 			)
 		);
@@ -113,11 +113,15 @@
 		useError = null;
 	}
 
-	async function propose(body: ChangeProposal) {
+	async function propose(
+		files: { path: string; content: string | null }[],
+		title: string,
+		template?: TemplateSource
+	) {
 		using = true;
 		useError = null;
 		try {
-			const { data: change } = await proposeChange({ body });
+			const change = await proposeFiles(files, await authoringTargets(), { title, template });
 			await goto(`${base}/changes/${encodeURIComponent(change.id)}`);
 		} catch (error) {
 			useError = error instanceof Error ? error.message : String(error);
@@ -126,33 +130,37 @@
 		}
 	}
 
-	// A template becomes its own change, which records it in flowgen.lock once
-	// committed; an update also deletes the files this version no longer has.
+	// The change records the template in flowgen.lock once committed; an
+	// update also deletes the files this version no longer has.
 	function useTemplate(template: HubTemplate, hub: string) {
 		const title =
 			status?.state === Installed.Update
 				? m.hub_template_change_title_update({ name: template.name })
 				: m.hub_template_change_title({ name: template.name });
-		const paths = new Set(template.files.map((file) => file.path));
-		const gone = (template.installedFiles ?? []).filter((path) => !paths.has(path));
-		return propose({
-			title,
-			files: [...template.files, ...gone.map((path) => ({ path, content: null }))],
-			template: { hub, slug: template.slug, digest: template.digest }
-		});
+		const paths = template.files.map((file) => file.path);
+		const gone = (template.installedFiles ?? []).filter((path) => !paths.includes(path));
+		const files = [
+			...template.files.map((file) => ({ path: file.path, content: file.content ?? null })),
+			...gone.map((path) => ({ path, content: null }))
+		];
+		return propose(files, title, { hub, slug: template.slug, digest: template.digest, files: paths });
 	}
 
 	function restore(template: HubTemplate, missing: HubTemplate['files']) {
-		return propose({ title: m.hub_template_change_title_restore({ name: template.name }), files: missing });
+		return propose(
+			missing.map((file) => ({ path: file.path, content: file.content ?? null })),
+			m.hub_template_change_title_restore({ name: template.name })
+		);
 	}
 
 	// Deletes the files flowgen.lock holds for the template and drops it from flowgen.lock.
-	function uninstall(template: HubTemplate, hub: string) {
-		return propose({
-			title: m.hub_template_change_title_uninstall({ name: template.name }),
-			files: (template.installedFiles ?? []).map((path) => ({ path, content: null })),
-			template: { hub, slug: template.slug, digest: template.digest, removed: true }
-		});
+	function remove(template: HubTemplate, hub: string) {
+		const files = template.installedFiles ?? [];
+		return propose(
+			files.map((path) => ({ path, content: null })),
+			m.hub_template_change_title_delete({ name: template.name }),
+			{ hub, slug: template.slug, digest: template.digest, removed: true, files }
+		);
 	}
 </script>
 
@@ -252,7 +260,9 @@
 	<Inspector title={template.name} label={m.hub_template_details()} onclose={() => preview(null)}>
 		{#snippet actions()}
 			{#if status?.state === Installed.Pending}
-				<button type="button" class="btn btn-sm" disabled>{m.hub_template_pending()}</button>
+				<a class="btn btn-sm" href="{base}/changes/{encodeURIComponent(status.change ?? '')}"
+					>{m.hub_template_pending()}</a
+				>
 			{:else if status?.state === Installed.Added}
 				<button type="button" class="btn btn-sm" disabled>{m.hub_template_added()}</button>
 			{:else}
@@ -294,17 +304,17 @@
 						<li>
 							<button type="button" class="text-error" disabled={using} onclick={() => {
 									useError = null;
-									uninstalling = true;
+									deleting = true;
 								}}>
 								<Icon icon="tabler:trash" class="h-4 w-4" />
-								{m.hub_template_uninstall()}
+								{m.common_delete()}
 							</button>
 						</li>
 					</ul>
 				</div>
 			{/if}
 		{/snippet}
-		{#if useError && !uninstalling}
+		{#if useError && !deleting}
 			<div class="rounded-lg border border-error/40 bg-error/5 p-3 text-sm">{useError}</div>
 		{/if}
 		{#if template.description}
@@ -340,25 +350,25 @@
 		{/if}
 	</Inspector>
 
-	{#if uninstalling}
+	{#if deleting}
 		<div
 			class="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4"
 			role="dialog"
 			aria-modal="true"
-			aria-label={m.hub_template_uninstall()}
+			aria-label={m.common_delete()}
 			tabindex="-1"
 			onclick={(e) => {
-				if (e.target === e.currentTarget && !using) uninstalling = false;
+				if (e.target === e.currentTarget && !using) deleting = false;
 			}}
 			onkeydown={(e) => {
 				if (e.key !== 'Escape' || using) return;
 				e.stopPropagation();
-				uninstalling = false;
+				deleting = false;
 			}}
 		>
 			<div class="w-full max-w-sm space-y-4 rounded-xl bg-base-100 p-5 shadow-2xl">
 				<h2 class="text-[0.9375rem] font-semibold">
-					{m.hub_template_uninstall_title({ name: template.name })}
+					{m.file_delete_title({ name: template.name })}
 				</h2>
 				<ul class="space-y-1 font-mono text-xs text-base-content/70">
 					{#each template.installedFiles ?? [] as path (path)}
@@ -374,7 +384,7 @@
 						class="btn btn-ghost btn-sm"
 						bind:this={cancelButton}
 						disabled={using}
-						onclick={() => (uninstalling = false)}
+						onclick={() => (deleting = false)}
 					>
 						{m.common_cancel()}
 					</button>
@@ -382,9 +392,9 @@
 						type="button"
 						class="btn btn-error btn-sm"
 						disabled={using}
-						onclick={() => uninstall(template, hub)}
+						onclick={() => remove(template, hub)}
 					>
-						{m.hub_template_uninstall()}
+						{m.common_delete()}
 					</button>
 				</div>
 			</div>

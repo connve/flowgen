@@ -28,7 +28,7 @@
 	<title>{pageTitle(m.nav_system())}</title>
 </svelte:head>
 
-<section class="flex h-[calc(100vh-4rem)] min-w-0 flex-col overflow-hidden">
+<section class="flex h-[calc(100vh-4rem)] min-w-0 flex-col overflow-clip">
 	<div class="shrink-0 bg-base-100 px-6 pb-4 pt-6">
 		<h1 class="flex min-h-8 items-center text-[0.9375rem] font-semibold">{m.system_breadcrumb()}</h1>
 	</div>
@@ -40,7 +40,7 @@
 	{:else}
 		<div class="flex min-h-0 flex-1 flex-col px-6 pb-6">
 			<div
-				class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-base-200 bg-base-100"
+				class="flex min-h-0 flex-1 flex-col overflow-clip rounded-lg border border-base-200 bg-base-100"
 			>
 				<div class="flex h-10 shrink-0 items-center justify-between bg-base-100 px-4">
 					<span class="text-xs font-medium text-base-content/50">{m.system_config_heading()}</span>

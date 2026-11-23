@@ -13,6 +13,7 @@
 	import { configView } from '$lib/configView.svelte';
 	import { getFlowSchema } from '$lib/api';
 	import FlowForm from '$lib/form/FlowForm.svelte';
+	import { FlowDocument } from '$lib/flowDocument';
 	import type { Schema } from '$lib/form/schema';
 	import { m } from '$lib/paraglide/messages.js';
 
@@ -40,13 +41,15 @@
 
 	// While editing, the graph keeps the last YAML that parsed, so it does not
 	// blank out mid-keystroke.
+	const TYPING_PAUSE_MS = 300;
 	let parsedYaml = $state(untrack(() => yaml));
 	$effect(() => {
 		if (!editable) return;
 		const next = yaml;
+		const pause = configView.value === 'fields' ? 0 : TYPING_PAUSE_MS;
 		const timer = setTimeout(() => {
 			if (parses(next)) parsedYaml = next;
-		}, 300);
+		}, pause);
 		return () => clearTimeout(timer);
 	});
 
@@ -101,7 +104,37 @@
 
 	// The flow schema the form is built from, fetched once the form is shown.
 	let flowSchema = $state<Schema | null>(null);
-	let formTask = $state<string | null>(null);
+	let flowForm = $state<FlowForm | null>(null);
+	let picking = $state<number | 'end' | false>(false);
+
+	function addFromGraph(after: string | null) {
+		configView.value = 'fields';
+		if (narrow) view = 'config';
+		const index = after === null ? -1 : indexOf(after);
+		picking = index < 0 ? 'end' : index;
+	}
+
+	function indexOf(taskName: string): number {
+		return new FlowDocument(yaml).tasks().findIndex((task) => task.name === taskName);
+	}
+
+	function editFlow(change: (flow: FlowDocument) => void) {
+		const next = new FlowDocument(yaml);
+		if (!next.valid) return;
+		change(next);
+		yaml = next.toString();
+	}
+
+	function removeFromGraph(taskName: string) {
+		const index = indexOf(taskName);
+		if (index >= 0) editFlow((flow) => flow.removeTask(index));
+	}
+
+	function moveInGraph(taskName: string, order: string[]) {
+		const from = indexOf(taskName);
+		const to = order.indexOf(taskName);
+		if (from >= 0 && to >= 0 && from !== to) editFlow((flow) => flow.moveTask(from, to));
+	}
 	$effect(() => {
 		if (!editable || configView.value !== 'fields' || flowSchema) return;
 		getFlowSchema()
@@ -110,17 +143,46 @@
 	});
 
 
+	// A new object on every click, so clicking the same task again opens and
+	// scrolls to it. The form exists only once its schema has loaded.
+	let formReveal = $state<{ task: string } | null>(null);
+	$effect(() => {
+		const reveal = formReveal;
+		const form = flowForm;
+		if (!reveal || !form) return;
+		// Measures after the form opens the task and closes the previous one.
+		form.reveal(reveal.task).then(() => {
+			const target = yamlPane?.querySelector<HTMLElement>(`#form-task-${CSS.escape(reveal.task)}`);
+			if (target) scrollPaneTo(target, 'start');
+			// Done, so switching the view back to the form does not scroll again.
+			if (formReveal === reveal) formReveal = null;
+		});
+	});
+
+	// Scrolls only the config pane. `scrollIntoView` also scrolls every
+	// scrollable ancestor up to the page, which shifts the whole editor.
+	function scrollPaneTo(target: HTMLElement, block: 'start' | 'center') {
+		if (!yamlPane) return;
+		const top =
+			target.getBoundingClientRect().top - yamlPane.getBoundingClientRect().top + yamlPane.scrollTop;
+		const offset = block === 'center' ? (yamlPane.clientHeight - target.offsetHeight) / 2 : 8;
+		yamlPane.scrollTo({ top: Math.max(0, top - offset), behavior: 'smooth' });
+	}
+
 	function onNodeClick(name: string) {
 		if (editable && configView.value === 'fields') {
-			formTask = name;
-			queueMicrotask(() =>
-				yamlPane?.querySelector(`#form-task-${CSS.escape(name)}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-			);
+			formReveal = { task: name };
 			return;
 		}
 		scrollToTask(name);
 		if (!activityExpanded) activityExpanded = true;
 		queueMicrotask(() => activityPanel?.scrollToLatestFor(name));
+	}
+
+	export function showTask(name: string) {
+		configView.value = 'fields';
+		if (narrow) view = 'config';
+		onNodeClick(name);
 	}
 
 	function onActivityRowClick(taskName: string) {
@@ -131,7 +193,7 @@
 		if (!yamlPane) return;
 		const target = yamlPane.querySelector<HTMLElement>(`#task-${CSS.escape(name)}`);
 		if (!target) return;
-		target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+		scrollPaneTo(target, 'center');
 
 		// Restart the CSS animation reliably: remove class from any previously
 		// flashed element (which may or may not be the same target), force a
@@ -220,7 +282,14 @@
 				{@render foldToggle()}
 			</div>
 			<div class="min-h-0 flex-1 {folded ? 'hidden' : ''}">
-				<FlowDag yaml={graphYaml} {activities} onNodeClick={onNodeClick} />
+				<FlowDag
+					yaml={graphYaml}
+					{activities}
+					{onNodeClick}
+					onadd={editable ? addFromGraph : undefined}
+					onremove={editable ? removeFromGraph : undefined}
+					onmove={editable ? moveInGraph : undefined}
+				/>
 			</div>
 		</div>
 		<div class="flex min-h-0 flex-col {showConfig ? '' : 'hidden'}">
@@ -243,7 +312,7 @@
 					: 'bg-base-200'}"
 			>
 				{#if editable && configView.value === 'fields' && flowSchema}
-					<FlowForm bind:yaml schema={flowSchema} focusTask={formTask} />
+					<FlowForm bind:this={flowForm} bind:yaml schema={flowSchema} bind:picking />
 				{:else if editable}
 					<CodeEditor bind:value={yaml} extension="yaml" label={m.flow_config_editor_label()} />
 				{:else if configView.value === 'fields'}

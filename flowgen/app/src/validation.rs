@@ -17,7 +17,7 @@ pub struct Issue {
 pub enum Error {
     #[error("Flow files need a .yaml, .yml or .json extension")]
     Extension,
-    #[error("Failed to parse flow: {0}")]
+    #[error("{}", describe(.0))]
     Parse(#[source] config::ConfigError),
     #[error(transparent)]
     Name(#[from] flowgen_core::validate::Error),
@@ -126,6 +126,46 @@ fn parse_issue(source: config::ConfigError) -> Issue {
     Issue {
         location,
         message: Error::Parse(source).to_string(),
+    }
+}
+
+fn describe(error: &config::ConfigError) -> String {
+    match error {
+        config::ConfigError::NotFound(_) => "Required".to_string(),
+        config::ConfigError::Type {
+            unexpected,
+            expected,
+            ..
+        } => format!("Must be {expected}, not {unexpected}"),
+        config::ConfigError::At { error, .. } => describe(error),
+        config::ConfigError::Message(message) => serde_message(message),
+        config::ConfigError::FileParse { cause, .. } => format!("Invalid syntax: {cause}"),
+        other => sentence_case(&other.to_string()),
+    }
+}
+
+fn serde_message(message: &str) -> String {
+    let named = |rest: &str| match rest.split_once(',') {
+        Some((name, _)) => name.to_string(),
+        None => rest.to_string(),
+    };
+    match (
+        message.strip_prefix("unknown field "),
+        message.strip_prefix("missing field "),
+        message.strip_prefix("unknown variant "),
+    ) {
+        (Some(rest), _, _) => format!("Unknown setting {}", named(rest)),
+        (_, Some(rest), _) => format!("Missing {rest}"),
+        (_, _, Some(rest)) => format!("Unknown value {rest}"),
+        _ => sentence_case(message),
+    }
+}
+
+fn sentence_case(message: &str) -> String {
+    let mut chars = message.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
     }
 }
 
@@ -313,11 +353,7 @@ flow:
         let content = VALID.replace("interval: 10s", "interval: 10s\n        intreval: 5s");
         let issues = validate_flow("a.yaml", &content);
         assert_eq!(issues.len(), 1, "{issues:?}");
-        assert!(
-            issues[0].message.contains("unknown field `intreval`")
-                && issues[0].message.contains("flow.tasks[0]"),
-            "{issues:?}"
-        );
+        assert_eq!(issues[0].message, "Unknown setting `intreval`");
         assert_eq!(issues[0].location.as_deref(), Some("flow.tasks.0"));
     }
 
@@ -395,11 +431,9 @@ flow:
         let content = VALID.replace("  tasks:", "  require_leader_elction: true\n  tasks:");
         let issues = validate_flow("a.yaml", &content);
         assert_eq!(issues.len(), 1, "{issues:?}");
-        assert!(
-            issues[0]
-                .message
-                .contains("unknown field `require_leader_elction`"),
-            "{issues:?}"
+        assert_eq!(
+            issues[0].message,
+            "Unknown setting `require_leader_elction`"
         );
     }
 
@@ -428,7 +462,22 @@ flow:
     fn broken_yaml_is_a_parse_issue() {
         let issues = validate_flow("a.yaml", "flow: [tasks");
         assert_eq!(issues.len(), 1);
-        assert!(issues[0].message.starts_with("Failed to parse flow"));
+        assert!(
+            issues[0].message.starts_with("Invalid syntax"),
+            "{issues:?}"
+        );
+    }
+
+    #[test]
+    fn a_missing_setting_is_required_at_its_field() {
+        let content = VALID.replace(
+            "    - log:\n        name: print",
+            "    - http_endpoint:\n        name: hook",
+        );
+        let issues = validate_flow("a.yaml", &content);
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert_eq!(issues[0].message, "Required");
+        assert_eq!(issues[0].location.as_deref(), Some("flow.tasks.1.endpoint"));
     }
 
     #[test]

@@ -17,6 +17,9 @@ export default {
 		paths: {
 			base,
 			relative: true
+		},
+		version: {
+			pollInterval: 60_000
 		}
 	}
 };

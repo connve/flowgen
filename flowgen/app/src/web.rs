@@ -193,6 +193,9 @@ fn key_may_call(api_prefix: &str, method: &axum::http::Method, path: &str) -> bo
                 || route == "/workspace/test"
                 || matches!(change.and_then(|rest| rest.strip_suffix("/files")), Some(id) if single(id))
         }
+        axum::http::Method::DELETE => {
+            matches!(change.and_then(|rest| rest.strip_suffix("/files")), Some(id) if single(id))
+        }
         axum::http::Method::PATCH => matches!(change, Some(id) if single(id)),
         _ => false,
     }
@@ -408,7 +411,7 @@ fn router(path: &str, mut state: WebState) -> Router {
         )
         .route(
             &format!("{api_prefix}/changes/{{id}}/files"),
-            post(crate::authoring::add_change_files),
+            post(crate::authoring::add_change_files).delete(crate::authoring::remove_change_file),
         )
         .route(
             &format!("{api_prefix}/changes/{{id}}/approve"),
@@ -2324,7 +2327,8 @@ async fn get_openapi() -> impl IntoResponse {
     (StatusCode::OK, headers, flowgen_client::OPENAPI_YAML)
 }
 
-/// Serves a file from the embedded asset folder.
+/// Serves a file from the embedded asset folder. A missing build file is a
+/// 404 rather than the page, so a tab opened before an update notices it.
 async fn serve_embedded(State(state): State<Arc<WebState>>, uri: Uri) -> axum::response::Response {
     let raw = uri.path();
     // When a non-empty prefix is configured, requests outside that prefix
@@ -2345,9 +2349,12 @@ async fn serve_embedded(State(state): State<Arc<WebState>>, uri: Uri) -> axum::r
         rest => rest.to_string(),
     };
 
-    let (asset_path, content) = match WebAssets::get(&path) {
-        Some(content) => (path, content),
-        None => match WebAssets::get("index.html") {
+    let (asset_path, content) = match (WebAssets::get(&path), path.starts_with("_app/")) {
+        (Some(content), _) => (path, content),
+        (None, true) => {
+            return (StatusCode::NOT_FOUND, HeaderMap::new(), Vec::new()).into_response()
+        }
+        (None, false) => match WebAssets::get("index.html") {
             Some(content) => ("index.html".to_string(), content),
             None => return (StatusCode::NOT_FOUND, HeaderMap::new(), Vec::new()).into_response(),
         },
@@ -2717,6 +2724,7 @@ pub(crate) mod tests {
             (Method::GET, "/f/api/hubs/connve/templates"),
             (Method::POST, "/f/api/changes"),
             (Method::POST, "/f/api/changes/abc/files"),
+            (Method::DELETE, "/f/api/changes/abc/files"),
             (Method::PATCH, "/f/api/changes/abc"),
             (Method::POST, "/f/api/workspace/validate"),
             (Method::POST, "/f/api/workspace/test"),
@@ -2724,6 +2732,7 @@ pub(crate) mod tests {
         let refused = [
             (Method::POST, "/f/api/changes/abc/approve"),
             (Method::POST, "/f/api/changes//files"),
+            (Method::DELETE, "/f/api/changes/abc"),
             (Method::PATCH, "/f/api/changes/abc/approve"),
             (Method::PATCH, "/f/api/flows/a"),
             (Method::POST, "/f/api/cluster/token"),
@@ -2782,7 +2791,7 @@ pub(crate) mod tests {
                 path: "flows/a.yaml".to_string(),
                 content: Some("flow:\n  tasks:\n    - log:\n        name: a\n".to_string()),
             }],
-            template: None,
+            templates: Vec::new(),
         };
 
         for wrong in ["other", ""] {
@@ -2884,7 +2893,7 @@ pub(crate) mod tests {
                     path: "resources/s.rhai".to_string(),
                     content: Some("event".to_string()),
                 }],
-                template: None,
+                templates: Vec::new(),
             })
             .send()
             .await
@@ -2932,7 +2941,7 @@ pub(crate) mod tests {
                     path: "resources/s.rhai".to_string(),
                     content: Some("event; 2".to_string()),
                 }],
-                template: None,
+                templates: Vec::new(),
             })
             .send()
             .await
@@ -2990,7 +2999,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn a_change_from_a_template_takes_no_other_files_and_commits_its_lock_entry() {
+    async fn a_change_with_a_template_takes_other_files_and_locks_only_the_template_files() {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<flowgen_core::event::Event>(1);
         let inproc = Arc::new(flowgen_core::task::inproc::registry::InprocRegistry::new());
         inproc.register(
@@ -3046,12 +3055,13 @@ pub(crate) mod tests {
                     path: "resources/a.rhai".to_string(),
                     content: Some("event".to_string()),
                 }],
-                template: Some(api::TemplateSource {
+                templates: vec![api::TemplateSource {
                     hub: "local".to_string(),
                     slug: "a".to_string(),
                     digest: "sha256:1".to_string(),
                     removed: false,
-                }),
+                    files: vec!["resources/a.rhai".to_string()],
+                }],
             })
             .send()
             .await
@@ -3061,11 +3071,12 @@ pub(crate) mod tests {
             .unwrap();
         let added = client
             .post(format!("{base}/flowgen/api/changes/{}/files", proposed.id))
-            .json(&api::WorkspaceFiles {
+            .json(&api::ChangeFiles {
                 files: vec![api::WorkspaceFile {
                     path: "resources/mine.rhai".to_string(),
                     content: Some("event".to_string()),
                 }],
+                template: None,
             })
             .send()
             .await
@@ -3080,9 +3091,22 @@ pub(crate) mod tests {
             .unwrap();
 
         let sent = committed.await.unwrap();
-        assert_eq!(added.status(), reqwest::StatusCode::CONFLICT);
-        let lock = &sent["files"][1];
-        assert_eq!(lock["path"], crate::lock::LOCK_FILE);
+        assert_eq!(added.status(), reqwest::StatusCode::OK);
+        let paths: Vec<&str> = sent["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|file| file["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                "resources/a.rhai",
+                "resources/mine.rhai",
+                crate::lock::LOCK_FILE
+            ]
+        );
+        let lock = &sent["files"][2];
         assert_eq!(
             lock["previous"],
             "templates:\n  local/b:\n    digest: sha256:0\n    files: [flows/b.yaml]\n"
@@ -3114,7 +3138,7 @@ pub(crate) mod tests {
                     path: "flows/a.yaml".to_string(),
                     content: Some("flow:\n  tasks:\n    - log:\n        name: a\n".to_string()),
                 }],
-                template: None,
+                templates: Vec::new(),
             })
             .send()
             .await
@@ -3143,6 +3167,87 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn removing_a_template_file_takes_the_template_out_and_the_last_file_rejects_the_change()
+    {
+        let mut state = test_state();
+        state.authoring = Some(authoring_options(vec![authoring_target(
+            "workspace",
+            &["flows/", "resources/"],
+        )]));
+        let base = serve(router("/flowgen", state)).await;
+        let client = reqwest::Client::new();
+        let file = |path: &str| api::WorkspaceFile {
+            path: path.to_string(),
+            content: Some("event".to_string()),
+        };
+        let proposed: api::Change = client
+            .post(format!("{base}/flowgen/api/changes"))
+            .json(&api::ChangeProposal {
+                title: "Add a".to_string(),
+                description: None,
+                files: vec![
+                    file("resources/a.rhai"),
+                    file("resources/b.rhai"),
+                    file("resources/mine.rhai"),
+                ],
+                templates: vec![api::TemplateSource {
+                    hub: "local".to_string(),
+                    slug: "a".to_string(),
+                    digest: "sha256:1".to_string(),
+                    removed: false,
+                    files: vec![
+                        "resources/a.rhai".to_string(),
+                        "resources/b.rhai".to_string(),
+                    ],
+                }],
+            })
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let url = format!("{base}/flowgen/api/changes/{}/files", proposed.id);
+
+        let without_template: api::Change = client
+            .delete(&url)
+            .query(&[("path", "resources/b.rhai")])
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let missing = client
+            .delete(&url)
+            .query(&[("path", "resources/a.rhai")])
+            .send()
+            .await
+            .unwrap();
+        let emptied: api::Change = client
+            .delete(&url)
+            .query(&[("path", "resources/mine.rhai")])
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        let paths: Vec<&str> = without_template
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect();
+        assert_eq!(paths, ["resources/mine.rhai"]);
+        assert!(without_template.templates.is_empty());
+        assert_eq!(without_template.status, api::ChangeStatus::Pending);
+        assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
+        assert!(emptied.files.is_empty());
+        assert_eq!(emptied.status, api::ChangeStatus::Rejected);
+    }
+
+    #[tokio::test]
     async fn a_pending_change_takes_more_files_and_a_new_title_until_it_is_decided() {
         let mut state = test_state();
         state.authoring = Some(crate::config::AuthoringOptions {
@@ -3162,7 +3267,7 @@ pub(crate) mod tests {
                 title: "Add a".to_string(),
                 description: None,
                 files: vec![file("resources/a.rhai", "1")],
-                template: None,
+                templates: Vec::new(),
             })
             .send()
             .await
@@ -3174,8 +3279,9 @@ pub(crate) mod tests {
 
         let added: api::Change = client
             .post(format!("{url}/files"))
-            .json(&api::WorkspaceFiles {
+            .json(&api::ChangeFiles {
                 files: vec![file("resources/b.rhai", "2"), file("resources/a.rhai", "3")],
+                template: None,
             })
             .send()
             .await
@@ -3260,7 +3366,7 @@ pub(crate) mod tests {
                         content: Some("event".to_string()),
                     })
                     .collect(),
-                template: None,
+                templates: Vec::new(),
             })
             .send()
             .await
@@ -3325,7 +3431,7 @@ pub(crate) mod tests {
                     path: "flows/platform/a.yaml".to_string(),
                     content: Some("flow:\n  tasks:\n    - log:\n        name: a\n".to_string()),
                 }],
-                template: None,
+                templates: Vec::new(),
             })
             .send()
             .await
@@ -3412,7 +3518,7 @@ pub(crate) mod tests {
                     path: "resources/s.rhai".to_string(),
                     content: Some("event".to_string()),
                 }],
-                template: None,
+                templates: Vec::new(),
             })
             .send()
             .await
@@ -4656,6 +4762,21 @@ pub(crate) mod tests {
             assert_eq!(response.headers()["x-content-type-options"], "nosniff");
         }
         assert!(api.headers().get("content-security-policy").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_missing_build_file_is_not_found_and_any_other_path_is_the_page() {
+        let base = serve(router("/flowgen", test_state())).await;
+
+        let gone = reqwest::get(format!("{base}/flowgen/_app/immutable/nodes/0.gone.js"))
+            .await
+            .unwrap();
+        let route = reqwest::get(format!("{base}/flowgen/flows/a/b"))
+            .await
+            .unwrap();
+
+        assert_eq!(gone.status(), reqwest::StatusCode::NOT_FOUND);
+        assert_eq!(route.status(), reqwest::StatusCode::OK);
     }
 
     #[test]

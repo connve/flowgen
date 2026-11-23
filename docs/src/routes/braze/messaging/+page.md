@@ -26,7 +26,7 @@ Sends messages, campaigns, and Canvases through the Braze API.
 | `operation` | string | required | See the table below. |
 | `credentials_path` | string | required | Path to the [credentials](/docs/flowgen/braze) file. |
 | `base_url` | string | required | REST endpoint of the Braze instance, e.g. `https://rest.iad-01.braze.com`. |
-| `campaign_id` | string | | Transactional email campaign ID for `send_transactional`. |
+| `campaign_id` | string | | Campaign ID for `send_transactional` only, whose campaigns send email; the other operations take `campaign_id` or `canvas_id` in `payload`. |
 | `payload` | object | required | The request body, or `from_event: true`. See [Payload](/docs/flowgen/braze#payload). |
 | `depends_on` | list | | Upstream task names. |
 | `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |

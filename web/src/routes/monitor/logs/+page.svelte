@@ -288,7 +288,7 @@
 </svelte:head>
 
 <div class="flex min-h-0 min-w-0 flex-1">
-<section class="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+<section class="flex min-h-0 min-w-0 flex-1 flex-col overflow-clip">
 	<div class="shrink-0 space-y-3 bg-base-100 px-4 pb-4 pt-6 md:px-6">
 		<div class="flex min-h-8 items-center justify-between gap-3">
 			<div class="flex items-baseline gap-1.5 text-[0.9375rem] font-semibold">
@@ -429,7 +429,7 @@
 			<StateMessage tone="notice" title={m.logs_empty_title()} />
 		{:else}
 			<div
-				class="@container flex min-h-0 flex-1 flex-col overflow-hidden bg-base-100"
+				class="@container flex min-h-0 flex-1 flex-col overflow-clip bg-base-100"
 			>
 				<div
 					bind:this={scrollPane}

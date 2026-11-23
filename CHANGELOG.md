@@ -12,6 +12,71 @@
   A change touches only the values it sets, so comments and layout stay.
 - `GET /api/schemas/flow`, the JSON Schema of a flow file, generated from
   the task configs of the running version.
+- In the editor, the graph is where tasks are added: + under a task adds
+  one after it, and + in an empty graph the first. It also removes a task
+  with × and reorders the tasks when one is dragged elsewhere; the form
+  reorders them by dragging too.
+- Changes, next to search, opens the list of changes; while you have a
+  pending change it reads Review with the count of its files and opens it.
+  It takes the place of the pending changes count above Flows and Resources.
+- A file is taken out of a pending change with × on the change, or with
+  `DELETE /api/changes/{id}/files?path=`; a template's file goes out with
+  the template, and a change left without files is rejected.
+- A change shows each flow as its graph, with the tasks it adds, removes or
+  changes marked, and a task opens with its changed settings, before and
+  after; a Markdown resource shows rendered, and Diff shows the text.
+
+### Changed
+
+- Validation states a problem at its field in plain words, such as
+  `Required` at `flow.tasks.1.endpoint` or ``Unknown setting `intreval` ``,
+  and the web UI names the task in place of its index.
+- Using, updating or deleting a hub template adds its files to your open
+  change, like an edit, so a template's files can be edited before it is
+  deployed.
+- A change has one **Deploy** button, which approves and commits it; the
+  release and deploy flows follow.
+- **Delete** on a file of an installed template deletes the whole template,
+  after listing its files; on any other file it deletes the file.
+- The hub's **Pending change** opens the change that holds the template.
+- Each file of a change has **Open**, to its flow or resource.
+- **Revert** undoes a change that installed or deleted a template: it
+  deletes the installed one, or installs the deleted one again at its
+  digest.
+
+### Breaking
+
+- A change and a proposal carry `templates`, a list, and each template lists
+  the `files` it installs; `POST /api/changes/{id}/files` takes a
+  `template`.
+
+### Fixed
+
+- A task that fails shows in the flow's activity under its name and marks
+  its task in the graph; the activity also shows the flow's own warnings
+  and errors.
+- Validation reports a Braze task missing the `payload` or `campaign_id`
+  its operation needs, before the change is deployed.
+- A web UI tab opened before an update loads the new version on its next
+  click, and a build file the update removed is answered with 404.
+- Dependencies with security fixes: `url` 2.5.9, `rustix` 1.1.6 and
+  `zstd-safe` 7.4.1, and in the web UI and docs `js-yaml`, `cookie`,
+  `postcss-selector-parser` and `katex`.
+- Clicking a validation error in the editor opens its task in the form and
+  scrolls only the form, so the editor and the error list stay in place.
+
+## 0.158.1
+
+### Added
+
+- `flowgen run [<folder>]` runs the workspace in an existing folder, or the
+  default workspace.
+
+### Fixed
+
+- The Linux release archives hold the `flowgen` binary at their root rather
+  than a folder of the sources; `flowgen update` reads only a file named
+  `flowgen` from an archive.
 
 ## 0.158.0
 

@@ -45,7 +45,6 @@ config = { workspace = true }
 glob = { workspace = true }
 serde_ignored = { workspace = true }
 serde_json = { workspace = true }
-native-tls = { workspace = true }
 humantime-serde = { workspace = true }
 url = { workspace = true }
 rustls = { workspace = true }

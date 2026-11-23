@@ -46,7 +46,8 @@ pub struct Messaging {
     pub credentials_path: PathBuf,
     /// REST endpoint of the Braze instance, e.g. `https://rest.iad-01.braze.com`.
     pub base_url: String,
-    /// Transactional email campaign ID (send_transactional).
+    /// Campaign ID for `send_transactional` only, whose campaigns send email;
+    /// the other operations take `campaign_id` or `canvas_id` in `payload`.
     #[serde(default)]
     pub campaign_id: Option<String>,
     /// The request body, or `from_event: true`.
@@ -136,5 +137,51 @@ impl Operation for Messaging {
                 emitter.emit(&sent).await
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flowgen_core::task::TaskMeta;
+
+    fn messaging(config: serde_json::Value) -> Messaging {
+        let mut fields = serde_json::json!({
+            "name": "send",
+            "credentials_path": "/etc/braze.json",
+            "base_url": "https://rest.example.com"
+        });
+        if let (Some(fields), serde_json::Value::Object(config)) = (fields.as_object_mut(), config)
+        {
+            fields.extend(config);
+        }
+        serde_json::from_value(fields).unwrap()
+    }
+
+    #[test]
+    fn a_config_missing_what_its_operation_needs_fails_validation() {
+        let without_payload = messaging(serde_json::json!({"operation": "trigger_campaign"}));
+        let without_campaign = messaging(serde_json::json!({
+            "operation": "send_transactional",
+            "payload": {"from_event": true}
+        }));
+        let complete = messaging(serde_json::json!({
+            "operation": "trigger_campaign",
+            "payload": {"from_event": true}
+        }));
+
+        assert_eq!(
+            TaskMeta::validate(&without_payload)
+                .unwrap_err()
+                .to_string(),
+            "This operation needs `payload`"
+        );
+        assert_eq!(
+            TaskMeta::validate(&without_campaign)
+                .unwrap_err()
+                .to_string(),
+            "This operation needs `campaign_id`"
+        );
+        assert!(TaskMeta::validate(&complete).is_ok());
     }
 }

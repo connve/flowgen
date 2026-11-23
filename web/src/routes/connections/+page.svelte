@@ -56,7 +56,7 @@
 </svelte:head>
 
 <section class="flex h-[calc(100vh-4rem)] min-w-0">
-<div class="flex min-w-0 flex-1 flex-col overflow-hidden">
+<div class="flex min-w-0 flex-1 flex-col overflow-clip">
 <div class="shrink-0 bg-base-100 px-6 pb-4 pt-6">
 	<div class="flex min-h-8 items-center">
 		<div class="flex items-baseline gap-1.5 text-[0.9375rem] font-semibold">

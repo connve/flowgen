@@ -23,7 +23,7 @@
 <script lang="ts">
 	import Icon from '@iconify/svelte';
 	import { dump, load } from 'js-yaml';
-	import { Segmented } from '@connve/ui';
+	import { Combobox, FormField, Segmented, Select, TokenField } from '@connve/ui';
 	import CodeEditor from '$lib/CodeEditor.svelte';
 	import { fieldLabel } from '$lib/YamlFields.svelte';
 	import SchemaField from '$lib/form/SchemaField.svelte';
@@ -43,9 +43,16 @@
 
 	const INPUT =
 		'input input-sm flex w-full items-center gap-2 border border-base-300 bg-base-100 outline-none focus-within:border-primary';
-	const SELECT = 'select select-sm w-full border border-base-300 bg-base-100 outline-none focus:border-primary';
+	const EDITOR = 'max-h-80 min-h-12 overflow-auto rounded-md border border-base-300 bg-base-200';
 
 	let label = $derived(fieldLabel(field.name));
+	let placeholder = $derived(field.default == null ? '' : String(field.default));
+
+	function setCredentials(text: string) {
+		const name = text.trim();
+		if (!name) return set(undefined);
+		set(name.includes('/') ? name : credentialsPath(name));
+	}
 	let choices = $derived(options(field.schema) ?? []);
 
 	function set(next: unknown) {
@@ -59,14 +66,6 @@
 	}
 
 	let list = $derived(Array.isArray(value) ? value.map(String) : []);
-	let draft = $state('');
-
-	function addItem() {
-		const item = draft.trim();
-		if (!item) return;
-		set([...list, item]);
-		draft = '';
-	}
 
 	let entries = $derived(
 		value && typeof value === 'object' && !Array.isArray(value)
@@ -112,13 +111,7 @@
 	}
 </script>
 
-<div class="space-y-1">
-	<div class="flex items-baseline gap-1.5">
-		<span class="text-sm font-medium">{label}</span>
-		{#if field.required}
-			<span class="text-xs text-error" aria-label={m.form_required()}>*</span>
-		{/if}
-	</div>
+<FormField {label} required={field.required} help={field.description}>
 
 	{#if field.kind === 'boolean'}
 		<input
@@ -129,41 +122,33 @@
 			onchange={(e) => set(e.currentTarget.checked)}
 		/>
 	{:else if field.kind === 'enum'}
-		<select class={SELECT} aria-label={label} value={String(value ?? field.default ?? '')} onchange={(e) => set(e.currentTarget.value)}>
-			{#if !field.required && field.default === undefined}
-				<option value="">—</option>
-			{/if}
-			{#each choices as choice (choice.value)}
-				<option value={choice.value}>{choice.value}</option>
-			{/each}
-		</select>
+		<Select
+			{label}
+			value={String(value ?? field.default ?? '')}
+			options={!field.required && field.default === undefined ? [{ value: '' }, ...choices] : choices}
+			placeholder="—"
+			onchange={(next) => set(next === '' ? undefined : next)}
+		/>
 	{:else if field.kind === 'integer' || field.kind === 'number'}
 		<label class={INPUT}>
 			<input
 				type="number"
-				class="grow"
+				class="grow [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
 				aria-label={label}
 				value={value ?? ''}
-				placeholder={field.default === undefined ? '' : String(field.default)}
+				placeholder={placeholder}
 				oninput={(e) => setNumber(e.currentTarget.value)}
 			/>
 		</label>
 	{:else if field.kind === 'credentials'}
 		{@const name = credentialsName(value)}
-		<select
-			class={SELECT}
-			aria-label={label}
+		<Combobox
+			{label}
 			value={name ?? (value ? String(value) : '')}
-			onchange={(e) => set(e.currentTarget.value ? credentialsPath(e.currentTarget.value) : undefined)}
-		>
-			<option value="">{m.form_credentials_choose()}</option>
-			{#each context.credentials as credential (credential)}
-				<option value={credential}>{credential}</option>
-			{/each}
-			{#if value && !name}
-				<option value={String(value)}>{String(value)}</option>
-			{/if}
-		</select>
+			options={context.credentials}
+			placeholder={m.form_credentials_choose()}
+			onchange={setCredentials}
+		/>
 	{:else if field.kind === 'source'}
 		<Segmented
 			{label}
@@ -175,47 +160,20 @@
 			onchange={(next) => set(next === 'resource' ? { resource: '' } : '')}
 		/>
 		{#if isResource}
-			<select
-				class={SELECT}
-				aria-label={label}
+			<Combobox
+				{label}
 				value={String((value as Record<string, unknown>).resource ?? '')}
-				onchange={(e) => set({ resource: e.currentTarget.value })}
-			>
-				<option value="">{m.form_resource_choose()}</option>
-				{#each context.resources as resource (resource)}
-					<option value={resource}>{resource}</option>
-				{/each}
-			</select>
+				options={context.resources}
+				placeholder={m.form_resource_choose()}
+				onchange={(resource) => set({ resource })}
+			/>
 		{:else}
-			<div class="h-40 overflow-hidden rounded-md border border-base-300">
-				<CodeEditor bind:value={() => inline, (text) => set(text)} extension={context.language} {label} />
+			<div class={EDITOR}>
+				<CodeEditor bind:value={() => inline, (text) => set(text)} extension={context.language} {label} compact />
 			</div>
 		{/if}
 	{:else if field.kind === 'list'}
-		<div class="flex flex-wrap items-center gap-1.5">
-			{#each list as item, index (index)}
-				<span class="badge badge-sm gap-1">
-					{item}
-					<button type="button" aria-label={m.form_remove()} onclick={() => set(list.filter((_, at) => at !== index))}>
-						<Icon icon="tabler:x" class="h-3 w-3" />
-					</button>
-				</span>
-			{/each}
-			<label class="input input-sm flex min-w-32 flex-1 items-center gap-2 border border-base-300 bg-base-100 outline-none focus-within:border-primary">
-				<input
-					type="text"
-					class="grow"
-					aria-label={label}
-					bind:value={draft}
-					onkeydown={(e) => {
-						if (e.key !== 'Enter') return;
-						e.preventDefault();
-						addItem();
-					}}
-					onblur={addItem}
-				/>
-			</label>
-		</div>
+		<TokenField {label} value={list} onchange={(next) => set(next.length > 0 ? next : undefined)} />
 	{:else if field.kind === 'map'}
 		<div class="space-y-1.5">
 			{#each entries as [key, entry], index (index)}
@@ -237,14 +195,14 @@
 			</button>
 		</div>
 	{:else if field.kind === 'object'}
-		<div class="space-y-3 border-l border-base-300 pl-3">
+		<div class="space-y-3 pl-3">
 			{#each fieldsOf(root, field.schema) as child (child.name)}
 				<SchemaField field={child} {root} value={object[child.name]} {context} onchange={(next) => setChild(child.name, next)} />
 			{/each}
 		</div>
 	{:else if field.kind === 'yaml'}
-		<div class="h-32 overflow-hidden rounded-md border border-base-300">
-			<CodeEditor bind:value={() => yamlText, setYaml} extension="yaml" {label} />
+		<div class={EDITOR}>
+			<CodeEditor bind:value={() => yamlText, setYaml} extension="yaml" {label} compact />
 		</div>
 	{:else}
 		<label class={INPUT}>
@@ -253,13 +211,9 @@
 				class="grow"
 				aria-label={label}
 				value={value ?? ''}
-				placeholder={field.kind === 'duration' ? '30s' : field.default === undefined ? '' : String(field.default)}
+				placeholder={field.kind === 'duration' && !placeholder ? '30s' : placeholder}
 				onchange={(e) => set(e.currentTarget.value)}
 			/>
 		</label>
 	{/if}
-
-	{#if field.description}
-		<p class="text-xs text-base-content/60">{field.description}</p>
-	{/if}
-</div>
+</FormField>

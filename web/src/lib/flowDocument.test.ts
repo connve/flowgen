@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { FlowDocument } from './flowDocument';
+import { FlowDocument, locationParts } from './flowDocument';
 
 const EXAMPLES = join(__dirname, '../../../examples');
 
@@ -62,6 +62,24 @@ describe('FlowDocument', () => {
 
 		expect(index).toBe(1);
 		expect(document.tasks().map((task) => task.name)).toEqual(['tick', 'to_json', 'shape', 'out']);
+	});
+
+	it('reads an issue location by task name', () => {
+		expect(locationParts('flow.tasks.1.script.code', FLOW)).toEqual({ task: 'shape', field: 'code' });
+		expect(locationParts('flow.tasks.2.depends_on', FLOW)).toEqual({ task: 'out', field: 'depends_on' });
+		expect(locationParts('flow.tasks.0', FLOW)).toEqual({ task: 'tick', field: '' });
+		expect(locationParts('flow.labels.display_name', FLOW)).toEqual({
+			task: null,
+			field: 'labels › display_name'
+		});
+	});
+
+	it('moves a task with its comment', () => {
+		const document = new FlowDocument(FLOW);
+		document.moveTask(0, 2);
+
+		expect(document.tasks().map((task) => task.name)).toEqual(['shape', 'out', 'tick']);
+		expect(document.toString()).toContain('name: tick # and this one');
 	});
 
 	it('renames a task and the tasks that name it', () => {

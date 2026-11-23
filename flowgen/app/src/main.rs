@@ -35,6 +35,12 @@ struct Cli {
 
 #[derive(clap::Subcommand)]
 enum Command {
+    /// Runs the workspace in an existing folder, or the default workspace when
+    /// omitted; `flowgen <folder>` also creates the folder.
+    Run {
+        /// The workspace folder, which must exist.
+        workspace: Option<std::path::PathBuf>,
+    },
     /// Checks the flows and resources of a workspace without running them.
     Validate {
         /// The workspace folder, which holds `flows/` and `resources/`.
@@ -398,6 +404,21 @@ fn config_or_exit(loaded: Result<AppConfig, config::ConfigError>) -> Box<AppConf
     }
 }
 
+/// A run with the config file at `config`, or else on the workspace in `folder`.
+fn run_mode(config: Option<String>, folder: Option<&std::path::Path>) -> Mode {
+    match config {
+        Some(path) => Mode::Config(config_or_exit(AppConfig::load(
+            config::File::with_name(&path),
+            flowgen::config::env_source(),
+        ))),
+        None => {
+            let workspace = resolve_workspace(folder);
+            let loaded = flowgen::local::load(&workspace.folder, flowgen::config::env_source());
+            Mode::Local(workspace, config_or_exit(loaded))
+        }
+    }
+}
+
 /// Loads the config and sets the variables flows read, the version, the
 /// addresses of this run's servers and the local workspace's repository and
 /// folder, before any other thread starts, then runs on the tokio runtime.
@@ -410,15 +431,20 @@ fn main() {
             Mode::Bootstrap(resolve_workspace(workspace.as_deref()))
         }
         (Some(Command::Update), _) => Mode::Update,
-        (None, Some(path)) => Mode::Config(config_or_exit(AppConfig::load(
-            config::File::with_name(&path),
-            flowgen::config::env_source(),
-        ))),
-        (None, None) => {
-            let workspace = resolve_workspace(cli.workspace.as_deref());
-            let loaded = flowgen::local::load(&workspace.folder, flowgen::config::env_source());
-            Mode::Local(workspace, config_or_exit(loaded))
+        (
+            Some(Command::Run {
+                workspace: Some(folder),
+            }),
+            None,
+        ) if !folder.is_dir() => {
+            eprintln!(
+                "No folder at {0}; `flowgen {0}` creates a workspace there",
+                folder.display()
+            );
+            process::exit(1);
         }
+        (Some(Command::Run { workspace }), config) => run_mode(config, workspace.as_deref()),
+        (None, config) => run_mode(config, cli.workspace.as_deref()),
     };
     env::set_var(flowgen::config::VERSION_ENV, env!("CARGO_PKG_VERSION"));
     if let Mode::Config(app_config) | Mode::Local(_, app_config) = &mode {

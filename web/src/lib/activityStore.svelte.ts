@@ -54,11 +54,12 @@ export interface FlowActivity {
 	extra?: Array<[string, string]>;
 }
 
-// Converts a `LogRecord` into a `FlowActivity` when the record is
-// task-scoped and carries a flow identifier. Returns `null` for
-// framework/lifecycle logs the per-flow activity panel does not show.
+// Converts a `LogRecord` into a `FlowActivity` when it carries a flow and is
+// task-scoped or a warning or error, as the server counts them. Returns `null`
+// for other framework/lifecycle logs the per-flow activity panel does not show.
 function recordToActivity(record: LogRecord): FlowActivity | null {
-	if (!isTaskScoped(record)) return null;
+	const flagged = record.level === 'warn' || record.level === 'error';
+	if (!flagged && !isTaskScoped(record)) return null;
 	const span = extractSpanSummary(record);
 	if (!span.flow) return null;
 	const fields = extractFieldSummary(record);

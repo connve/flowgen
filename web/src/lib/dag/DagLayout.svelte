@@ -7,7 +7,13 @@
 	// Dagre needs node dimensions to lay out ranks; taking them from
 	// `node.measured` (populated by SvelteFlow after the first render) keeps the
 	// layout correct without duplicating the node's CSS size in code.
-	let { edges, width, height }: { edges: Edge[]; width: number; height: number } = $props();
+	let {
+		edges,
+		width,
+		height,
+		drops = 0,
+		keepView = false
+	}: { edges: Edge[]; width: number; height: number; drops?: number; keepView?: boolean } = $props();
 
 	// Below this zoom task names are unreadable; a larger graph scrolls instead.
 	const READABLE_ZOOM = 0.75;
@@ -29,7 +35,7 @@
 			laidOutKey = '';
 			return;
 		}
-		const key = edges.map((e) => e.id).join('|');
+		const key = `${drops}:${edges.map((e) => e.id).join('|')}`;
 		if (laidOutKey === key || width === 0 || height === 0) return;
 
 		const nodes = getNodes();
@@ -49,8 +55,11 @@
 			updateNode(n.id, { position: { x: p.x - p.width / 2, y: p.y - p.height / 2 } });
 		}
 		laidOutKey = key;
-		show(g.graph().width!, g.graph().height!);
+		if (!keepView || !shown) show(g.graph().width!, g.graph().height!);
+		shown = true;
 	});
+
+	let shown = false;
 
 	// A fitted graph stays centred when the pane's height changes; a large one
 	// shown from its first task stays at the top.

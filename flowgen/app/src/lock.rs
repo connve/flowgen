@@ -53,32 +53,32 @@ pub fn digest(files: &[api::WorkspaceFile]) -> String {
 }
 
 impl Lock {
-    /// The lock once `change` is committed: its template installed at its
-    /// digest with the files the change writes, or dropped when it is removed.
+    /// The lock once `change` is committed: each of its templates installed at
+    /// its digest with those of its files the change writes, or dropped when
+    /// it is removed.
     pub fn with(mut self, change: &api::Change) -> Self {
-        let Some(source) = &change.template else {
-            return self;
-        };
-        let key = key(&source.hub, &source.slug);
-        match source.removed {
-            true => {
-                self.templates.remove(&key);
-            }
-            false => {
-                let mut files: Vec<String> = change
-                    .files
-                    .iter()
-                    .filter(|file| file.content.is_some())
-                    .map(|file| file.path.clone())
-                    .collect();
-                files.sort();
-                self.templates.insert(
-                    key,
-                    Locked {
-                        digest: source.digest.clone(),
-                        files,
-                    },
-                );
+        for source in &change.templates {
+            let key = key(&source.hub, &source.slug);
+            match source.removed {
+                true => {
+                    self.templates.remove(&key);
+                }
+                false => {
+                    let mut files: Vec<String> = change
+                        .files
+                        .iter()
+                        .filter(|file| file.content.is_some() && source.files.contains(&file.path))
+                        .map(|file| file.path.clone())
+                        .collect();
+                    files.sort();
+                    self.templates.insert(
+                        key,
+                        Locked {
+                            digest: source.digest.clone(),
+                            files,
+                        },
+                    );
+                }
             }
         }
         self
@@ -139,7 +139,8 @@ mod tests {
         assert!(a.starts_with("sha256:"));
     }
 
-    /// A change from template `slug` writing two files and deleting a third.
+    /// A change from template `slug` writing two of its files and deleting a
+    /// third, with an edit of a file outside it.
     fn change(slug: &str, removed: bool) -> api::Change {
         serde_json::from_value(serde_json::json!({
             "id": "0", "target": "workspace", "title": "a", "status": "pending",
@@ -147,9 +148,13 @@ mod tests {
             "files": [
                 {"path": "resources/b.md", "content": "b", "diff": ""},
                 {"path": "flows/a.yaml", "content": "a", "diff": ""},
-                {"path": "resources/old.md", "content": null, "diff": ""}
+                {"path": "resources/old.md", "content": null, "diff": ""},
+                {"path": "flows/other.yaml", "content": "o", "diff": ""}
             ],
-            "template": {"hub": "local", "slug": slug, "digest": "sha256:1", "removed": removed}
+            "templates": [{
+                "hub": "local", "slug": slug, "digest": "sha256:1", "removed": removed,
+                "files": ["flows/a.yaml", "resources/b.md", "resources/old.md"]
+            }]
         }))
         .unwrap()
     }
@@ -166,6 +171,32 @@ mod tests {
             read.templates["local/a"].files,
             ["flows/a.yaml", "resources/b.md"]
         );
+    }
+
+    #[test]
+    fn each_template_of_a_change_is_locked_with_its_own_files() {
+        let mut change = change("a", false);
+        change.files.push(api::ChangeFile {
+            path: "flows/c.yaml".to_string(),
+            content: Some("c".to_string()),
+            previous: None,
+            diff: String::new(),
+        });
+        change.templates.push(api::TemplateSource {
+            hub: "local".to_string(),
+            slug: "c".to_string(),
+            digest: "sha256:2".to_string(),
+            removed: false,
+            files: vec!["flows/c.yaml".to_string()],
+        });
+
+        let lock = Lock::default().with(&change);
+
+        assert_eq!(
+            lock.templates["local/a"].files,
+            ["flows/a.yaml", "resources/b.md"]
+        );
+        assert_eq!(lock.templates["local/c"].files, ["flows/c.yaml"]);
     }
 
     #[test]
