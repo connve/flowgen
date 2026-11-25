@@ -93,6 +93,18 @@ pub enum AuthError {
     NoDecodingKey,
 }
 
+impl AuthError {
+    /// Whether the token was valid but is past its expiry, as every token
+    /// eventually is before its client refreshes it.
+    pub fn is_expired(&self) -> bool {
+        matches!(
+            self,
+            AuthError::InvalidToken { source }
+                if *source.kind() == jsonwebtoken::errors::ErrorKind::ExpiredSignature
+        )
+    }
+}
+
 /// Auth provider trait — validates a token and returns user context.
 #[async_trait::async_trait]
 pub trait AuthProvider: std::fmt::Debug + Send + Sync + 'static {

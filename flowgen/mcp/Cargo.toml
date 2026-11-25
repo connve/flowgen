@@ -32,10 +32,12 @@ humantime-serde = { workspace = true }
 humantime = { workspace = true }
 jsonschema = { workspace = true }
 tokio-util = { workspace = true }
+subtle = { workspace = true }
+url = { workspace = true }
+secrecy = { workspace = true }
 
 [dev-dependencies]
 flowgen_core = { path = "../core", features = ["test-util"] }
-secrecy = { workspace = true }
 http-body-util = "0.1"
 tower = { workspace = true }
 reqwest = { workspace = true }

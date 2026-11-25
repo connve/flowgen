@@ -30,10 +30,21 @@ mcp_server:
 | `port` | int | `3001` | Port the MCP server listens on. |
 | `path` | string | `/mcp/v1` | HTTP endpoint path. |
 | `credentials_path` | string | | Global API-key credentials JSON. Individual `mcp_tool` tasks can override with their own `credentials_path`. |
-| `auth` | object | | Auth provider config for user identity resolution (JWT/OIDC/session). |
+| `auth` | object | top-level `auth` | Auth provider config for user identity resolution (JWT/OIDC/session). An `oidc` provider needs an `audience`. |
 | `resource_uri_scheme` | string | `flowgen` | Scheme used when auto-generating `mcp_resource` URIs (`<scheme>://<flow_name>/<name>`). White-label deployments override this so LLM-visible identifiers carry the deployment brand instead of `flowgen`. |
+| `public_url` | string | the address the client used | The address clients reach the server at through a proxy, e.g. `https://mcp.example.com`. See [Sign-in](#sign-in). |
 
 The server exposes a single endpoint at `path` that speaks the MCP Streamable HTTP transport: `POST <path>` accepts JSON-RPC requests, `GET <path>` opens a long-lived SSE stream for [notifications](#notifications).
+
+### Sign-in
+
+With an OIDC provider (the top-level [`auth`](/docs/flowgen/concepts/auth) or `mcp_server.auth`), every request needs an API key or a token for the provider's `audience`. A tool with its own `credentials_path` still needs one of its keys.
+
+A client without either gets `401` with `WWW-Authenticate: Bearer resource_metadata="…"`. The metadata at `/.well-known/oauth-protected-resource<path>` names the provider as the authorization server and `openid` as the scope; the client signs the user in there and retries with the token.
+
+The metadata uses the address the client called; behind a proxy, set `public_url`. The client must be registered with the provider, by itself (dynamic client registration or a client ID metadata document) or by hand.
+
+Refused tokens are logged with the reason, such as `InvalidAudience`; expired ones only at debug level. Agents on the same instance use an API key in `credentials_path` or `on_behalf_of_user`.
 
 ## Toolsets
 
@@ -45,8 +56,8 @@ An agent connects to `path` or to the toolsets it needs, and takes only some too
 
 ```yaml
 mcp_servers:
-  - url: "http://localhost:3001/mcp/v1/sales"
-  - url: "http://localhost:3001/mcp/v1/shared"
+  - url: "http://127.0.0.1:3001/mcp/v1/sales"
+  - url: "http://127.0.0.1:3001/mcp/v1/shared"
     allowed_tools: [web_search]
 ```
 

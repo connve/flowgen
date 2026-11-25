@@ -1,13 +1,37 @@
 //! Configuration shared by the MCP server and the `mcp_tool` task.
 
-use serde::{Deserialize, Serialize};
+use flowgen_core::credentials::MIN_API_KEY_LEN;
+use secrecy::{ExposeSecret, SecretString};
+use serde::{Deserialize, Deserializer};
 
 /// Authentication credentials for MCP API key validation.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+///
+/// ```json
+/// { "api_keys": ["a random string of at least 32 characters"] }
+/// ```
+#[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Credentials {
-    /// List of valid API keys for Bearer token authentication.
-    pub api_keys: Vec<String>,
+    /// Keys accepted as `Authorization: Bearer <key>`, each at least
+    /// [`MIN_API_KEY_LEN`] characters.
+    #[serde(deserialize_with = "long_keys")]
+    pub api_keys: Vec<SecretString>,
+}
+
+fn long_keys<'de, D>(deserializer: D) -> Result<Vec<SecretString>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let keys = Vec::<SecretString>::deserialize(deserializer)?;
+    if keys
+        .iter()
+        .any(|key| key.expose_secret().len() < MIN_API_KEY_LEN)
+    {
+        return Err(serde::de::Error::custom(format!(
+            "every API key must be at least {MIN_API_KEY_LEN} characters"
+        )));
+    }
+    Ok(keys)
 }
 
 #[cfg(test)]
@@ -15,14 +39,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_credentials_serialization() {
-        let creds = Credentials {
-            api_keys: vec!["key1".to_string(), "key2".to_string()],
-        };
+    fn credentials_read_their_keys() {
+        let key = "k".repeat(MIN_API_KEY_LEN);
+        let credentials: Credentials =
+            serde_json::from_str(&format!(r#"{{"api_keys": ["{key}"]}}"#)).unwrap();
 
-        let json = serde_json::to_string(&creds).unwrap();
-        let deserialized: Credentials = serde_json::from_str(&json).unwrap();
-        assert_eq!(creds, deserialized);
+        assert_eq!(credentials.api_keys[0].expose_secret(), key);
+    }
+
+    #[test]
+    fn a_short_key_is_rejected() {
+        let error = serde_json::from_str::<Credentials>(r#"{"api_keys": ["short"]}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("at least 32 characters"), "{error}");
     }
 
     #[test]

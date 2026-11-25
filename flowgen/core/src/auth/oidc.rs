@@ -3,9 +3,10 @@
 //! Discovers JWKS endpoint from the OpenID Connect discovery document,
 //! then delegates JWT validation to the JWT provider.
 
-use super::jwt::{fetch_jwks, JwtConfig, JwtProvider};
+use super::jwt::{default_jwks_refresh, JwtConfig, JwtProvider};
 use super::{AuthError, AuthProvider, UserContext};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use tracing::info;
 
 /// OIDC provider configuration.
@@ -20,6 +21,22 @@ pub struct OidcConfig {
     /// Claim name to extract as user_id (default: "sub").
     #[serde(default = "default_user_id_claim")]
     pub user_id_claim: String,
+    /// How long after fetching the provider's keys a token signed with a key
+    /// they lack makes them fetch again, e.g. `5m`.
+    #[serde(default = "default_jwks_refresh", with = "humantime_serde")]
+    pub jwks_refresh: Duration,
+}
+
+impl OidcConfig {
+    /// Tokens of `issuer_url` for `audience`, with every other setting at its default.
+    pub fn new(issuer_url: String, audience: Option<String>) -> Self {
+        Self {
+            issuer_url,
+            audience,
+            user_id_claim: default_user_id_claim(),
+            jwks_refresh: default_jwks_refresh(),
+        }
+    }
 }
 
 fn default_user_id_claim() -> String {
@@ -60,15 +77,13 @@ impl OidcProvider {
             "OIDC discovery complete"
         );
 
-        // Verify the discovered JWKS endpoint is reachable.
-        let _jwks = fetch_jwks(&discovery.jwks_uri).await?;
-
         let jwt_config = JwtConfig {
             secret: None,
             jwks_url: Some(discovery.jwks_uri),
             audience: config.audience,
             issuer: Some(discovery.issuer),
             user_id_claim: config.user_id_claim,
+            jwks_refresh: config.jwks_refresh,
         };
 
         let jwt_provider = JwtProvider::new(jwt_config).await?;
@@ -90,11 +105,10 @@ mod tests {
 
     #[test]
     fn test_oidc_config_serialization() {
-        let config = OidcConfig {
-            issuer_url: "https://auth.example.com/realms/test".to_string(),
-            audience: Some("my-app".to_string()),
-            user_id_claim: "sub".to_string(),
-        };
+        let config = OidcConfig::new(
+            "https://auth.example.com/realms/test".to_string(),
+            Some("my-app".to_string()),
+        );
         let json = serde_json::to_string(&config).unwrap();
         let deserialized: OidcConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(config, deserialized);

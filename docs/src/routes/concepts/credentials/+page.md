@@ -10,8 +10,8 @@ Every task that reaches an external system takes a `credentials_path`, and each 
 |---|---|---|
 | HTTP and MCP clients, such as `http_request` and `ai_completion` `mcp_servers` | `HttpCredentials` (bearer / basic / OAuth 2.0 client credentials) | The outgoing HTTP request header. |
 | HTTP servers, such as `http_endpoint` and `llm_proxy` | `HttpCredentials` (bearer / basic) | Incoming requests, checked against the expected token. |
-| `mcp_tool` | `Credentials` (`api_keys` list) | Incoming MCP calls, checked against the allowed keys. |
-| `web.auth` | `client_secret`, `cookie_secret` | The web UI's OIDC login. |
+| `mcp_tool` | `Credentials` (`api_keys` list, each at least 32 characters) | Incoming MCP calls, checked against the allowed keys. |
+| `auth` | `client_secret`, `cookie_secret` | The web UI's OIDC login. |
 
 The format details live on each task's documentation page. This page covers what is shared.
 
@@ -25,7 +25,7 @@ Credentials live in JSON files for three reasons:
 
 If you need to inject secrets at deploy time without writing them to disk, use a secrets-management sidecar (External Secrets, Vault Agent, Sealed Secrets) to materialise the JSON file at the configured path.
 
-Any config key can also be set from the environment — `APP_` prefixes the path and `__` separates each level, so `APP_WEB__AUTH__CLIENT_SECRET` sets `web.auth.client_secret`. That covers the application's own config; task credentials stay in files, for the reasons above.
+Any config key can also be set from the environment — `APP_` prefixes the path and `__` separates each level, so `APP_AUTH__CLIENT_SECRET` sets `auth.client_secret`. That covers the application's own config; task credentials stay in files, for the reasons above.
 
 ## HTTP credentials
 
@@ -111,7 +111,7 @@ Individual `http_endpoint` tasks override the shared default by setting their ow
 
 `credentials_path` authenticates the task itself (e.g., the bearer token for incoming webhook requests). User-level authentication — JWT, OIDC, session tokens — happens via the server's `auth` configuration. See [Authentication](/docs/flowgen/concepts/auth).
 
-The web UI's own OIDC secrets follow this same file convention: `web.auth.credentials_path` takes a JSON file with `client_secret` and `cookie_secret`.
+The web UI's own OIDC secrets follow this same file convention: `auth.credentials_path` takes a JSON file with `client_secret` and `cookie_secret`.
 
 The two compose: a webhook can require a shared secret (via `credentials_path`) **and** a user-level JWT (via `auth.required: true`). Both checks must pass.
 

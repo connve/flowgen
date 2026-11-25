@@ -24,7 +24,6 @@ schemars = { workspace = true }
 tonic = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
-bincode = { workspace = true }
 arrow = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }

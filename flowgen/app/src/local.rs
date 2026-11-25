@@ -438,6 +438,7 @@ pub fn defaults(root: &Path) -> AppConfig {
             }),
             ..WebOptions::default()
         }),
+        auth: None,
         health: Default::default(),
         retry: None,
         telemetry: Some(TelemetryOptions {

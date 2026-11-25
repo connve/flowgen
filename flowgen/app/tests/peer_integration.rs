@@ -242,6 +242,7 @@ fn app_config_with_cache(url: String) -> flowgen::config::AppConfig {
         mcp_server: None,
         ai_gateway: None,
         web: None,
+        auth: None,
         health: Default::default(),
         retry: None,
         telemetry: None,

@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.160.0
+
+### Breaking
+
+- `web.auth` is now the top-level `auth`, used by every server without its own.
+- The MCP server with an OIDC provider requires an API key or a token.
+- MCP API keys are at least 32 characters.
+- `on_behalf_of_user` forwards the access token; everyone signs in once more.
+- Flowgen Agent with `auth` needs `web.agents.on_behalf_of_user`.
+
+### Added
+
+- MCP clients sign in through the OIDC provider.
+- `auth.audience`.
+- `jwks_refresh` on `jwt` and `oidc` providers.
+- A warning for an `on_behalf_of_user` MCP server outside the instance.
+
+### Changed
+
+- `on_behalf_of_user` without a signed-in user calls the server without a token.
+- An unreachable auth provider at startup makes its server refuse tokens; flows keep running.
+- MCP API keys are compared in constant time.
+- The avatar opens a menu with the user's name and Sign out.
+- Removed tasks in a change's preview are red.
+
+### Fixed
+
+- A new identity provider signing key is picked up without a restart.
+- Login cookies get a fresh nonce in forked processes (cookie 0.18.3, RUSTSEC-2026-0594).
+- `on_behalf_of_user` without a signed-in user fails without retries.
+- The resources list shows the size of resources in the cache.
+- With the `remote` telemetry backend, spans reach the OTLP collector, and every `task.handle` starts its own trace with the `flow` and `task` attributes.
+
 ## 0.159.0
 
 ### Added

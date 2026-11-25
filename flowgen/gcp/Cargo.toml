@@ -13,7 +13,6 @@ path = "src/lib.rs"
 [dependencies]
 flowgen_core = { path = "../core" }
 google-cloud-bigquery = { workspace = true }
-google-cloud-gax = { workspace = true }
 gcloud-auth = { workspace = true }
 gcloud-gax = { workspace = true }
 gcloud-googleapis = { workspace = true }

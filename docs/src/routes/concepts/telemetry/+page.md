@@ -40,22 +40,24 @@ Omitting the whole `telemetry` block is equivalent to `enabled: false`.
 
 ### Traces
 
-Every task handler invocation produces a span. The span hierarchy mirrors the flow's task wiring: an event entering a source task creates a root span, and each downstream handler creates a child span linked through tracing context propagation.
+With the `remote` backend, every task handler invocation produces a `task.handle` span that starts its own trace and carries the attributes of its flow and task. Spans a task opens while handling the event are its children.
 
 Standard span names:
 
 | Span | Where |
 |---|---|
+| `flow.run` | Flow lifecycle. One per flow per worker tenure. |
 | `task.run` | Task lifecycle (init + event loop). One per task per worker tenure. |
 | `task.handle` | A single event handler invocation. One per processed event per task. |
 | `task_manager.start` | Worker-level task manager startup. |
 | `task_manager.register` | Task registration. |
 | `task_manager.shutdown` | Graceful shutdown. |
 
-Standard span attributes on `task.handle` and `task.run`:
+Standard span attributes on `task.handle`:
 
 | Attribute | Description |
 |---|---|
+| `flow` | Flow identity. |
 | `task` | Task name (from YAML). |
 | `task_id` | Index in the flow's task list. |
 | `task_type` | Task type (`script`, `http_request`, etc.). |
@@ -97,7 +99,7 @@ If the token leaks, replace it:
 curl -X POST https://flowgen.example.com/flowgen/api/cluster/token
 ```
 
-With `web.auth` configured, the request needs a signed-in session like the rest of `/api`; without it, anyone who can reach the web UI can call it. Deleting the `cluster.token` key from the system cache bucket has the same effect: the next pod to need it generates a new one.
+With `auth` configured, the request needs a signed-in session like the rest of `/api`; without it, anyone who can reach the web UI can call it. Deleting the `cluster.token` key from the system cache bucket has the same effect: the next pod to need it generates a new one.
 
 Every pod switches to the new token within 30 seconds. Until then, some pods may miss others' logs and counters, and Monitor → Pods shows `Rejected the cluster token` for them. The old token is rejected as soon as a pod has read the new one.
 

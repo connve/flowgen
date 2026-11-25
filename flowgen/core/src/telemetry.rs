@@ -10,12 +10,20 @@
 pub mod cluster;
 pub mod query;
 
+use crate::flow::activity_layer::TASK_HANDLE_SPAN;
+use opentelemetry::trace::TracerProvider as _;
 use opentelemetry::KeyValue;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
+pub use opentelemetry_sdk::trace::Tracer;
 use opentelemetry_sdk::Resource;
 use std::sync::Arc;
 use std::time::Duration;
+use tracing::span;
+use tracing_opentelemetry::{OtelData, PreSampledTracer};
+use tracing_subscriber::layer::Context;
+use tracing_subscriber::registry::LookupSpan;
+use tracing_subscriber::Layer;
 
 /// Default per-flow log ring buffer capacity.
 pub const MEMORY_LOG_CAPACITY: usize = 1024;
@@ -125,6 +133,61 @@ pub struct Telemetry {
     pub logs_store: Option<Arc<dyn query::LogsStore>>,
     /// Writer the tracing `fmt` layer feeds a copy of every JSON log line.
     pub logs_writer: Option<query::MemoryLogsStoreWriter>,
+    /// The remote backend's tracer, which [`spans_layer`] sends spans to.
+    pub tracer: Option<Tracer>,
+}
+
+/// Sends `tracing` spans, such as `flow.run` and `task.handle`, to `tracer`
+/// as OpenTelemetry spans.
+pub fn spans_layer<S>(tracer: Tracer) -> impl Layer<S>
+where
+    S: tracing::Subscriber + for<'span> LookupSpan<'span>,
+{
+    tracing_opentelemetry::layer()
+        .with_tracer(tracer.clone())
+        .and_then(HandleTraces { tracer })
+}
+
+/// Starts a trace at every `task.handle`, carrying the attributes of its
+/// `flow.run` and `task.run`. Those last as long as the flow, so a trace
+/// rooted in them would only end when the flow stops.
+struct HandleTraces {
+    tracer: Tracer,
+}
+
+impl<S> Layer<S> for HandleTraces
+where
+    S: tracing::Subscriber + for<'span> LookupSpan<'span>,
+{
+    fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, ctx: Context<'_, S>) {
+        if attrs.metadata().name() != TASK_HANDLE_SPAN {
+            return;
+        }
+        let Some(span) = ctx.span(id) else {
+            return;
+        };
+
+        let mut inherited = Vec::new();
+        for ancestor in span.scope().skip(1) {
+            if let Some(data) = ancestor.extensions().get::<OtelData>() {
+                inherited.extend(data.builder.attributes.iter().flatten().cloned());
+            }
+        }
+
+        let mut extensions = span.extensions_mut();
+        let Some(data) = extensions.get_mut::<OtelData>() else {
+            return;
+        };
+        data.parent_cx = opentelemetry::Context::new();
+        data.builder.sampling_result = None;
+        data.builder.trace_id = Some(self.tracer.new_trace_id());
+        let attributes = data.builder.attributes.get_or_insert_with(Vec::new);
+        for attribute in inherited {
+            if !attributes.iter().any(|own| own.key == attribute.key) {
+                attributes.push(attribute);
+            }
+        }
+    }
 }
 
 /// Builds the telemetry providers for the selected backend and
@@ -179,6 +242,7 @@ fn build_remote(
         .with_resource(resource)
         .build();
     opentelemetry::global::set_tracer_provider(tracer_provider.clone());
+    let tracer = tracer_provider.tracer(config.service_name.clone());
 
     Ok(Telemetry {
         guard: TelemetryGuard {
@@ -187,6 +251,7 @@ fn build_remote(
         },
         logs_store: None,
         logs_writer: None,
+        tracer: Some(tracer),
     })
 }
 
@@ -199,6 +264,7 @@ fn build_memory(logs_per_flow: usize, _metrics_per_flow: usize) -> Telemetry {
         },
         logs_store: Some(Arc::new(query_handle)),
         logs_writer: Some(writer),
+        tracer: None,
     }
 }
 
@@ -235,6 +301,78 @@ impl Drop for TelemetryGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::future::BoxFuture;
+    use opentelemetry::trace::SpanId;
+    use opentelemetry_sdk::export::trace::{ExportResult, SpanData, SpanExporter};
+    use std::sync::Mutex;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    #[derive(Debug, Clone, Default)]
+    struct Exported(Arc<Mutex<Vec<SpanData>>>);
+
+    impl SpanExporter for Exported {
+        fn export(&mut self, batch: Vec<SpanData>) -> BoxFuture<'static, ExportResult> {
+            if let Ok(mut spans) = self.0.lock() {
+                spans.extend(batch);
+            }
+            Box::pin(std::future::ready(Ok(())))
+        }
+    }
+
+    fn attribute<'a>(span: &'a SpanData, key: &str) -> Option<&'a opentelemetry::Value> {
+        span.attributes
+            .iter()
+            .find(|attribute| attribute.key.as_str() == key)
+            .map(|attribute| &attribute.value)
+    }
+
+    #[test]
+    fn every_task_handle_starts_a_trace_with_its_flow_and_task() {
+        let exported = Exported::default();
+        let provider = opentelemetry_sdk::trace::TracerProvider::builder()
+            .with_simple_exporter(exported.clone())
+            .build();
+        let subscriber = tracing_subscriber::registry().with(spans_layer(provider.tracer("test")));
+
+        tracing::subscriber::with_default(subscriber, || {
+            let _flow = tracing::info_span!("flow.run", flow = "orders").entered();
+            let _task = tracing::info_span!("task.run", task = "fetch").entered();
+            for _ in 0..2 {
+                let _handle = tracing::info_span!("task.handle").entered();
+                let _request = tracing::info_span!("request").entered();
+            }
+        });
+
+        let spans = exported.0.lock().expect("exporter lock").clone();
+        let names: Vec<&str> = spans.iter().map(|span| span.name.as_ref()).collect();
+        assert_eq!(
+            names,
+            [
+                "request",
+                "task.handle",
+                "request",
+                "task.handle",
+                "task.run",
+                "flow.run"
+            ]
+        );
+        let (first, second) = (&spans[1], &spans[3]);
+        for (request, handle) in [(&spans[0], first), (&spans[2], second)] {
+            assert_eq!(handle.parent_span_id, SpanId::INVALID);
+            assert_eq!(request.parent_span_id, handle.span_context.span_id());
+            assert_eq!(
+                request.span_context.trace_id(),
+                handle.span_context.trace_id()
+            );
+            assert_eq!(attribute(handle, "flow"), Some(&"orders".into()));
+            assert_eq!(attribute(handle, "task"), Some(&"fetch".into()));
+        }
+        assert_ne!(
+            first.span_context.trace_id(),
+            second.span_context.trace_id()
+        );
+        assert_eq!(attribute(&spans[0], "task"), None);
+    }
 
     #[test]
     fn test_telemetry_config_default_backend_is_memory() {

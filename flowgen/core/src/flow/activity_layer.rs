@@ -23,7 +23,7 @@ use tracing_subscriber::Layer;
 
 use crate::flow::activity::{now_ms, ActivityLevel, MetricsStore};
 
-const TASK_HANDLE_SPAN: &str = "task.handle";
+pub(crate) const TASK_HANDLE_SPAN: &str = "task.handle";
 const FLOW_RUN_SPAN: &str = "flow.run";
 const TASK_RUN_SPAN: &str = "task.run";
 

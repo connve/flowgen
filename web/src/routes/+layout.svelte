@@ -218,15 +218,29 @@
 		</div>
 
 		{#if auth.user}
-			<div class="tooltip tooltip-left" data-tip={m.user_sign_out({ name: displayName(auth.user) })}>
-				<a
-					href={logoutUrl()}
-					data-sveltekit-reload
+			<div class="dropdown dropdown-end">
+				<button
+					type="button"
+					tabindex="0"
 					class="flex h-8 w-8 items-center justify-center rounded-full bg-base-200 text-base-content/70 transition-colors hover:text-base-content"
-					aria-label={m.user_sign_out({ name: displayName(auth.user) })}
+					aria-label={m.user_account({ name: displayName(auth.user) })}
 				>
 					<Icon icon="tabler:user-check" class="h-6 w-6" />
-				</a>
+				</button>
+				<div
+					tabindex="-1"
+					class="dropdown-content z-10 mt-1 w-56 rounded-md border border-base-200 bg-base-100 p-1 text-sm shadow-lg"
+				>
+					<div class="truncate px-3 py-1.5 text-base-content/50">{displayName(auth.user)}</div>
+					<a
+						href={logoutUrl()}
+						data-sveltekit-reload
+						class="flex h-9 items-center gap-2 rounded-md px-3 hover:bg-base-200"
+					>
+						<Icon icon="tabler:logout" class="h-4 w-4" />
+						{m.user_sign_out()}
+					</a>
+				</div>
 			</div>
 		{/if}
 	{/if}

@@ -542,7 +542,7 @@ impl HttpCredentials {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebCredentials {
-    /// OIDC client secret, for `web.auth.client_secret`.
+    /// OIDC client secret, for `auth.client_secret`.
     #[serde(default)]
     pub client_secret: Option<SecretString>,
     /// Key encrypting the browser session cookie, for `web.cookie_secret`.
@@ -554,6 +554,9 @@ pub struct WebCredentials {
 pub async fn load_web_credentials(path: &Path) -> Result<WebCredentials, Error> {
     load_credentials(path).await
 }
+
+/// Shortest API key flowgen accepts as a bearer, so a key can't be guessed.
+pub const MIN_API_KEY_LEN: usize = 32;
 
 /// Machine keys accepted by the web API, as stored on disk.
 ///

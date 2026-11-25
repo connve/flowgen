@@ -1,12 +1,32 @@
 # Authentication
 
-Flowgen supports user-level authentication for HTTP-facing tasks (webhooks, AI gateway, MCP server), and a separate interactive OIDC login for the web UI. Task-facing auth is configured once on each server section and shared across every HTTP-facing task on that server. When enabled, the resolved user identity is injected into the event metadata as `event.meta.auth`, where downstream tasks can read it for routing or audit.
+Flowgen signs people in with one OpenID Connect provider, the top-level `auth`: the web UI logs in through it, and the HTTP server, MCP server and AI gateway accept its tokens. A request with a valid token carries the user in `event.meta.auth`, for routing or audit.
 
 User-level auth is **separate** from `credentials_path` — see [Credentials](/docs/flowgen/concepts/credentials) for the distinction.
 
+## Identity provider
+
+```yaml
+auth:
+  issuer_url: "https://auth.example.com"
+  client_id: "my-client-id"
+  credentials_path: "/etc/flowgen/credentials/web.json"
+  redirect_uri: "https://example.com/flowgen/auth/callback"
+  # audience: "api://example"
+```
+
+Servers without their own `auth` accept the provider's tokens for `audience` (default `client_id`); set it when access tokens carry another audience.
+
+| Server | Requires a token |
+|---|---|
+| `web` | Always, through the login session. |
+| `mcp_server` | Always, unless the request carries an API key. Clients without either are sent to [sign in](/docs/flowgen/ai/mcp#sign-in). |
+| `http_server` | Only on endpoints with `auth.required: true`. |
+| `ai_gateway` | Only on `llm_proxy` tasks with `auth.required: true`. |
+
 ## Providers
 
-Three provider types, configured under `http_server.auth` (same shape works on `mcp_server.auth` and `ai_gateway.auth`):
+A server can set its own `auth` instead, with one of three provider types, configured under `http_server.auth` (same shape works on `mcp_server.auth` and `ai_gateway.auth`):
 
 | Provider | What it validates | When to use |
 |---|---|---|
@@ -23,12 +43,12 @@ http_server:
     type: jwt
     secret: "your-hmac-secret"        # for HS256 (mutually exclusive with jwks_url)
     # jwks_url: "https://idp.example.com/.well-known/jwks.json"   # for RS256/ES256
-    audience: "flowgen-prod"          # optional: reject tokens with a different aud
+    audience: "my-api"                # optional: reject tokens with a different aud
     issuer: "https://auth.example.com" # optional: reject tokens with a different iss
     user_id_claim: "sub"              # optional: defaults to "sub"
 ```
 
-Supply either `secret` (symmetric) or `jwks_url` (asymmetric), not both. With `jwks_url`, flowgen fetches the JWKS at startup and matches incoming tokens by their `kid` header.
+Supply either `secret` (symmetric) or `jwks_url` (asymmetric), not both. With `jwks_url`, flowgen fetches the JWKS at startup and matches incoming tokens by their `kid` header. A token with an unknown `kid` refetches the JWKS, at most once per `jwks_refresh` (default `5m`).
 
 The `secret` is held as a redacted value: it never appears in logs or the System view (config renders it as `"***"`). Token validation uses the real value.
 
@@ -40,11 +60,13 @@ http_server:
   auth:
     type: oidc
     issuer_url: "https://auth.example.com/realms/myapp"
-    audience: "flowgen-prod"
+    audience: "my-api"
     user_id_claim: "sub"
 ```
 
-Flowgen reads `{issuer_url}/.well-known/openid-configuration` at startup, extracts the JWKS endpoint, and validates incoming tokens against those keys. The provider rejects tokens whose `iss` claim does not match the discovered issuer.
+Flowgen reads `{issuer_url}/.well-known/openid-configuration` at startup, extracts the JWKS endpoint, and validates incoming tokens against those keys, refetched as for `jwt` (`jwks_refresh`). The provider rejects tokens whose `iss` claim does not match the discovered issuer.
+
+If the provider is unreachable at startup, its server refuses tokens until restart; flows keep running.
 
 ## Session provider
 
@@ -139,7 +161,7 @@ The `Authorization` header in the incoming request carries the JWT. Service-to-s
 |---|---|
 | 401 No token | Task has `auth.required: true` and no `Authorization` header was provided. |
 | 401 Invalid token | Token signature, expiration, audience, or issuer check failed. |
-| 401 Unknown key | JWKS-based JWT references a `kid` not present in the keyset. Refresh JWKS or verify the issuer. |
+| 401 Unknown key | JWKS-based JWT references a `kid` not present in the keyset, even after fetching it again. Verify the issuer. |
 | 401 Session rejected | Session validation endpoint returned non-2xx. |
 | 502 / 503 | Upstream JWKS endpoint or session validation service is unreachable. Retry by the caller. |
 
@@ -147,30 +169,30 @@ Worker logs include the specific reason at `error` level so operators can diagno
 
 ## Web UI login
 
-The token-validation providers above cover HTTP-facing tasks. The web UI (`web.enabled: true`) uses a separate, interactive OIDC login instead, configured under `web.auth`:
+The web UI (`web.enabled: true`) signs people in interactively through the [identity provider](#identity-provider):
 
 ```yaml
+auth:
+  issuer_url: "https://auth.example.com"
+  client_id: "my-client-id"
+  client_secret: "your-oidc-client-secret"
+  # Must exactly match a redirect URI registered with the IdP, and
+  # include `web.path`.
+  redirect_uri: "https://example.com/flowgen/auth/callback"
+  # extra_scopes: ["offline_access", "groups"]
+  # The provider's logout URL, ending its session too on sign-out.
+  # signout_redirect_url: "https://auth.example.com/v1/logout?post_logout_redirect_uri=https%3A%2F%2Fexample.com%2Fflowgen%2F"
+  # JSON file holding client_secret and, optionally, cookie_secret.
+  # credentials_path: "/etc/flowgen/credentials/web.json"
 web:
   enabled: true
   port: 8080
   path: "/flowgen"
-  auth:
-    issuer_url: "https://auth.example.com"
-    client_id: "flowgen-web"
-    client_secret: "your-oidc-client-secret"
-    # Must exactly match a redirect URI registered with the IdP, and
-    # include `path` above.
-    redirect_uri: "https://example.com/flowgen/auth/callback"
-    # extra_scopes: ["offline_access", "groups"]
-    # The provider's logout URL, ending its session too on sign-out.
-    # signout_redirect_url: "https://auth.example.com/v1/logout?post_logout_redirect_uri=https%3A%2F%2Fexample.com%2Fflowgen%2F"
-    # JSON file holding client_secret and, optionally, cookie_secret.
-    # credentials_path: "/etc/flowgen/credentials/web.json"
   # cookie_secret: "a long random string, at least 32 bytes"  # optional, see below
   # cookie_secure: false  # only for a plain-HTTP deployment; defaults to true
 ```
 
-Works with any standard-compliant OIDC provider — Okta, Zitadel, Auth0, or one that itself federates to an upstream identity provider (SSO broker setups look identical to flowgen, since discovery and token validation don't change).
+Works with any standard-compliant OIDC provider, including one that itself federates to an upstream identity provider: SSO broker setups look identical to flowgen, since discovery and token validation don't change.
 
 `auth` is optional; if omitted, the web UI is served unauthenticated.
 
@@ -178,7 +200,9 @@ Login cookies carry the `Secure` attribute by default, which browsers require HT
 
 ### No server-side session store
 
-Flowgen does not keep a session table. The browser's cookie *is* the session: after login, it holds the identity provider's ID and refresh tokens, encrypted so the browser can carry it but never read or forge it. Every request re-validates the token; once it expires, flowgen transparently refreshes it against the identity provider. Concurrent requests to one instance share a single refresh, so a provider that rotates refresh tokens never sees one reused. With several replicas, keep a rotation grace period at the provider, since requests landing on different replicas refresh separately.
+Flowgen does not keep a session table. The browser's cookie *is* the session: after login, it holds the identity provider's ID, access and refresh tokens, encrypted so the browser can carry it but never read or forge it. Every request re-validates the ID token; once it or the access token expires, flowgen transparently refreshes both against the identity provider. Concurrent requests to one instance share a single refresh, so a provider that rotates refresh tokens never sees one reused. With several replicas, keep a rotation grace period at the provider, since requests landing on different replicas refresh separately.
+
+The ID token stays in flowgen; `on_behalf_of_user` forwards the access token.
 
 Refreshing needs a refresh token, which most providers issue only when the `offline_access` scope is requested and the application allows the refresh token grant. Without one, the session ends when the ID token expires and the browser goes back through the identity provider, returning to the page it was on. Signing out at the identity provider is what actually revokes access — flowgen has no session state of its own to invalidate.
 
@@ -205,7 +229,7 @@ To manage the key yourself, set `cookie_secret` (at least 32 bytes). It takes pr
 
    This is the same mounted-file convention the connectors use — see [Credentials](/docs/flowgen/concepts/credentials).
 
-2. `APP_WEB__AUTH__CLIENT_SECRET` and `APP_WEB__COOKIE_SECRET` in the environment. Every config key can be overridden this way: `APP_` prefixes the path and `__` separates each level.
+2. `APP_AUTH__CLIENT_SECRET` and `APP_WEB__COOKIE_SECRET` in the environment. Every config key can be overridden this way: `APP_` prefixes the path and `__` separates each level.
 
 3. The inline values in the config file.
 

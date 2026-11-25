@@ -17,7 +17,7 @@ use tracing::Instrument;
 /// Environment overrides for any config key, layered over the config file.
 ///
 /// `APP_` prefixes the key and `__` separates each level, so
-/// `APP_WEB__AUTH__CLIENT_SECRET` sets `web.auth.client_secret`. The two
+/// `APP_WEB__COOKIE_SECRET` sets `web.cookie_secret`. The two
 /// separators differ because field names contain single underscores.
 pub fn env_source() -> config::Environment {
     config::Environment::with_prefix("APP")
@@ -54,8 +54,7 @@ pub const VERSION_ENV: &str = "FLOWGEN_VERSION";
 /// The variable a run sets, unless set already, to the address of its web server.
 pub const WEB_URL_ENV: &str = "FLOWGEN_URL";
 
-/// The variable a run sets, unless set already, to the address of its MCP server.
-pub const MCP_URL_ENV: &str = "FLOWGEN_MCP_URL";
+pub use flowgen_core::config::MCP_URL_ENV;
 
 /// The variable a run sets, unless set already, to the address of its AI gateway.
 pub const AI_GATEWAY_URL_ENV: &str = "FLOWGEN_AI_GATEWAY_URL";
@@ -519,6 +518,13 @@ pub struct AppConfig {
     pub ai_gateway: Option<AiGatewayOptions>,
     /// Optional web UI configuration for inspecting loaded flows.
     pub web: Option<WebOptions>,
+    /// The identity provider people sign in with, such as
+    /// `{ issuer_url: https://auth.example.com, client_id: my-client-id, ... }`.
+    /// The web UI logs in through it, and the HTTP server, MCP server and AI
+    /// gateway accept its tokens unless they set their own `auth`. Omit to
+    /// leave them unauthenticated.
+    #[serde(default)]
+    pub auth: Option<crate::login::LoginConfig>,
     /// Kubernetes-facing liveness/readiness listener. Independent of the
     /// API listeners so probes keep working regardless of which surfaces
     /// (http_server / mcp_server / ai_gateway / web) are enabled.
@@ -586,6 +592,11 @@ pub enum ValidationError {
     FrameAncestor { source_expression: String },
     #[error("`flows.system_exclude` entry {identity:?} is not a system flow; they are {known}")]
     UnknownSystemFlow { identity: String, known: String },
+    #[error(
+        "`mcp_server.auth` of type `oidc` needs an `audience`, so a token issued for another \
+         client is refused"
+    )]
+    McpOidcWithoutAudience,
 }
 
 impl AppConfig {
@@ -694,6 +705,15 @@ impl AppConfig {
                     identity: identity.clone(),
                     known: known.join(", "),
                 });
+            }
+        }
+        if let Some(McpServerOptions {
+            auth: Some(flowgen_core::auth::AuthConfig::Oidc(oidc)),
+            ..
+        }) = &self.mcp_server
+        {
+            if oidc.audience.is_none() {
+                return Err(ValidationError::McpOidcWithoutAudience);
             }
         }
         let Some(web) = self.web.as_ref() else {
@@ -923,7 +943,9 @@ pub struct McpServerOptions {
     /// Individual `mcp_tool` tasks can override this with their own `credentials_path`.
     pub credentials_path: Option<std::path::PathBuf>,
     /// Optional auth provider configuration for user identity resolution.
-    /// Shared across all `mcp_tool` flows on this worker.
+    /// Shared across all `mcp_tool` flows on this worker. Defaults to the
+    /// top-level `auth`. With an `oidc` provider, every request needs an API
+    /// key or a token, and clients without one are sent to sign in.
     pub auth: Option<flowgen_core::auth::AuthConfig>,
     /// URI scheme used when auto-generating `mcp_resource` URIs of the form
     /// `<scheme>://<flow_name>/<name>`. White-label deployments override
@@ -931,6 +953,11 @@ pub struct McpServerOptions {
     /// deployment's brand instead of `flowgen`.
     #[serde(default = "default_resource_uri_scheme")]
     pub resource_uri_scheme: String,
+    /// The address MCP clients reach this server at through a proxy, such as
+    /// `https://mcp.example.com`, which tells them where to sign in. Without
+    /// one, it is the address the client used.
+    #[serde(default)]
+    pub public_url: Option<url::Url>,
 }
 
 impl Default for McpServerOptions {
@@ -942,6 +969,7 @@ impl Default for McpServerOptions {
             credentials_path: None,
             auth: None,
             resource_uri_scheme: default_resource_uri_scheme(),
+            public_url: None,
         }
     }
 }
@@ -1060,10 +1088,6 @@ pub struct WebOptions {
     /// gateway for the Agents tab, such as a key the gateway requires.
     #[serde(default)]
     pub headers: std::collections::HashMap<String, String>,
-    /// OIDC login for the web UI (Okta, Zitadel, Auth0, or any
-    /// standard-compliant IdP). Omit to leave the web UI unauthenticated.
-    #[serde(default)]
-    pub auth: Option<crate::login::LoginConfig>,
     /// Key used to encrypt the browser session cookie (holds the IdP's
     /// tokens — flowgen keeps no server-side session store, see
     /// `crate::login`). At least 32 bytes. Unset, flowgen generates the key
@@ -1141,7 +1165,6 @@ impl Default for WebOptions {
             ai_gateway_url: None,
             agents: None,
             headers: Default::default(),
-            auth: None,
             cookie_secret: None,
             cookie_secure: default_cookie_secure(),
             api_credentials_path: None,
@@ -1170,7 +1193,6 @@ impl PartialEq for WebOptions {
             && self.ai_gateway_url == other.ai_gateway_url
             && self.agents == other.agents
             && self.headers == other.headers
-            && self.auth == other.auth
             && self.cookie_secret.is_some() == other.cookie_secret.is_some()
             && self.cookie_secure == other.cookie_secure
             && self.api_credentials_path == other.api_credentials_path
@@ -1306,7 +1328,7 @@ pub struct AgentsOptions {
     /// this cache.
     #[serde(default = "default_session_history_ttl", with = "humantime_serde")]
     pub session_history_ttl: Option<Duration>,
-    /// Calls the AI gateway as the signed-in user, with their login token as the bearer.
+    /// Calls the AI gateway as the signed-in user, with their access token as the bearer.
     #[serde(default)]
     pub on_behalf_of_user: bool,
     /// Cache key prefix for sessions, read state and folders; a flow
@@ -1647,7 +1669,7 @@ mod tests {
                 "jwks",
             ),
             (
-                "flows: {}\nweb:\n  enabled: true\n  auth:\n    issuer_url: https://a\n    client_id: c\n    redirect_uri: https://b\n    scopes: [x]\n",
+                "flows: {}\nauth:\n  issuer_url: https://a\n  client_id: c\n  redirect_uri: https://b\n  scopes: [x]\n",
                 "scopes",
             ),
         ];
@@ -1915,6 +1937,7 @@ mod tests {
             mcp_server: None,
             ai_gateway: None,
             web: None,
+            auth: None,
             health: Default::default(),
             retry: None,
             telemetry: None,
@@ -1948,6 +1971,7 @@ mod tests {
             mcp_server: None,
             ai_gateway: None,
             web: None,
+            auth: None,
             health: Default::default(),
             retry: None,
             telemetry: None,
@@ -1990,6 +2014,7 @@ mod tests {
             mcp_server: None,
             ai_gateway: None,
             web: None,
+            auth: None,
             health: Default::default(),
             retry: None,
             telemetry: None,
@@ -2028,6 +2053,7 @@ mod tests {
             mcp_server: None,
             ai_gateway: None,
             web: None,
+            auth: None,
             health: Default::default(),
             retry: None,
             telemetry: None,
@@ -2081,7 +2107,7 @@ flows:
     #[test]
     fn env_overrides_a_nested_key_and_leaves_the_rest_of_the_file() {
         unsafe {
-            std::env::set_var("APP_WEB__AUTH__CLIENT_SECRET", "from-env");
+            std::env::set_var("APP_AUTH__CLIENT_SECRET", "from-env");
             std::env::set_var("APP_WEB__PORT", "9999");
         }
         let built = config::Config::builder()
@@ -2090,11 +2116,11 @@ flows:
 web:
   enabled: true
   port: 8080
-  auth:
-    issuer_url: "https://auth.example.com"
-    client_id: "flowgen-web"
-    client_secret: "from-file"
-    redirect_uri: "https://example.com/flowgen/auth/callback"
+auth:
+  issuer_url: "https://auth.example.com"
+  client_id: "flowgen-web"
+  client_secret: "from-file"
+  redirect_uri: "https://example.com/flowgen/auth/callback"
 flows:
   path: "/flows"
 "#,
@@ -2104,13 +2130,13 @@ flows:
             .build()
             .expect("builds");
         unsafe {
-            std::env::remove_var("APP_WEB__AUTH__CLIENT_SECRET");
+            std::env::remove_var("APP_AUTH__CLIENT_SECRET");
             std::env::remove_var("APP_WEB__PORT");
         }
 
         let config: AppConfig = built.try_deserialize().expect("deserializes");
         let web = config.web.expect("web present");
-        let auth = web.auth.expect("auth present");
+        let auth = config.auth.expect("auth present");
         use secrecy::ExposeSecret;
         assert_eq!(
             auth.client_secret
@@ -2351,6 +2377,7 @@ flows:
             mcp_server: None,
             ai_gateway: None,
             web: None,
+            auth: None,
             health: Default::default(),
             retry: None,
             telemetry: None,
@@ -2472,6 +2499,7 @@ flows:
             mcp_server: None,
             ai_gateway: None,
             web: None,
+            auth: None,
             health: Default::default(),
             retry: None,
             telemetry: Some(TelemetryOptions {
@@ -2497,5 +2525,29 @@ flows:
         ));
         assert_eq!(telemetry.service_name, "flowgen");
         assert_eq!(telemetry.metrics_export_interval, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn an_mcp_oidc_provider_needs_an_audience() {
+        let config = |auth: serde_json::Value| -> AppConfig {
+            serde_json::from_value(serde_json::json!({
+                "flows": {},
+                "mcp_server": { "enabled": true, "auth": auth }
+            }))
+            .unwrap()
+        };
+        let issuer = "https://idm.example.com/oauth2/openid/flowgen";
+
+        assert!(matches!(
+            config(serde_json::json!({"type": "oidc", "issuer_url": issuer})).validate(),
+            Err(ValidationError::McpOidcWithoutAudience)
+        ));
+        assert!(config(serde_json::json!({
+            "type": "oidc",
+            "issuer_url": issuer,
+            "audience": "flowgen"
+        }))
+        .validate()
+        .is_ok());
     }
 }

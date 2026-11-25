@@ -28,5 +28,7 @@ flow:
         static_context:
           - resource: system/flowgen_agent/basics.md
         mcp_servers:
+          # As the signed-in user, whose token the MCP server needs when `auth` is set.
           - url: "{{env.FLOWGEN_MCP_URL}}/system/flowgen_agent"
+            on_behalf_of_user: true
         stream: true
