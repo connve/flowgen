@@ -127,7 +127,7 @@ flowgen:
     existingConfigMap: ""
     # The app config, written to `config.yaml`. Set any key to change it; see
     # https://connve.com/docs/flowgen/concepts/configuration. `APP_` variables
-    # in `env` override single keys too, e.g. APP_WEB__AUTH__CLIENT_SECRET.
+    # in `env` override single keys too, e.g. APP_AUTH__CLIENT_SECRET.
     settings:
       cache:
         type: nats
@@ -154,11 +154,11 @@ flowgen:
       # ai_gateway:
       #   enabled: true
       #   port: 3002
+      # auth: { ... }
       # web:
       #   enabled: true
       #   port: 8080
       #   path: /flowgen
-      #   auth: { ... }
       #   authoring:
       #     enabled: true
       #   agents:
@@ -188,7 +188,7 @@ flowgen:
   # tools, and the hubs. The values become the variables the flows read; see
   # https://connve.com/docs/flowgen/concepts/authoring#lifecycle-flows.
   # Approved changes are committed as who approved them, so `config.settings`
-  # needs `web.auth` and `web.authoring`; Flowgen Agent needs `mcp_server`,
+  # needs `auth` and `web.authoring`; Flowgen Agent needs `mcp_server`,
   # `ai_gateway` and `web.agents`.
   systemFlows:
     enabled: false

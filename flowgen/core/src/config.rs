@@ -6,6 +6,9 @@
 use handlebars::Handlebars;
 use serde::{de::DeserializeOwned, Serialize};
 
+/// The variable a run sets, unless set already, to the address of its MCP server.
+pub const MCP_URL_ENV: &str = "FLOWGEN_MCP_URL";
+
 /// Errors that can occur during configuration rendering operations.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]

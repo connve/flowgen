@@ -163,7 +163,7 @@ The agent connects to MCP servers, discovers tools, and can call them during com
     prompt: "{{event.data.task}}"
     max_turns: 5
     mcp_servers:
-      - url: "http://localhost:3001/mcp"
+      - url: "http://127.0.0.1:3001/mcp/v1"
       - url: "http://external-tools:8080/mcp"
 ```
 
@@ -192,14 +192,14 @@ Each entry also accepts `headers`, sent with every request to that MCP server, s
 
 ```yaml
     mcp_servers:
-      - url: "http://localhost:3001/mcp/v1/sales"
+      - url: "http://127.0.0.1:3001/mcp/v1/sales"
 ```
 
 `allowed_tools` names the tools of that server the agent uses; the others stay out of the model's tool list. Without it the agent gets every tool the server lists:
 
 ```yaml
     mcp_servers:
-      - url: "http://localhost:3001/mcp"
+      - url: "http://127.0.0.1:3001/mcp/v1"
         allowed_tools: [web_search, read_page]
 ```
 
@@ -207,7 +207,7 @@ When two servers give the agent a tool of the same name, the agent keeps the fir
 
 ```yaml
     mcp_servers:
-      - url: "http://localhost:3001/mcp/v1/notes"
+      - url: "http://127.0.0.1:3001/mcp/v1/notes"
       - url: "https://mcp.example.com/mcp"
         prefix: notes_
 ```
@@ -220,14 +220,14 @@ With `on_behalf_of_user: true`, the agent calls the server as the user who sent 
 
 ```yaml
     mcp_servers:
-      - url: "http://localhost:3001/mcp"
+      - url: "http://127.0.0.1:3001/mcp/v1"
         on_behalf_of_user: true
 ```
 
 - The token is the bearer that an `llm_proxy`, `http_endpoint`, or `mcp_tool` verified with the worker's `auth` provider. This includes Agents chat requests when [`web.agents.on_behalf_of_user`](/docs/flowgen/concepts/configuration) is set. A `buffer` keeps it when every event in a batch comes from the same user.
-- Set it only for servers that trust your identity provider, such as flowgen's own. For web UI tokens, the server's `auth` is `oidc` with the issuer of `web.auth` and its `client_id` as the audience.
+- Set it only for servers that accept tokens from the same [`auth`](/docs/flowgen/concepts/auth), such as this instance's MCP server; the agent warns at startup about any other.
 - Setting it together with `credentials_path` fails the task at startup.
-- A request without a signed-in user, or whose token the server answers with 401 or 403, fails without a retry.
+- Without a signed-in user, the call carries no token. A 401 or 403 from the server fails the request without a retry.
 - Each user gets their own connections and agent client, closed after 30 minutes without a request. A new token opens new connections. A request already running keeps its own until it finishes.
 
 ## Tool-use passthrough

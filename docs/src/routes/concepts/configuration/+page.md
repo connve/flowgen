@@ -21,7 +21,7 @@ credentials:       # Folder and age key of encrypted credentials (optional).
 
 Only `flows` is required. Every other section has working defaults. A key no setting knows fails the start with an error naming it.
 
-An `APP_` environment variable sets a key that takes a single value, with `__` between levels: `APP_WEB__AUTH__CLIENT_SECRET` sets `web.auth.client_secret`. Lists are set in the file. A variable without `__` that matches no top-level setting is ignored, since the platform may set `APP_` variables of its own; a key inside a section must match a setting.
+An `APP_` environment variable sets a key that takes a single value, with `__` between levels: `APP_AUTH__CLIENT_SECRET` sets `auth.client_secret`. Lists are set in the file. A variable without `__` that matches no top-level setting is ignored, since the platform may set `APP_` variables of its own; a key inside a section must match a setting.
 
 ## Minimal config
 
@@ -79,6 +79,12 @@ web:
   enabled: true
   port: 8080
   path: /flowgen
+
+auth:
+  issuer_url: https://auth.example.com
+  client_id: my-client-id
+  credentials_path: /etc/flowgen/credentials/web.json
+  redirect_uri: https://example.com/flowgen/auth/callback
 
 health:
   enabled: true
@@ -161,7 +167,7 @@ HTTP server that hosts every `http_endpoint` route plus health/metrics endpoints
 | `port` | int | `3000` | Listening port. |
 | `path` | string | | Optional path prefix applied to every registered route. |
 | `credentials_path` | string | | Shared bearer/basic credentials. Tasks override per-route. See [Credentials](/docs/flowgen/concepts/credentials). |
-| `auth` | object | | User-level authentication provider (JWT, OIDC, session). See [Authentication](/docs/flowgen/concepts/auth). |
+| `auth` | object | top-level `auth` | User-level authentication provider (JWT, OIDC, session). See [Authentication](/docs/flowgen/concepts/auth). |
 
 ## `mcp_server`
 
@@ -173,8 +179,9 @@ MCP server for exposing `mcp_tool`, `mcp_resource`, and `mcp_prompt` tasks to LL
 | `port` | int | `3001` | Listening port. |
 | `path` | string | `/mcp/v1` | MCP endpoint path. |
 | `credentials_path` | string | | Shared API key credentials. Individual tools can override. |
-| `auth` | object | | User-level authentication provider (JWT, OIDC, session). See [Authentication](/docs/flowgen/concepts/auth). |
+| `auth` | object | top-level `auth` | User-level authentication provider (JWT, OIDC, session). With `oidc`, needs an `audience` and requires a key or token on every request. See [Sign-in](/docs/flowgen/ai/mcp#sign-in). |
 | `resource_uri_scheme` | string | `flowgen` | Scheme used when auto-generating `mcp_resource` URIs of the form `<scheme>://<flow_name>/<name>`. White-label deployments override this. |
+| `public_url` | string | the address the client used | The address MCP clients reach the server at through a proxy, e.g. `https://mcp.example.com`. |
 
 ## `ai_gateway`
 
@@ -186,7 +193,7 @@ OpenAI-compatible LLM gateway that serves every registered `llm_proxy` flow.
 | `port` | int | `3002` | Listening port, independent of the webhook HTTP server. |
 | `path` | string | `/v1` | Path prefix for AI gateway routes. The chat completions endpoint is served at `<path>/chat/completions`. |
 | `credentials_path` | string | | Path to global credentials file. Individual `llm_proxy` tasks can override. |
-| `auth` | object | | User-level authentication provider (JWT, OIDC, session). See [Authentication](/docs/flowgen/concepts/auth). |
+| `auth` | object | top-level `auth` | User-level authentication provider (JWT, OIDC, session). See [Authentication](/docs/flowgen/concepts/auth). |
 
 ## `web`
 
@@ -203,7 +210,7 @@ Embedded web dashboard and JSON API.
 | `agents.cache_prefix` | string | `agents` | Cache key prefix for sessions, read state and folders: segments of letters, digits, `-` and `_` joined by `.`. A flow opens a session under `<cache_prefix>.sessions.`. |
 | `agents.reply_save_interval` | duration | `3s` | How often a reply in progress is saved; above 0. A pending reply not saved for ten times this long is shown as interrupted. |
 | `agents.reply_idle_timeout` | duration | `10m` | How long a reply may wait for the AI gateway's next output before it fails; above 0. |
-| `agents.on_behalf_of_user` | bool | `false` | Calls the AI gateway as the signed-in user, with their login token as the bearer. The gateway's `auth` must be `oidc` with the issuer of `web.auth` and its `client_id` as the audience. |
+| `agents.on_behalf_of_user` | bool | `false` | Calls the AI gateway with the signed-in user's access token. Needs `auth`. |
 | `ai_gateway_url` | string | same-process `ai_gateway` | Base URL of the AI gateway the Agents tab replies through, e.g. `http://127.0.0.1:3002/v1`. Set when the AI gateway runs in another process or pod. |
 | `api_credentials_path` | string | | Machine keys the API accepts as `Authorization: Bearer` next to the login session. See [Authoring](/docs/flowgen/concepts/authoring#machine-keys). |
 | `frame_ancestors` | list of string | `["'self'"]` | Who may show the web UI in a frame, as Content-Security-Policy `frame-ancestors` sources, e.g. `https://console.example.com`. |
@@ -247,9 +254,9 @@ The API contract is defined in `openapi.yaml` and served at `<path>/api/openapi.
 
 ### Sessions from flows
 
-With `web.auth`, each signed-in user sees their own sessions and the shared ones; without it, every session is shared.
+With `auth`, each signed-in user sees their own sessions and the shared ones; without it, every session is shared.
 
-A flow opens a session in the Agents tab by writing it to the system bucket (`cache.system.db_name`) with [`kv_store`](/docs/flowgen/kv-store/kv-store). Under `agents.sessions.<id>` it is shared. Under `agents.sessions.<user>.<id>`, where `<user>` is the hex SHA-256 of the user id, only that user sees it; a flow started by an `http_endpoint` or `mcp_tool` with `auth` has the id in `event.meta.auth.user_id`, so a script gets `<user>` with `sha256(event.meta.auth.user_id)`. The id uses only letters, digits, `-` and `_`. `event.data.content` is a `Session` from `openapi.yaml` as JSON, with `origin: agent` and `unread: true`, and optionally `folder`, e.g. `Reports/Weekly`. It is unread for each user until they open it, and again when it changes. Marking a session read or unread, or moving it to another folder, affects only the user who does it; without `web.auth` it affects everyone.
+A flow opens a session in the Agents tab by writing it to the system bucket (`cache.system.db_name`) with [`kv_store`](/docs/flowgen/kv-store/kv-store). Under `agents.sessions.<id>` it is shared. Under `agents.sessions.<user>.<id>`, where `<user>` is the hex SHA-256 of the user id, only that user sees it; a flow started by an `http_endpoint` or `mcp_tool` with `auth` has the id in `event.meta.auth.user_id`, so a script gets `<user>` with `sha256(event.meta.auth.user_id)`. The id uses only letters, digits, `-` and `_`. `event.data.content` is a `Session` from `openapi.yaml` as JSON, with `origin: agent` and `unread: true`, and optionally `folder`, e.g. `Reports/Weekly`. It is unread for each user until they open it, and again when it changes. Marking a session read or unread, or moving it to another folder, affects only the user who does it; without `auth` it affects everyone.
 
 ```yaml
 - kv_store:
@@ -260,6 +267,21 @@ A flow opens a session in the Agents tab by writing it to the system bucket (`ca
     key: "agents.sessions.{{event.meta.correlation_id}}"
     ttl: 30d
 ```
+
+## `auth`
+
+The OpenID Connect provider people sign in with, used by every server without its own `auth`. See [Authentication](/docs/flowgen/concepts/auth).
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `issuer_url` | string | required | The provider's issuer; discovery is read from `{issuer_url}/.well-known/openid-configuration`. |
+| `client_id` | string | required | The client registered with the provider. |
+| `client_secret` | string | | Required unless `credentials_path` holds it. |
+| `credentials_path` | string | | JSON file holding `client_secret` and, optionally, `cookie_secret`. |
+| `redirect_uri` | string | required | Must match a redirect URI registered with the provider and include `web.path`, e.g. `https://example.com/flowgen/auth/callback`. |
+| `extra_scopes` | list of string | `[]` | Requested next to `openid`, `profile` and `email`. |
+| `signout_redirect_url` | string | | The provider's logout URL; flowgen appends `id_token_hint`. |
+| `audience` | string | `client_id` | The `aud` the servers accept, e.g. `api://example`. |
 
 ## `health`
 

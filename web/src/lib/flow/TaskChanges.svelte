@@ -26,7 +26,7 @@
 {:else if mark === 'added'}
 	<YamlFields entries={whole} />
 {:else if mark === 'removed'}
-	<div class="line-through decoration-base-content/30 opacity-60">
+	<div class="rounded-md bg-error/10 px-2 py-1">
 		<YamlFields entries={whole} />
 	</div>
 {:else}

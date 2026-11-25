@@ -325,8 +325,10 @@ pub struct McpServerConfig {
     /// Optional HTTP headers sent with every request to this MCP server,
     /// same shape as `http_endpoint.headers`.
     pub headers: Option<std::collections::HashMap<String, String>>,
-    /// Calls this server with the signed-in user's token as the bearer, so it
-    /// must trust the same identity provider.
+    /// Calls this server with the signed-in user's access token as the bearer,
+    /// so it must accept tokens of the same `auth`.
+    /// Without a signed-in user the call carries no token, and the server
+    /// decides whether to answer.
     #[serde(default)]
     pub on_behalf_of_user: bool,
     /// Names of this server's tools the agent uses; every tool when unset.
@@ -535,10 +537,10 @@ pub enum Error {
     McpUserCredentials { url: String },
     #[error(transparent)]
     ProviderOptions(#[from] flowgen_core::config::ProviderOptionsMismatch),
-    #[error("MCP server {url} needs a signed-in user")]
-    McpUserRequired { url: String },
     #[error("MCP server {url} rejected the signed-in user's token")]
     McpUserUnauthorized { url: String },
+    #[error("MCP server {url} needs a signed-in user, and nobody is signed in")]
+    McpUserRequired { url: String },
     #[error("Invalid Authorization header for MCP server at {url}: {source}")]
     McpAuthHeader {
         url: String,
@@ -596,7 +598,7 @@ impl Error {
     /// rig's verdict, which retries transport failures, 408, 425, 429 and 5xx.
     fn is_retryable(&self) -> bool {
         match self {
-            Error::McpUserRequired { .. } | Error::McpUserUnauthorized { .. } => false,
+            Error::McpUserUnauthorized { .. } | Error::McpUserRequired { .. } => false,
             Error::CompletionFailed { retryable, .. } => *retryable,
             Error::AgentClient { source } => source.is_retryable(),
             Error::Image { source } => source.is_retryable(),
@@ -830,7 +832,7 @@ impl McpTools {
     async fn is_current(&self, user_token: Option<&str>) -> Result<bool, Error> {
         for conn in &self.connections {
             let header_value = match (conn.on_behalf_of_user, &conn.creds) {
-                (true, _) => Some(user_bearer(&conn.url, user_token)?),
+                (true, _) => user_bearer(user_token),
                 (false, Some(creds)) => {
                     creds
                         .authorization_header_async()
@@ -851,13 +853,8 @@ impl McpTools {
 }
 
 /// The `Authorization` value for a server called on behalf of the user.
-fn user_bearer(url: &str, user_token: Option<&str>) -> Result<String, Error> {
-    match user_token {
-        Some(token) => Ok(format!("Bearer {token}")),
-        None => Err(Error::McpUserRequired {
-            url: url.to_string(),
-        }),
-    }
+fn user_bearer(user_token: Option<&str>) -> Option<String> {
+    user_token.map(|token| format!("Bearer {token}"))
 }
 
 /// Builds the streamable-HTTP transport for an MCP server with the given
@@ -968,7 +965,7 @@ async fn connect_mcp_tools(
         let mut header_value = None;
 
         if mcp_config.on_behalf_of_user {
-            header_value = Some(user_bearer(&mcp_config.url, user_token)?);
+            header_value = user_bearer(user_token);
         } else if let Some(ref creds_path) = mcp_config.credentials_path {
             let creds = flowgen_core::credentials::load_http_credentials(creds_path)
                 .await
@@ -1029,11 +1026,14 @@ async fn connect_mcp_tools(
             Err(e) => {
                 let rejected =
                     mcp_config.on_behalf_of_user && rejects(&mcp_config.url, headers).await;
-                return Err(match rejected {
-                    true => Error::McpUserUnauthorized {
+                return Err(match (rejected, user_token) {
+                    (true, Some(_)) => Error::McpUserUnauthorized {
                         url: mcp_config.url.clone(),
                     },
-                    false => Error::McpConnection {
+                    (true, None) => Error::McpUserRequired {
+                        url: mcp_config.url.clone(),
+                    },
+                    (false, _) => Error::McpConnection {
                         url: mcp_config.url.clone(),
                         reason: e.to_string(),
                     },
@@ -1135,6 +1135,41 @@ fn user_mcp_server(config: &Completion) -> Option<&str> {
         .iter()
         .find(|server| server.on_behalf_of_user)
         .map(|server| server.url.as_str())
+}
+
+/// This instance's MCP server, as the run sets it in [`flowgen_core::config::MCP_URL_ENV`].
+fn own_mcp_url() -> Option<url::Url> {
+    let url = std::env::var(flowgen_core::config::MCP_URL_ENV).ok()?;
+    url::Url::parse(&url).ok()
+}
+
+/// The servers called on behalf of the user that are not `own`.
+fn foreign_user_servers<'a>(config: &'a Completion, own: &url::Url) -> Vec<&'a str> {
+    config
+        .mcp_servers
+        .iter()
+        .filter(|server| server.on_behalf_of_user)
+        .filter(|server| match url::Url::parse(&server.url) {
+            Ok(url) => !same_server(&url, own),
+            Err(_) => true,
+        })
+        .map(|server| server.url.as_str())
+        .collect()
+}
+
+/// Whether `a` and `b` reach the same server, taking every loopback address as one host.
+fn same_server(a: &url::Url, b: &url::Url) -> bool {
+    a.port_or_known_default() == b.port_or_known_default()
+        && (a.host() == b.host() || (is_loopback(a) && is_loopback(b)))
+}
+
+fn is_loopback(url: &url::Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(domain)) => domain == "localhost",
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
 }
 
 /// Rejects a server that acts on behalf of the user and also has its own credentials.
@@ -1412,25 +1447,20 @@ struct UserToolsets(tokio::sync::Mutex<std::collections::HashMap<String, Arc<Use
 
 impl UserToolsets {
     /// The toolset of the user who started `event`, opened on first use and
-    /// replaced when their token changes.
+    /// replaced when their token changes; `None` when nobody is signed in.
     async fn current(
         &self,
         config: &Completion,
-        url: &str,
         event: &Event,
         now: std::time::Instant,
-    ) -> Result<Arc<Toolset>, Error> {
+    ) -> Result<Option<Arc<Toolset>>, Error> {
         use secrecy::ExposeSecret;
         let (id, token) = match event.session.as_deref() {
             Some(flowgen_core::auth::UserSession {
                 user,
                 token: Some(token),
             }) => (user.user_id.clone(), token.expose_secret()),
-            _ => {
-                return Err(Error::McpUserRequired {
-                    url: url.to_string(),
-                })
-            }
+            _ => return Ok(None),
         };
         let user = {
             let mut users = self.0.lock().await;
@@ -1443,7 +1473,7 @@ impl UserToolsets {
             *user.last_used() = now;
             Arc::clone(user)
         };
-        user.slot.current(config, Some(token)).await
+        Ok(Some(user.slot.current(config, Some(token)).await?))
     }
 
     /// Closes every user's connections.
@@ -1592,12 +1622,16 @@ impl EventHandler {
         }
 
         let images = rendered.images.clone();
-        let toolset = match user_mcp_server(&self.config) {
-            Some(url) => {
+        let user_toolset = match user_mcp_server(&self.config) {
+            Some(_) => {
                 self.users
-                    .current(&self.config, url, event, std::time::Instant::now())
+                    .current(&self.config, event, std::time::Instant::now())
                     .await?
             }
+            None => None,
+        };
+        let toolset = match user_toolset {
+            Some(toolset) => toolset,
             None => self.toolset.current(&self.config, None).await?,
         };
         let client = toolset
@@ -2288,6 +2322,11 @@ impl flowgen_core::task::runner::Runner for Processor {
             .map(|server| server.render(&std::collections::HashMap::<String, String>::new()))
             .collect::<Result<_, _>>()
             .map_err(|source| Error::ConfigRender { source })?;
+        if let Some(own) = own_mcp_url() {
+            for url in foreign_user_servers(&config, &own) {
+                warn!(url = %url, "An MCP server outside this instance is called on behalf of the user, so it receives a token this instance accepts");
+            }
+        }
         let config = Arc::new(config);
         let toolset = match user_mcp_server(&config) {
             Some(_) => None,
@@ -3194,13 +3233,15 @@ mod tests {
         let now = std::time::Instant::now();
 
         let first = users
-            .current(&config, &url, &event_from("u1", "t1"), now)
+            .current(&config, &event_from("u1", "t1"), now)
             .await
+            .unwrap()
             .unwrap();
         let after_first = seen.lock().unwrap().len();
         let second = users
-            .current(&config, &url, &event_from("u2", "t2"), now)
+            .current(&config, &event_from("u2", "t2"), now)
             .await
+            .unwrap()
             .unwrap();
         let headers = seen.lock().unwrap().clone();
 
@@ -3216,9 +3257,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_server_called_on_behalf_of_the_user_fails_without_a_signed_in_user() {
-        let url = "http://127.0.0.1:9/mcp";
-        let config = agent(user_server(url));
+    async fn without_a_signed_in_user_there_is_no_user_toolset() {
+        let config = agent(user_server("http://127.0.0.1:9/mcp"));
         let event = EventBuilder::new()
             .data(EventData::Json(json!({})))
             .subject("a".to_string())
@@ -3227,13 +3267,12 @@ mod tests {
             .build()
             .unwrap();
 
-        let error = UserToolsets::default()
-            .current(&config, url, &event, std::time::Instant::now())
+        let toolset = UserToolsets::default()
+            .current(&config, &event, std::time::Instant::now())
             .await
-            .err()
             .unwrap();
 
-        assert!(matches!(error, Error::McpUserRequired { .. }), "{error}");
+        assert!(toolset.is_none());
     }
 
     #[tokio::test]
@@ -3285,21 +3324,22 @@ mod tests {
 
     #[tokio::test]
     async fn a_rejected_token_is_told_apart_from_other_connect_errors() {
-        let connect = |status: axum::http::StatusCode| async move {
+        let connect = |status: axum::http::StatusCode, token: Option<&'static str>| async move {
             let app = axum::Router::new()
                 .route("/mcp", axum::routing::post(move || async move { status }));
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://{}/mcp", listener.local_addr().unwrap());
             tokio::spawn(async move { axum::serve(listener, app).await });
-            connect_mcp_tools(&agent(user_server(&url)), Some("t1"))
+            connect_mcp_tools(&agent(user_server(&url)), token)
                 .await
                 .err()
                 .unwrap()
         };
 
-        let unauthorized = connect(axum::http::StatusCode::UNAUTHORIZED).await;
-        let forbidden = connect(axum::http::StatusCode::FORBIDDEN).await;
-        let failed = connect(axum::http::StatusCode::INTERNAL_SERVER_ERROR).await;
+        let unauthorized = connect(axum::http::StatusCode::UNAUTHORIZED, Some("t1")).await;
+        let forbidden = connect(axum::http::StatusCode::FORBIDDEN, Some("t1")).await;
+        let signed_out = connect(axum::http::StatusCode::UNAUTHORIZED, None).await;
+        let failed = connect(axum::http::StatusCode::INTERNAL_SERVER_ERROR, Some("t1")).await;
 
         assert!(
             matches!(unauthorized, Error::McpUserUnauthorized { .. }),
@@ -3309,7 +3349,34 @@ mod tests {
             matches!(forbidden, Error::McpUserUnauthorized { .. }),
             "{forbidden}"
         );
+        assert!(
+            matches!(signed_out, Error::McpUserRequired { .. }),
+            "{signed_out}"
+        );
+        assert!(!signed_out.is_retryable());
         assert!(matches!(failed, Error::McpConnection { .. }), "{failed}");
+    }
+
+    #[test]
+    fn only_servers_outside_this_instance_called_as_the_user_are_foreign() {
+        let own = url::Url::parse("http://127.0.0.1:3001/mcp/v1").unwrap();
+        let config = Completion {
+            mcp_servers: vec![
+                user_server("http://localhost:3001/mcp/v1/system/agent"),
+                user_server("http://127.0.0.1:3001/mcp/v1/sales"),
+                user_server("https://tools.example.com/mcp"),
+                McpServerConfig {
+                    on_behalf_of_user: false,
+                    ..user_server("https://other.example.com/mcp")
+                },
+            ],
+            ..agent(user_server("http://127.0.0.1:3001/mcp/v1"))
+        };
+
+        assert_eq!(
+            foreign_user_servers(&config, &own),
+            vec!["https://tools.example.com/mcp"]
+        );
     }
 
     #[test]

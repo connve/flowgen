@@ -10,19 +10,21 @@
 
 use axum::{
     body::Body,
-    extract::State,
-    http::{header, HeaderMap, StatusCode},
+    extract::{Request, State},
+    http::{header, uri::Authority, HeaderMap, HeaderValue, StatusCode, Uri},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::post,
-    Router,
+    routing::{get, post},
+    Extension, Json, Router,
 };
 use flowgen_core::http_server::{DispatchState, Dispatcher, HasFlowName, HttpServer};
 use flowgen_core::registry::{Content, ProgressEvent, ResponseRegistry, ToolResult};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use subtle::ConstantTimeEq;
 use tokio::sync::mpsc;
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
-use tracing::{error, info, warn, Instrument};
+use tracing::{debug, error, info, warn, Instrument};
 
 /// Default MCP server port.
 pub const DEFAULT_MCP_PORT: u16 = 3001;
@@ -297,6 +299,9 @@ pub struct McpExtras {
     pub sessions: Arc<dashmap::DashMap<String, tokio::sync::mpsc::Sender<String>>>,
     /// Loads each toolset's [`INSTRUCTIONS_FILE`] for `initialize`.
     pub resource_loader: Option<flowgen_core::resource::ResourceLoader>,
+    /// Where clients without a token are sent to sign in. When set, every
+    /// MCP request needs an API key or a token the auth provider accepts.
+    pub sign_in: Option<SignIn>,
 }
 
 /// Dispatcher for MCP traffic.
@@ -312,13 +317,214 @@ impl Dispatcher for McpDispatcher {
 
     fn build_router(state: DispatchState<Self::Registration, Self::Extras>) -> Router {
         let route = state.path.clone();
-        Router::new()
+        let router = Router::new()
             .route(&route, post(handle_mcp).get(handle_mcp_sse))
             .route(
                 &format!("{route}/{{*folder}}"),
                 post(handle_mcp_folder).get(handle_mcp_sse),
+            );
+        // The layer covers only the routes added before it, so the metadata
+        // routes stay reachable without a token.
+        let router = match state.extras.sign_in {
+            Some(_) => router
+                .route_layer(middleware::from_fn_with_state(
+                    state.clone(),
+                    require_sign_in,
+                ))
+                .route(
+                    &format!("{PROTECTED_RESOURCE}{route}"),
+                    get(protected_resource),
+                )
+                .route(
+                    &format!("{PROTECTED_RESOURCE}{route}/{{*folder}}"),
+                    get(protected_resource),
+                ),
+            None => router,
+        };
+        router.with_state(state)
+    }
+}
+
+/// Lets through a request with an API key of the server or of a tool, or with
+/// a token the auth provider accepts, whose user it hands on to the handler.
+async fn require_sign_in(
+    State(state): State<DispatchState<ToolRegistration, McpExtras>>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    let Some(sign_in) = &state.extras.sign_in else {
+        return next.run(request).await;
+    };
+    let token = bearer(request.headers());
+    if token.is_some_and(|token| any_api_key(&state, token)) {
+        return next.run(request).await;
+    }
+    match verified_user(&state, token).await {
+        Ok(Some(user)) => {
+            request.extensions_mut().insert(Arc::new(user));
+            next.run(request).await
+        }
+        Ok(None) => sign_in.unauthorized(request.headers(), request.uri()),
+        Err(error) => {
+            if error.is_expired() {
+                debug!(error = %error, "Refused the expired token of an MCP request");
+            } else {
+                warn!(error = %error, "Refused the token of an MCP request");
+            }
+            sign_in.unauthorized(request.headers(), request.uri())
+        }
+    }
+}
+
+/// Who sent an MCP request: its bearer token, and the user [`require_sign_in`]
+/// already verified it for.
+struct Caller<'a> {
+    token: Option<&'a str>,
+    user: Option<&'a Arc<flowgen_core::auth::UserSession>>,
+}
+
+impl<'a> Caller<'a> {
+    fn new(
+        headers: &'a HeaderMap,
+        user: &'a Option<Extension<Arc<flowgen_core::auth::UserSession>>>,
+    ) -> Self {
+        Self {
+            token: bearer(headers),
+            user: user.as_ref().map(|Extension(user)| user),
+        }
+    }
+}
+
+/// The bearer token of a request, if it sent one.
+fn bearer(headers: &HeaderMap) -> Option<&str> {
+    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    flowgen_core::auth::extract_bearer_token(value)
+}
+
+/// Whether `token` is one of `keys`, compared in constant time.
+fn is_api_key(keys: &[secrecy::SecretString], token: &str) -> bool {
+    use secrecy::ExposeSecret;
+    keys.iter()
+        .any(|key| bool::from(key.expose_secret().as_bytes().ct_eq(token.as_bytes())))
+}
+
+/// Whether `token` is an API key of the server or of any of its tools.
+fn any_api_key(state: &DispatchState<ToolRegistration, McpExtras>, token: &str) -> bool {
+    let server = match state.extras.credentials.as_ref() {
+        Some(credentials) => is_api_key(&credentials.api_keys, token),
+        None => false,
+    };
+    server
+        || state.table.iter().any(|entry| match &entry.credentials {
+            Some(credentials) => is_api_key(&credentials.api_keys, token),
+            None => false,
+        })
+}
+
+/// The user the auth provider accepts `token` for; none without a provider or a token.
+async fn verified_user(
+    state: &DispatchState<ToolRegistration, McpExtras>,
+    token: Option<&str>,
+) -> Result<Option<flowgen_core::auth::UserSession>, flowgen_core::auth::AuthError> {
+    let (Some(provider), Some(token)) = (&state.auth_provider, token) else {
+        return Ok(None);
+    };
+    let user = provider.validate(token).await?;
+    Ok(Some(flowgen_core::auth::UserSession::with_token(
+        user, token,
+    )))
+}
+
+async fn protected_resource(
+    State(state): State<DispatchState<ToolRegistration, McpExtras>>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response {
+    match (
+        &state.extras.sign_in,
+        uri.path().strip_prefix(PROTECTED_RESOURCE),
+    ) {
+        (Some(sign_in), Some(resource)) => sign_in.resource(&headers, &uri, resource),
+        _ => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// Where Protected Resource Metadata is served, before the resource's path (RFC 9728).
+const PROTECTED_RESOURCE: &str = "/.well-known/oauth-protected-resource";
+
+/// How MCP clients sign in (RFC 9728).
+#[derive(PartialEq, Clone, Debug)]
+pub struct SignIn {
+    /// The address clients reach this server at, such as
+    /// `https://mcp.example.com`, when a proxy stands in between.
+    pub public_url: Option<url::Url>,
+    /// The issuer whose tokens this server accepts.
+    pub authorization_server: String,
+}
+
+#[derive(Serialize)]
+struct ProtectedResource<'a> {
+    resource: String,
+    authorization_servers: [&'a str; 1],
+    scopes_supported: [Scope; 1],
+    bearer_methods_supported: [BearerMethod; 1],
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "lowercase")]
+enum Scope {
+    OpenId,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "lowercase")]
+enum BearerMethod {
+    Header,
+}
+
+impl SignIn {
+    /// `public_url`, else the address the client used: its `Host`, or the
+    /// authority of an HTTP/2 request. With no proxy in between, only the
+    /// client can set it.
+    fn origin(&self, headers: &HeaderMap, uri: &Uri) -> Option<String> {
+        let authority = match (&self.public_url, headers.get(header::HOST)) {
+            (Some(public_url), _) => return Some(public_url.origin().ascii_serialization()),
+            (None, Some(host)) => host.to_str().ok()?.parse::<Authority>().ok()?,
+            (None, None) => uri.authority()?.clone(),
+        };
+        Some(format!("http://{authority}"))
+    }
+
+    fn resource(&self, headers: &HeaderMap, uri: &Uri, path: &str) -> Response {
+        match self.origin(headers, uri) {
+            Some(origin) => Json(ProtectedResource {
+                resource: format!("{origin}{path}"),
+                authorization_servers: [&self.authorization_server],
+                scopes_supported: [Scope::OpenId],
+                bearer_methods_supported: [BearerMethod::Header],
+            })
+            .into_response(),
+            None => StatusCode::BAD_REQUEST.into_response(),
+        }
+    }
+
+    fn unauthorized(&self, headers: &HeaderMap, uri: &Uri) -> Response {
+        let challenge = match self.origin(headers, uri) {
+            Some(origin) => HeaderValue::from_str(&format!(
+                "Bearer resource_metadata=\"{origin}{PROTECTED_RESOURCE}{}\"",
+                uri.path()
+            ))
+            .ok(),
+            None => None,
+        };
+        match challenge {
+            Some(value) => (
+                StatusCode::UNAUTHORIZED,
+                [(header::WWW_AUTHENTICATE, value)],
             )
-            .with_state(state)
+                .into_response(),
+            None => StatusCode::UNAUTHORIZED.into_response(),
+        }
     }
 }
 
@@ -331,6 +537,7 @@ pub fn new_mcp_server(
     auth_provider: Option<Arc<dyn flowgen_core::auth::AuthProvider>>,
     resource_uri_scheme: String,
     resource_loader: Option<flowgen_core::resource::ResourceLoader>,
+    sign_in: Option<SignIn>,
 ) -> McpServer {
     let extras = McpExtras {
         response_registry: Arc::new(ResponseRegistry::new()),
@@ -341,6 +548,7 @@ pub fn new_mcp_server(
         prompts: Arc::new(dashmap::DashMap::new()),
         sessions: Arc::new(dashmap::DashMap::new()),
         resource_loader,
+        sign_in,
     };
     McpServer::new_with_extras(path, extras).with_auth_provider(auth_provider)
 }
@@ -826,8 +1034,9 @@ const SESSION_CHANNEL_CAPACITY: usize = 32;
 async fn handle_mcp_sse(
     State(state): State<DispatchState<ToolRegistration, McpExtras>>,
     headers: HeaderMap,
+    user: Option<Extension<Arc<flowgen_core::auth::UserSession>>>,
 ) -> Response {
-    if let Err(status) = validate_auth(&state, &headers, None) {
+    if let Err(status) = validate_auth(&state, &Caller::new(&headers, &user), None) {
         return status.into_response();
     }
     let session_id = match headers
@@ -888,9 +1097,11 @@ async fn handle_mcp_sse(
 async fn handle_mcp(
     State(state): State<DispatchState<ToolRegistration, McpExtras>>,
     headers: HeaderMap,
+    user: Option<Extension<Arc<flowgen_core::auth::UserSession>>>,
     axum::Json(request): axum::Json<JsonRpcRequest>,
 ) -> Response {
-    dispatch(&state, &headers, request, &Toolset(None)).await
+    let caller = Caller::new(&headers, &user);
+    dispatch(&state, &caller, request, &Toolset(None)).await
 }
 
 /// The endpoint of one folder's toolset.
@@ -898,20 +1109,22 @@ async fn handle_mcp_folder(
     State(state): State<DispatchState<ToolRegistration, McpExtras>>,
     axum::extract::Path(folder): axum::extract::Path<String>,
     headers: HeaderMap,
+    user: Option<Extension<Arc<flowgen_core::auth::UserSession>>>,
     axum::Json(request): axum::Json<JsonRpcRequest>,
 ) -> Response {
     let toolset = match folder.trim_matches('/') {
         "" => Toolset(None),
         folder => Toolset(Some(folder.to_string())),
     };
-    dispatch(&state, &headers, request, &toolset).await
+    let caller = Caller::new(&headers, &user);
+    dispatch(&state, &caller, request, &toolset).await
 }
 
 /// Dispatches a JSON-RPC request to `toolset` by its method.
 #[tracing::instrument(skip_all, name = "mcp.request", fields(method = %request.method))]
 async fn dispatch(
     state: &DispatchState<ToolRegistration, McpExtras>,
-    headers: &HeaderMap,
+    caller: &Caller<'_>,
     request: JsonRpcRequest,
     toolset: &Toolset,
 ) -> Response {
@@ -926,16 +1139,16 @@ async fn dispatch(
 
     match request.method.as_str() {
         "initialize" => handle_initialize(state, request, toolset).await,
-        "tools/list" => handle_tools_list(state, headers, request, toolset),
-        "tools/call" => handle_tools_call(state, headers, request, toolset).await,
-        "resources/list" => handle_resources_list(state, headers, request, toolset),
+        "tools/list" => handle_tools_list(state, caller, request, toolset),
+        "tools/call" => handle_tools_call(state, caller, request, toolset).await,
+        "resources/list" => handle_resources_list(state, caller, request, toolset),
         "resources/templates/list" => {
-            handle_resource_templates_list(state, headers, request, toolset)
+            handle_resource_templates_list(state, caller, request, toolset)
         }
-        "resources/read" => handle_resources_read(state, headers, request, toolset).await,
-        "prompts/list" => handle_prompts_list(state, headers, request, toolset),
-        "prompts/get" => handle_prompts_get(state, headers, request, toolset).await,
-        "completion/complete" => handle_completion_complete(state, headers, request, toolset),
+        "resources/read" => handle_resources_read(state, caller, request, toolset).await,
+        "prompts/list" => handle_prompts_list(state, caller, request, toolset),
+        "prompts/get" => handle_prompts_get(state, caller, request, toolset).await,
+        "completion/complete" => handle_completion_complete(state, caller, request, toolset),
         "notifications/initialized" => StatusCode::ACCEPTED.into_response(),
         _ => {
             let err = Error::MethodNotFound {
@@ -1004,11 +1217,11 @@ async fn handle_initialize(
 
 fn handle_tools_list(
     state: &DispatchState<ToolRegistration, McpExtras>,
-    headers: &HeaderMap,
+    caller: &Caller<'_>,
     request: JsonRpcRequest,
     toolset: &Toolset,
 ) -> Response {
-    if let Err(status) = validate_auth(state, headers, None) {
+    if let Err(status) = validate_auth(state, caller, None) {
         return json_rpc_error_response(request.id, -32000, status.to_string());
     }
 
@@ -1044,11 +1257,11 @@ struct ResourceReadParams {
 
 fn handle_resources_list(
     state: &DispatchState<ToolRegistration, McpExtras>,
-    headers: &HeaderMap,
+    caller: &Caller<'_>,
     request: JsonRpcRequest,
     toolset: &Toolset,
 ) -> Response {
-    if let Err(status) = validate_auth(state, headers, None) {
+    if let Err(status) = validate_auth(state, caller, None) {
         return json_rpc_error_response(request.id, -32000, status.to_string());
     }
 
@@ -1081,11 +1294,11 @@ fn handle_resources_list(
 
 fn handle_resource_templates_list(
     state: &DispatchState<ToolRegistration, McpExtras>,
-    headers: &HeaderMap,
+    caller: &Caller<'_>,
     request: JsonRpcRequest,
     toolset: &Toolset,
 ) -> Response {
-    if let Err(status) = validate_auth(state, headers, None) {
+    if let Err(status) = validate_auth(state, caller, None) {
         return json_rpc_error_response(request.id, -32000, status.to_string());
     }
 
@@ -1123,11 +1336,11 @@ fn handle_resource_templates_list(
 
 async fn handle_resources_read(
     state: &DispatchState<ToolRegistration, McpExtras>,
-    headers: &HeaderMap,
+    caller: &Caller<'_>,
     request: JsonRpcRequest,
     toolset: &Toolset,
 ) -> Response {
-    if let Err(status) = validate_auth(state, headers, None) {
+    if let Err(status) = validate_auth(state, caller, None) {
         return json_rpc_error_response(request.id, -32000, status.to_string());
     }
 
@@ -1244,11 +1457,11 @@ fn resource_read_response(
 
 fn handle_prompts_list(
     state: &DispatchState<ToolRegistration, McpExtras>,
-    headers: &HeaderMap,
+    caller: &Caller<'_>,
     request: JsonRpcRequest,
     toolset: &Toolset,
 ) -> Response {
-    if let Err(status) = validate_auth(state, headers, None) {
+    if let Err(status) = validate_auth(state, caller, None) {
         return json_rpc_error_response(request.id, -32000, status.to_string());
     }
 
@@ -1286,11 +1499,11 @@ fn handle_prompts_list(
 
 async fn handle_prompts_get(
     state: &DispatchState<ToolRegistration, McpExtras>,
-    headers: &HeaderMap,
+    caller: &Caller<'_>,
     request: JsonRpcRequest,
     toolset: &Toolset,
 ) -> Response {
-    if let Err(status) = validate_auth(state, headers, None) {
+    if let Err(status) = validate_auth(state, caller, None) {
         return json_rpc_error_response(request.id, -32000, status.to_string());
     }
 
@@ -1408,11 +1621,11 @@ const COMPLETION_MAX_VALUES: usize = 100;
 
 fn handle_completion_complete(
     state: &DispatchState<ToolRegistration, McpExtras>,
-    headers: &HeaderMap,
+    caller: &Caller<'_>,
     request: JsonRpcRequest,
     toolset: &Toolset,
 ) -> Response {
-    if let Err(status) = validate_auth(state, headers, None) {
+    if let Err(status) = validate_auth(state, caller, None) {
         return json_rpc_error_response(request.id, -32000, status.to_string());
     }
 
@@ -1545,11 +1758,11 @@ fn match_uri_template(
 
 async fn handle_tools_call(
     state: &DispatchState<ToolRegistration, McpExtras>,
-    headers: &HeaderMap,
+    caller: &Caller<'_>,
     request: JsonRpcRequest,
     toolset: &Toolset,
 ) -> Response {
-    match execute_tool_call(state, headers, &request, toolset).await {
+    match execute_tool_call(state, caller, &request, toolset).await {
         Ok(response) => response,
         Err(e) => {
             error!(error = %e, "Tool call failed");
@@ -1566,7 +1779,7 @@ async fn handle_tools_call(
 
 async fn execute_tool_call(
     state: &DispatchState<ToolRegistration, McpExtras>,
-    headers: &HeaderMap,
+    caller: &Caller<'_>,
     request: &JsonRpcRequest,
     toolset: &Toolset,
 ) -> Result<Response, Error> {
@@ -1574,7 +1787,7 @@ async fn execute_tool_call(
         .map_err(|source| Error::InvalidParams { source })?;
 
     let api_key =
-        validate_auth(state, headers, Some(&params.name)).map_err(|_| Error::Unauthorized)?;
+        validate_auth(state, caller, Some(&params.name)).map_err(|_| Error::Unauthorized)?;
 
     let entry = match state.table.get(&params.name) {
         Some(entry) if toolset.contains(&entry.flow_name) => entry.clone(),
@@ -1592,7 +1805,7 @@ async fn execute_tool_call(
         entry.flow_name.clone(),
     );
 
-    let session = validate_user_auth(state, headers, auth_required, api_key)
+    let session = validate_user_auth(state, caller, auth_required, api_key)
         .await
         .map_err(|_| Error::Unauthorized)?;
     let arguments = match params.arguments {
@@ -1659,7 +1872,7 @@ async fn execute_tool_call(
         .meta_merge(meta)
         .completion_tx(completion_state);
     if let Some(session) = session {
-        builder = builder.session(Arc::new(session));
+        builder = builder.session(session);
     }
     let event = builder
         .build()
@@ -1825,87 +2038,55 @@ async fn execute_tool_call(
 /// when not required, a bearer that is not an API key still identifies the user.
 async fn validate_user_auth(
     state: &DispatchState<ToolRegistration, McpExtras>,
-    headers: &HeaderMap,
+    caller: &Caller<'_>,
     auth_required: bool,
     api_key: bool,
-) -> Result<Option<flowgen_core::auth::UserSession>, StatusCode> {
+) -> Result<Option<Arc<flowgen_core::auth::UserSession>>, StatusCode> {
+    if let Some(user) = caller.user {
+        return Ok(Some(Arc::clone(user)));
+    }
     match (auth_required, api_key) {
-        (false, true) => return Ok(None),
-        (false, false) => return Ok(optional_user(state, headers).await),
-        (true, _) => {}
-    }
-
-    let provider = state
-        .auth_provider
-        .as_ref()
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-    let auth_header = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|h| h.to_str().ok())
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-    let token =
-        flowgen_core::auth::extract_bearer_token(auth_header).ok_or(StatusCode::UNAUTHORIZED)?;
-    match provider.validate(token).await {
-        Ok(user) => Ok(Some(flowgen_core::auth::UserSession::with_token(
-            user, token,
-        ))),
-        Err(_) => Err(StatusCode::UNAUTHORIZED),
+        (false, true) => Ok(None),
+        (false, false) => match verified_user(state, caller.token).await {
+            Ok(user) => Ok(user.map(Arc::new)),
+            Err(_) => Ok(None),
+        },
+        (true, _) => match verified_user(state, caller.token).await {
+            Ok(Some(user)) => Ok(Some(Arc::new(user))),
+            _ => Err(StatusCode::UNAUTHORIZED),
+        },
     }
 }
 
-/// The user a bearer the auth provider accepts belongs to, if any.
-async fn optional_user(
-    state: &DispatchState<ToolRegistration, McpExtras>,
-    headers: &HeaderMap,
-) -> Option<flowgen_core::auth::UserSession> {
-    let provider = state.auth_provider.as_ref()?;
-    let auth_header = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
-    let token = flowgen_core::auth::extract_bearer_token(auth_header)?;
-    match provider.validate(token).await {
-        Ok(user) => Some(flowgen_core::auth::UserSession::with_token(user, token)),
-        Err(_) => None,
-    }
-}
-
-/// Validates endpoint-level API key authentication for an incoming request;
-/// `true` when an API key authenticated it.
+/// Checks the caller against the API keys of `tool_name`, or of the server
+/// when `tool_name` is `None`; `true` when an API key authenticated it. A user
+/// [`require_sign_in`] verified needs no server key, but a tool's own keys
+/// still apply.
 fn validate_auth(
     state: &DispatchState<ToolRegistration, McpExtras>,
-    headers: &HeaderMap,
+    caller: &Caller<'_>,
     tool_name: Option<&str>,
 ) -> Result<bool, StatusCode> {
-    let tool_creds = tool_name.and_then(|name| {
+    let tool_credentials = tool_name.and_then(|name| {
         state
             .table
             .get(name)
             .and_then(|reg| reg.credentials.clone())
     });
-
-    let credentials = tool_creds
-        .as_ref()
-        .or(state.extras.credentials.as_ref().as_ref());
-
-    let credentials = match credentials {
-        Some(creds) => creds,
-        None => return Ok(false),
+    let credentials = match (&tool_credentials, caller.user) {
+        (Some(credentials), _) => credentials,
+        (None, Some(_)) => return Ok(false),
+        (None, None) => match state.extras.credentials.as_ref() {
+            Some(credentials) => credentials,
+            None => return Ok(false),
+        },
     };
-
     if credentials.api_keys.is_empty() {
         return Ok(false);
     }
-
-    let auth_header = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-
-    let token =
-        flowgen_core::auth::extract_bearer_token(auth_header).ok_or(StatusCode::UNAUTHORIZED)?;
-
-    if credentials.api_keys.iter().any(|k| k == token) {
-        Ok(true)
-    } else {
-        Err(StatusCode::UNAUTHORIZED)
+    match caller.token {
+        Some(token) if is_api_key(&credentials.api_keys, token) => Ok(true),
+        _ => Err(StatusCode::UNAUTHORIZED),
     }
 }
 
@@ -2044,6 +2225,7 @@ mod tests {
             None,
             None,
             "flowgen".to_string(),
+            None,
             None,
         )
     }
@@ -2211,6 +2393,7 @@ mod tests {
             None,
             "flowgen".to_string(),
             Some(loader),
+            None,
         );
         let table = Arc::new(DashMap::new());
         for (flow, name) in [
@@ -2543,8 +2726,10 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(header::AUTHORIZATION, "Bearer t1".parse().unwrap());
 
-        let with_key = validate_user_auth(&state, &headers, false, true).await;
-        let without_key = validate_user_auth(&state, &headers, false, false).await;
+        let caller = Caller::new(&headers, &None);
+
+        let with_key = validate_user_auth(&state, &caller, false, true).await;
+        let without_key = validate_user_auth(&state, &caller, false, false).await;
 
         assert!(with_key.unwrap().is_none());
         assert_eq!(without_key.unwrap().expect("user").user.user_id, "u1");
@@ -2769,13 +2954,14 @@ mod tests {
     #[tokio::test]
     async fn correct_bearer_token_passes() {
         let creds = super::super::config::Credentials {
-            api_keys: vec!["secret-key-123".to_string()],
+            api_keys: vec!["secret-key-123".into()],
         };
         let server = new_mcp_server(
             DEFAULT_MCP_PATH.to_string(),
             Some(creds),
             None,
             "flowgen".to_string(),
+            None,
             None,
         );
         let table = Arc::new(DashMap::new());
@@ -2795,15 +2981,148 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_signed_out_client_is_told_where_to_sign_in() {
+        let router = |public_url: Option<&str>| {
+            let server = new_mcp_server(
+                DEFAULT_MCP_PATH.to_string(),
+                Some(super::super::config::Credentials {
+                    api_keys: vec!["secret-key-123".into()],
+                }),
+                Some(Arc::new(flowgen_core::auth::testing::KnownToken)),
+                "flowgen".to_string(),
+                None,
+                Some(SignIn {
+                    public_url: public_url.map(|url| url.parse().unwrap()),
+                    authorization_server: "https://idm.example.com/oauth2/openid/flowgen"
+                        .to_string(),
+                }),
+            );
+            let table = Arc::new(DashMap::new());
+            table.insert(
+                "own_key".to_string(),
+                ToolRegistration {
+                    credentials: Some(super::super::config::Credentials {
+                        api_keys: vec!["tool-key-456".into()],
+                    }),
+                    ..test_tool_registration("flow_a", "A tool with its own key")
+                },
+            );
+            McpDispatcher::build_router(build_test_state(&server, table))
+        };
+        let request = |method: &str, uri: &str, key: Option<&str>| {
+            let builder = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("host", "localhost:3001");
+            let builder = match key {
+                Some(key) => builder.header("authorization", format!("Bearer {key}")),
+                None => builder,
+            };
+            builder
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+                ))
+                .unwrap()
+        };
+        let direct = router(None);
+        let proxied = router(Some("https://mcp.example.com/"));
+
+        let metadata = direct
+            .clone()
+            .oneshot(request(
+                "GET",
+                "/.well-known/oauth-protected-resource/mcp/v1/system/agent",
+                None,
+            ))
+            .await
+            .unwrap();
+        let signed_out = direct
+            .clone()
+            .oneshot(request("POST", DEFAULT_MCP_PATH, None))
+            .await
+            .unwrap();
+        let with_key = direct
+            .clone()
+            .oneshot(request("POST", DEFAULT_MCP_PATH, Some("secret-key-123")))
+            .await
+            .unwrap();
+        let with_token = direct
+            .clone()
+            .oneshot(request("POST", DEFAULT_MCP_PATH, Some("t1")))
+            .await
+            .unwrap();
+        let with_tool_key = direct
+            .clone()
+            .oneshot(request("POST", DEFAULT_MCP_PATH, Some("tool-key-456")))
+            .await
+            .unwrap();
+        let with_odd_host = direct
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(DEFAULT_MCP_PATH)
+                    .header("host", "a\"b")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let with_refused_token = direct
+            .oneshot(request("POST", DEFAULT_MCP_PATH, Some("t2")))
+            .await
+            .unwrap();
+        let behind_proxy = proxied
+            .oneshot(request("POST", DEFAULT_MCP_PATH, None))
+            .await
+            .unwrap();
+
+        let body = metadata.into_body().collect().await.unwrap().to_bytes();
+        let metadata: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            metadata["resource"],
+            "http://localhost:3001/mcp/v1/system/agent"
+        );
+        assert_eq!(
+            metadata["authorization_servers"][0],
+            "https://idm.example.com/oauth2/openid/flowgen"
+        );
+        assert_eq!(metadata["scopes_supported"][0], "openid");
+        assert_eq!(signed_out.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            signed_out.headers()[header::WWW_AUTHENTICATE],
+            "Bearer resource_metadata=\"http://localhost:3001/.well-known/oauth-protected-resource/mcp/v1\""
+        );
+        assert_eq!(with_key.status(), StatusCode::OK);
+        let body = with_token.into_body().collect().await.unwrap().to_bytes();
+        let tools: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(tools["error"].is_null(), "{tools}");
+        assert_eq!(tools["result"]["tools"][0]["name"], "own_key");
+        assert_ne!(with_tool_key.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(with_refused_token.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(with_odd_host.status(), StatusCode::UNAUTHORIZED);
+        assert!(with_odd_host
+            .headers()
+            .get(header::WWW_AUTHENTICATE)
+            .is_none());
+        assert_eq!(
+            behind_proxy.headers()[header::WWW_AUTHENTICATE],
+            "Bearer resource_metadata=\"https://mcp.example.com/.well-known/oauth-protected-resource/mcp/v1\""
+        );
+    }
+
+    #[tokio::test]
     async fn wrong_bearer_token_returns_unauthorized() {
         let creds = super::super::config::Credentials {
-            api_keys: vec!["secret-key-123".to_string()],
+            api_keys: vec!["secret-key-123".into()],
         };
         let server = new_mcp_server(
             DEFAULT_MCP_PATH.to_string(),
             Some(creds),
             None,
             "flowgen".to_string(),
+            None,
             None,
         );
         let table = Arc::new(DashMap::new());
@@ -2954,7 +3273,7 @@ mod tests {
         );
         let state = build_test_state(&server, Arc::new(DashMap::new()));
 
-        let response = handle_mcp_sse(State(state), headers).await;
+        let response = handle_mcp_sse(State(state), headers, None).await;
 
         assert_eq!(response.status(), StatusCode::CONFLICT);
     }

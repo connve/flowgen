@@ -26,16 +26,16 @@ resources:
     enabled: true
 health:
   enabled: true
+auth: { ... }
 web:
   enabled: true
-  auth: { ... }
   authoring:
     enabled: true
 ```
 
-`flows.system` runs the system flows of the running version: commit, release and deploy, Flowgen Agent and the hubs. `flows.cache` and `resources.cache` load what the deploy flow writes. A commit carries who approved it, so `web.auth` is required. Flowgen Agent also needs `mcp_server`, `ai_gateway` and `web.agents`.
+`flows.system` runs the system flows of the running version: commit, release and deploy, Flowgen Agent and the hubs. `flows.cache` and `resources.cache` load what the deploy flow writes. A commit carries who approved it, so `auth` is required. Flowgen Agent also needs `mcp_server`, `ai_gateway` and `web.agents` with `on_behalf_of_user: true`.
 
-Keep secrets out of the ConfigMap: set them from a Secret with `APP_` variables, such as `APP_WEB__AUTH__CLIENT_SECRET` for `web.auth.client_secret`. See [Configuration](/docs/flowgen/concepts/configuration).
+Keep secrets out of the ConfigMap: set them from a Secret with `APP_` variables, such as `APP_AUTH__CLIENT_SECRET` for `auth.client_secret`. See [Configuration](/docs/flowgen/concepts/configuration).
 
 ## Environment
 

@@ -66,7 +66,7 @@ Flows in different folders are kept apart at runtime too: an [`inproc_endpoint`]
 
 ## Approving
 
-`POST {path}/api/changes/{id}/approve` and `/reject` require a signed-in user, and a member of one of the change's target's `approver_groups` when the list is set. Groups are read from the user's claim named by `web.authoring.groups_claim` (default `groups`); most providers include it only when asked, for example with a `groups` scope in `web.auth.extra_scopes`. Requests authenticated with a machine key are refused, so an agent can propose changes but never commit them. With `?updatedAt=` set to the change's `updatedAt` as reviewed, approving fails with 409 when the change was edited since. Approving moves the change to `committing`, runs the commit flow, and records `committed` with the flow's result, or `failed` with the error. Committing runs to the end even when the browser disconnects, and is recorded as failed after the `ack_timeout` of the commit flow's `inproc_endpoint`.
+`POST {path}/api/changes/{id}/approve` and `/reject` require a signed-in user, and a member of one of the change's target's `approver_groups` when the list is set. Groups are read from the user's claim named by `web.authoring.groups_claim` (default `groups`); most providers include it only when asked, for example with a `groups` scope in `auth.extra_scopes`. Requests authenticated with a machine key are refused, so an agent can propose changes but never commit them. With `?updatedAt=` set to the change's `updatedAt` as reviewed, approving fails with 409 when the change was edited since. Approving moves the change to `committing`, runs the commit flow, and records `committed` with the flow's result, or `failed` with the error. Committing runs to the end even when the browser disconnects, and is recorded as failed after the `ack_timeout` of the commit flow's `inproc_endpoint`.
 
 A failed change can be approved again, as can one left in `committing` past the timeout, for example after a restart; such a change has `stalled` set, and the web UI offers to retry it. [Git Push](/docs/flowgen/git/push) accepts files that already hold the proposed content, so committing again after a partial success does not conflict.
 
@@ -96,7 +96,7 @@ The commit flow, with the release and deploy flows below, is in [`config/`](http
 | `FLOWGEN_CACHE_CREDENTIALS` | The `cache` credentials file, or empty. | |
 | `FLOWGEN_SYSTEM_BUCKET` | The system bucket. | |
 
-flowgen sets a variable only when the environment does not; a local run always sets `FLOWGEN_REPOSITORY` and `FLOWGEN_WORKSPACE_PATH`. An empty credentials variable means none. Without sign-in, the commit is by the git user of the machine; a commit to a URL needs the approving user, so a cluster needs `web.auth`. The release and deploy flows have `require_leader_election`, so one pod runs each.
+flowgen sets a variable only when the environment does not; a local run always sets `FLOWGEN_REPOSITORY` and `FLOWGEN_WORKSPACE_PATH`. An empty credentials variable means none. Without sign-in, the commit is by the git user of the machine; a commit to a URL needs the approving user, so a cluster needs `auth`. The release and deploy flows have `require_leader_election`, so one pod runs each.
 
 Once a change is committed, flowgen puts its commit at `commits.latest` in the system bucket. The release flow watches that key with [`kv_watch`](/docs/flowgen/kv-store/kv-watch) and records each release under `releases.latest` as well as `releases.<commit>`, which the deploy flow watches, so an approved change is released and deployed as soon as it is committed. Both flows also look every minute for commits and releases made outside flowgen.
 
@@ -117,8 +117,8 @@ A `committed` change reports its `deployment` against what this instance runs: `
 Agents, scripts, and CI reach the API with a machine key instead of a session:
 
 ```yaml
+auth: { ... }
 web:
-  auth: { ... }
   api_credentials_path: /etc/flowgen/credentials/api.json
   authoring:
     enabled: true
@@ -130,11 +130,11 @@ web:
 
 Send the key as `Authorization: Bearer <key>`. The key's name is recorded as the proposer (`key:operator-agent`). Keys shorter than 32 characters are ignored, and keys are read at startup.
 
-A machine key reaches only what an agent needs: reading flows, resources, logs and changes (`GET`), validating files, testing scripts, proposing changes, and adding files to and editing the pending changes it proposed. Every other route answers `403` to a key. Machine keys apply only when `web.auth` is set; without it the API is open and anyone can approve.
+A machine key reaches only what an agent needs: reading flows, resources, logs and changes (`GET`), validating files, testing scripts, proposing changes, and adding files to and editing the pending changes it proposed. Every other route answers `403` to a key. Machine keys apply only when `auth` is set; without it the API is open and anyone can approve.
 
 ## Flowgen Agent
 
-A local workspace starts with Flowgen Agent, `flows/system/flowgen_agent.yaml`, an agent for the built-in Agents chat. Its tools are the flows in `flows/system/flowgen_agent/`, served as the MCP toolset `/mcp/v1/system/flowgen_agent`. They call the web API to list and read deployed flows and resources, read the docs pages of this version (`GET /api/docs`), read a hub's templates as working examples, validate drafts, run draft Rhai scripts on sample events with `POST /api/workspace/test`, propose changes, and read a flow's logs after it is deployed. With `web.auth` set, give each tool's `http_request` a machine key with `credentials_path`.
+A local workspace starts with Flowgen Agent, `flows/system/flowgen_agent.yaml`, an agent for the built-in Agents chat. Its tools are the flows in `flows/system/flowgen_agent/`, served as the MCP toolset `/mcp/v1/system/flowgen_agent`. They call the web API to list and read deployed flows and resources, read the docs pages of this version (`GET /api/docs`), read a hub's templates as working examples, validate drafts, run draft Rhai scripts on sample events with `POST /api/workspace/test`, propose changes, and read a flow's logs after it is deployed. With `auth` set, give each tool's `http_request` a machine key with `credentials_path`, and set `web.agents.on_behalf_of_user`, so Flowgen Agent calls its toolset as the signed-in user.
 
 The toolset's [instructions](/docs/flowgen/ai/mcp#instructions), how to work with the tools, are the system resource `system/flowgen_agent/instructions.md`, and the basics Flowgen Agent always has in context are `system/flowgen_agent/basics.md`; both are built into flowgen, and a file with the same key in the workspace's `resources/` takes their place. Other agents use the same toolset and get the same instructions; see [Agent setup](/docs/flowgen/getting-started/agent-setup).
 

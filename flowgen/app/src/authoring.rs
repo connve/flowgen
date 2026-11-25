@@ -709,7 +709,7 @@ fn caller_label(caller: Option<&Caller>) -> String {
 }
 
 /// Approving and rejecting is for people, and for members of the target's
-/// `approver_groups` when set: a machine key is refused. Without `web.auth`
+/// `approver_groups` when set: a machine key is refused. Without `auth`
 /// there is no caller and everyone may decide.
 fn decider(
     caller: Option<&Caller>,
@@ -1070,7 +1070,7 @@ fn touch(change: &mut api::Change) {
     change.updated_at = Some(now_ms().max(previous + 1));
 }
 
-/// A pending change the caller may edit: its proposer, or anyone without `web.auth`.
+/// A pending change the caller may edit: its proposer, or anyone without `auth`.
 async fn load_editable(
     state: &WebState,
     caller: Option<&Caller>,

@@ -130,7 +130,7 @@ On Kubernetes, the Helm chart gives the MCP server a Service on port 3001 whose 
 
 - Expose it with `flowgen.services.mcp_server.type: LoadBalancer` or through your ingress, and use `https://<host>/mcp/v1/system/flowgen_agent`.
 
-An exposed server needs an API key: point `mcp_server.credentials_path` at a JSON file with `{"api_keys": ["<key>"]}`. Agents in a browser, such as web chat apps, connect from their provider's servers, so they need the exposed address.
+An exposed server needs an API key, in `mcp_server.credentials_path` as `{"api_keys": ["<key>"]}` with at least 32 characters, or [sign-in](/docs/flowgen/ai/mcp#sign-in) with `auth`; behind an ingress, set `mcp_server.public_url`. Agents in a browser, such as web chat apps, connect from their provider's servers, so they need the exposed address.
 
 ## What the agent gets
 

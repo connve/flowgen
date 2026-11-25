@@ -226,7 +226,7 @@ pub enum Error {
     /// A machine key is too short to be accepted.
     #[error(
         "Machine key '{name}' in web.api_credentials_path is shorter than {} characters and is ignored",
-        crate::web::MIN_API_KEY_LEN
+        flowgen_core::credentials::MIN_API_KEY_LEN
     )]
     ApiKeyTooShort { name: String },
     /// The web API's machine keys could not be loaded; none are accepted.
@@ -247,8 +247,8 @@ pub enum Error {
         #[source]
         source: flowgen_core::http_server::Error,
     },
-    /// Auth provider initialization failed.
-    #[error("Failed to build auth provider: {source}")]
+    /// Auth provider initialization failed; its server refuses every token.
+    #[error("Failed to build the auth provider, so its server refuses every token: {source}")]
     AuthProviderInit {
         #[source]
         source: flowgen_core::auth::AuthError,
@@ -840,20 +840,19 @@ impl App {
             }
         }
 
+        let identity_provider = match (&app_config.auth, inherits_auth(&app_config)) {
+            (Some(identity), true) => build_auth_provider(identity.bearer_auth()).await,
+            _ => None,
+        };
+
         // Create shared webhook HTTP server if enabled.
         let http_server: Option<Arc<flowgen_http::server::EndpointServer>> =
             match app_config.http_server.as_ref() {
                 Some(http_config) if http_config.enabled => {
                     let path = http_config.path.clone();
-                    let auth_provider = match http_config.auth.clone() {
-                        Some(auth_config) => Some(
-                            auth_config
-                                .build()
-                                .await
-                                .map_err(|source| Error::AuthProviderInit { source })?,
-                        ),
-                        None => None,
-                    };
+                    let auth_provider =
+                        server_auth_provider(http_config.auth.as_ref(), identity_provider.as_ref())
+                            .await;
                     let server = flowgen_core::http_server::HttpServer::<
                         flowgen_http::server::EndpointDispatcher,
                     >::new(path)
@@ -918,21 +917,24 @@ impl App {
             let resource_uri_scheme = mcp_config
                 .map(|c| c.resource_uri_scheme.clone())
                 .unwrap_or_else(|| "flowgen".to_string());
-            let auth_provider = match mcp_config.and_then(|c| c.auth.clone()) {
-                Some(auth_config) => Some(
-                    auth_config
-                        .build()
-                        .await
-                        .map_err(|source| Error::AuthProviderInit { source })?,
-                ),
-                None => None,
+            let own_auth = mcp_config.and_then(|c| c.auth.as_ref());
+            let sign_in = match &server_auth(own_auth, app_config.auth.as_ref()) {
+                Some(flowgen_core::auth::AuthConfig::Oidc(oidc)) => {
+                    Some(flowgen_mcp::server::SignIn {
+                        public_url: mcp_config.and_then(|c| c.public_url.clone()),
+                        authorization_server: oidc.issuer_url.clone(),
+                    })
+                }
+                _ => None,
             };
+            let auth_provider = server_auth_provider(own_auth, identity_provider.as_ref()).await;
             Some(Arc::new(flowgen_mcp::server::new_mcp_server(
                 path,
                 credentials,
                 auth_provider,
                 resource_uri_scheme,
                 resource_loader.clone(),
+                sign_in,
             )))
         } else {
             None
@@ -951,15 +953,11 @@ impl App {
                     flowgen_ai_agent::ai_gateway::server::DEFAULT_AI_GATEWAY_PATH.to_string()
                 });
                 let credentials_path = ai_config.and_then(|c| c.credentials_path.clone());
-                let auth_provider = match ai_config.and_then(|c| c.auth.clone()) {
-                    Some(auth_config) => Some(
-                        auth_config
-                            .build()
-                            .await
-                            .map_err(|source| Error::AuthProviderInit { source })?,
-                    ),
-                    None => None,
-                };
+                let auth_provider = server_auth_provider(
+                    ai_config.and_then(|c| c.auth.as_ref()),
+                    identity_provider.as_ref(),
+                )
+                .await;
                 let extras = match ai_config {
                     Some(c) => flowgen_ai_agent::ai_gateway::server::AiGatewayExtras {
                         max_body_bytes: c.max_body_bytes,
@@ -1319,10 +1317,11 @@ impl App {
         if let Some(web_config) = web_config.filter(|w| w.enabled) {
             let port = web_config.port;
             let path = web_config.path.clone();
-            warn_about_authoring(web_config, system.cache.is_some());
-            warn_about_agents(web_config);
+            let signed_in = app_config.auth.is_some();
+            warn_about_authoring(web_config, signed_in, system.cache.is_some());
+            warn_about_agents(web_config, signed_in);
 
-            let auth_setup = match &web_config.auth {
+            let auth_setup = match &app_config.auth {
                 Some(login_config) => {
                     setup_web_login(
                         login_config,
@@ -1475,7 +1474,11 @@ impl App {
 }
 
 /// Warns about authoring settings that are accepted but do not protect what they appear to.
-fn warn_about_authoring(web_config: &crate::config::WebOptions, system_bucket_present: bool) {
+fn warn_about_authoring(
+    web_config: &crate::config::WebOptions,
+    signed_in: bool,
+    system_bucket_present: bool,
+) {
     let authoring = match &web_config.authoring {
         Some(authoring) if authoring.enabled => authoring,
         _ => return,
@@ -1484,8 +1487,8 @@ fn warn_about_authoring(web_config: &crate::config::WebOptions, system_bucket_pr
         .targets
         .iter()
         .any(|target| !target.approver_groups.is_empty());
-    if web_config.auth.is_none() && has_approver_groups {
-        warn!("web.authoring.targets set approver_groups, but they are not enforced without web.auth: anyone who can reach the web UI can approve a change");
+    if !signed_in && has_approver_groups {
+        warn!("web.authoring.targets set approver_groups, but they are not enforced without auth: anyone who can reach the web UI can approve a change");
     }
     if !system_bucket_present {
         warn!("web.authoring is enabled without a system bucket, so proposed changes are kept in the runtime cache that flow scripts can read and write");
@@ -1493,7 +1496,7 @@ fn warn_about_authoring(web_config: &crate::config::WebOptions, system_bucket_pr
 }
 
 /// Warns about Agents chat settings that cannot take effect together.
-fn warn_about_agents(web_config: &crate::config::WebOptions) {
+fn warn_about_agents(web_config: &crate::config::WebOptions, signed_in: bool) {
     let on_behalf_of_user = matches!(
         &web_config.agents,
         Some(crate::config::AgentsOptions {
@@ -1504,8 +1507,8 @@ fn warn_about_agents(web_config: &crate::config::WebOptions) {
     if !on_behalf_of_user {
         return;
     }
-    if web_config.auth.is_none() {
-        warn!("web.agents.on_behalf_of_user is set without web.auth, so no user is signed in and the chat calls the AI gateway anonymously");
+    if !signed_in {
+        warn!("web.agents.on_behalf_of_user is set without auth, so no user is signed in and the chat calls the AI gateway anonymously");
     }
     if web_config
         .headers
@@ -1523,7 +1526,7 @@ async fn load_api_keys(path: &std::path::Path) -> Vec<flowgen_core::credentials:
     match flowgen_core::credentials::load_api_credentials(path).await {
         Ok(credentials) => {
             for key in &credentials.api_keys {
-                if key.key.expose_secret().len() < crate::web::MIN_API_KEY_LEN {
+                if key.key.expose_secret().len() < flowgen_core::credentials::MIN_API_KEY_LEN {
                     error!(
                         "{}",
                         Error::ApiKeyTooShort {
@@ -1713,7 +1716,54 @@ fn route_source(bind: &str, target: &str) -> std::io::Result<std::net::IpAddr> {
     Ok(socket.local_addr()?.ip())
 }
 
-/// Builds the web UI's login client and cookie key from `web.auth`.
+/// A server's own `auth`, else the tokens of the top-level identity provider.
+fn server_auth(
+    own: Option<&flowgen_core::auth::AuthConfig>,
+    identity: Option<&crate::login::LoginConfig>,
+) -> Option<flowgen_core::auth::AuthConfig> {
+    match (own, identity) {
+        (Some(own), _) => Some(own.clone()),
+        (None, Some(identity)) => Some(identity.bearer_auth()),
+        (None, None) => None,
+    }
+}
+
+/// A server's own `auth` provider, else the one every server shares.
+async fn server_auth_provider(
+    own: Option<&flowgen_core::auth::AuthConfig>,
+    shared: Option<&Arc<dyn flowgen_core::auth::AuthProvider>>,
+) -> Option<Arc<dyn flowgen_core::auth::AuthProvider>> {
+    match own {
+        Some(own) => build_auth_provider(own.clone()).await,
+        None => shared.cloned(),
+    }
+}
+
+/// `None`, logged, when the provider can't be reached: the server then
+/// refuses every token, failing closed, and flows keep running.
+async fn build_auth_provider(
+    auth: flowgen_core::auth::AuthConfig,
+) -> Option<Arc<dyn flowgen_core::auth::AuthProvider>> {
+    match auth.build().await {
+        Ok(provider) => Some(provider),
+        Err(source) => {
+            error!("{}", Error::AuthProviderInit { source });
+            None
+        }
+    }
+}
+
+/// Whether an enabled server takes the tokens of the top-level `auth`,
+/// having no `auth` of its own.
+fn inherits_auth(config: &AppConfig) -> bool {
+    let http =
+        matches!(&config.http_server, Some(server) if server.enabled && server.auth.is_none());
+    let mcp = matches!(&config.mcp_server, Some(server) if server.enabled && server.auth.is_none());
+    let ai = matches!(&config.ai_gateway, Some(server) if server.enabled && server.auth.is_none());
+    http || mcp || ai
+}
+
+/// Builds the web UI's login client and cookie key from `auth`.
 ///
 /// `None` leaves the web server unstarted: a broken login config must not
 /// serve the UI unauthenticated, and must not stop flows running either.
@@ -1792,6 +1842,44 @@ fn compute_source_path(
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn a_server_without_its_own_auth_accepts_the_identity_providers_tokens() {
+        let config: AppConfig = serde_yaml::from_str(
+            "flows: {}\nauth:\n  issuer_url: https://idm.example.com\n  client_id: flowgen\n  redirect_uri: https://flowgen.example.com/auth/callback\n",
+        )
+        .expect("parses");
+        let own = flowgen_core::auth::AuthConfig::Oidc(flowgen_core::auth::oidc::OidcConfig::new(
+            "https://other.example.com".to_string(),
+            Some("other".to_string()),
+        ));
+        let inherited =
+            flowgen_core::auth::AuthConfig::Oidc(flowgen_core::auth::oidc::OidcConfig::new(
+                "https://idm.example.com".to_string(),
+                Some("flowgen".to_string()),
+            ));
+
+        assert_eq!(server_auth(None, config.auth.as_ref()), Some(inherited));
+        assert_eq!(
+            server_auth(Some(&own), config.auth.as_ref()),
+            Some(own.clone())
+        );
+        assert_eq!(server_auth(None, None), None);
+    }
+
+    #[test]
+    fn only_an_enabled_server_without_its_own_auth_inherits_it() {
+        let config = |servers: &str| -> AppConfig {
+            serde_yaml::from_str(&format!("flows: {{}}\n{servers}")).expect("parses")
+        };
+
+        assert!(!inherits_auth(&config("")));
+        assert!(!inherits_auth(&config("mcp_server:\n  enabled: false\n")));
+        assert!(!inherits_auth(&config(
+            "mcp_server:\n  enabled: true\n  auth:\n    type: jwt\n    secret: s\n"
+        )));
+        assert!(inherits_auth(&config("ai_gateway:\n  enabled: true\n")));
+    }
 
     #[tokio::test]
     async fn a_redb_cache_keeps_runtime_and_system_apart_across_restarts() {

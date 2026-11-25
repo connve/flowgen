@@ -5,11 +5,16 @@
 //! configurable claim (default: `sub`).
 
 use super::{AuthError, AuthProvider, UserContext};
-use jsonwebtoken::{decode, decode_header, jwk::JwkSet, Algorithm, DecodingKey, Validation};
+use jsonwebtoken::{
+    decode, decode_header,
+    jwk::{Jwk, JwkSet},
+    Algorithm, DecodingKey, Validation,
+};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::info;
 
@@ -35,6 +40,16 @@ pub struct JwtConfig {
     /// Claim name to extract as user_id (default: "sub").
     #[serde(default = "default_user_id_claim")]
     pub user_id_claim: String,
+    /// How long after fetching the JWKS a token signed with a key it lacks
+    /// makes it fetch again, which picks up the provider's next signing key,
+    /// e.g. `5m`.
+    #[serde(default = "default_jwks_refresh", with = "humantime_serde")]
+    pub jwks_refresh: Duration,
+}
+
+/// Five minutes between JWKS fetches for unknown keys.
+pub fn default_jwks_refresh() -> Duration {
+    Duration::from_secs(300)
 }
 
 impl PartialEq for JwtConfig {
@@ -47,6 +62,7 @@ impl PartialEq for JwtConfig {
             && self.audience == other.audience
             && self.issuer == other.issuer
             && self.user_id_claim == other.user_id_claim
+            && self.jwks_refresh == other.jwks_refresh
     }
 }
 
@@ -69,10 +85,30 @@ fn default_user_id_claim() -> String {
 /// JWT authentication provider.
 pub struct JwtProvider {
     config: JwtConfig,
-    /// Cached JWKS keys (fetched once at init, refreshable).
-    jwks: Option<Arc<RwLock<JwkSet>>>,
+    /// Cached JWKS keys, fetched again for a key they lack.
+    jwks: Option<Arc<RwLock<Jwks>>>,
     /// Pre-built decoding key for HMAC secret.
     hmac_key: Option<DecodingKey>,
+}
+
+/// The JWKS and when it was last fetched.
+struct Jwks {
+    keys: JwkSet,
+    fetched: Instant,
+}
+
+impl Jwks {
+    /// The key named `kid`, or that there is none when the keys were fetched
+    /// within `refresh`; `None` when they may be fetched again.
+    fn cached(&self, kid: &str, refresh: Duration) -> Option<Result<Jwk, AuthError>> {
+        match self.keys.find(kid) {
+            Some(jwk) => Some(Ok(jwk.clone())),
+            None if self.fetched.elapsed() < refresh => Some(Err(AuthError::UnknownKeyId {
+                kid: kid.to_string(),
+            })),
+            None => None,
+        }
+    }
 }
 
 impl std::fmt::Debug for JwtProvider {
@@ -98,7 +134,10 @@ impl JwtProvider {
         let jwks = if let Some(ref url) = config.jwks_url {
             let jwks = fetch_jwks(url).await?;
             info!(url = %url, keys = jwks.keys.len(), "Fetched JWKS keys for JWT validation");
-            Some(Arc::new(RwLock::new(jwks)))
+            Some(Arc::new(RwLock::new(Jwks {
+                keys: jwks,
+                fetched: Instant::now(),
+            })))
         } else {
             None
         };
@@ -112,6 +151,40 @@ impl JwtProvider {
             jwks,
             hmac_key,
         })
+    }
+
+    /// The key named `kid`. A key the cached JWKS lacks makes it fetch again,
+    /// at most once per `jwks_refresh`, so the provider's next signing key is
+    /// picked up while made-up key ids can't make every request fetch.
+    async fn jwk(&self, jwks: &RwLock<Jwks>, kid: &str) -> Result<Jwk, AuthError> {
+        let refresh = self.config.jwks_refresh;
+        if let Some(found) = jwks.read().await.cached(kid, refresh) {
+            return found;
+        }
+        let Some(url) = &self.config.jwks_url else {
+            return Err(AuthError::UnknownKeyId {
+                kid: kid.to_string(),
+            });
+        };
+        {
+            let mut cached = jwks.write().await;
+            if let Some(found) = cached.cached(kid, refresh) {
+                return found;
+            }
+            // Claims the fetch, failed or not, so requests meanwhile neither
+            // start their own nor wait for it.
+            cached.fetched = Instant::now();
+        }
+        let keys = fetch_jwks(url).await?;
+        info!(url = %url, keys = keys.keys.len(), "Fetched JWKS keys for JWT validation");
+        let mut cached = jwks.write().await;
+        cached.keys = keys;
+        match cached.keys.find(kid) {
+            Some(jwk) => Ok(jwk.clone()),
+            None => Err(AuthError::UnknownKeyId {
+                kid: kid.to_string(),
+            }),
+        }
     }
 
     /// Build validation parameters from config.
@@ -169,13 +242,9 @@ impl AuthProvider for JwtProvider {
                 decode_header(token).map_err(|source| AuthError::InvalidToken { source })?;
 
             let kid = header.kid.as_deref().ok_or(AuthError::MissingKeyId)?;
+            let jwk = self.jwk(jwks, kid).await?;
 
-            let jwks_read = jwks.read().await;
-            let jwk = jwks_read.find(kid).ok_or_else(|| AuthError::UnknownKeyId {
-                kid: kid.to_string(),
-            })?;
-
-            let key = DecodingKey::from_jwk(jwk)
+            let key = DecodingKey::from_jwk(&jwk)
                 .map_err(|source| AuthError::JwkDecodingKey { source })?;
 
             let algorithm = jwk
@@ -253,6 +322,7 @@ mod tests {
             audience: None,
             issuer: None,
             user_id_claim: "sub".to_string(),
+            jwks_refresh: default_jwks_refresh(),
         };
         let result = JwtProvider::new(config).await;
         assert!(result.is_err());
@@ -267,6 +337,7 @@ mod tests {
             audience: None,
             issuer: None,
             user_id_claim: "sub".to_string(),
+            jwks_refresh: default_jwks_refresh(),
         };
         let provider = JwtProvider::new(config).await.unwrap();
 
@@ -297,6 +368,7 @@ mod tests {
             audience: None,
             issuer: None,
             user_id_claim: "sub".to_string(),
+            jwks_refresh: default_jwks_refresh(),
         };
         let provider = JwtProvider::new(config).await.unwrap();
 
@@ -313,6 +385,7 @@ mod tests {
             audience: None,
             issuer: None,
             user_id_claim: "user_id".to_string(),
+            jwks_refresh: default_jwks_refresh(),
         };
         let provider = JwtProvider::new(config).await.unwrap();
 
@@ -331,5 +404,92 @@ mod tests {
 
         let result = provider.validate(&token).await;
         assert!(matches!(result, Err(AuthError::MissingUserIdClaim { .. })));
+    }
+
+    fn rsa_jwk(kid: &str) -> Jwk {
+        Jwk {
+            common: jsonwebtoken::jwk::CommonParameters {
+                key_id: Some(kid.to_string()),
+                key_algorithm: Some(jsonwebtoken::jwk::KeyAlgorithm::RS256),
+                ..Default::default()
+            },
+            algorithm: jsonwebtoken::jwk::AlgorithmParameters::RSA(
+                jsonwebtoken::jwk::RSAKeyParameters {
+                    key_type: jsonwebtoken::jwk::RSAKeyType::RSA,
+                    n: "AQAB".to_string(),
+                    e: "AQAB".to_string(),
+                },
+            ),
+        }
+    }
+
+    /// Serves a JWKS whose key is `a` on the first fetch and `b` after it.
+    async fn rotating_jwks(fetches: Arc<std::sync::atomic::AtomicUsize>) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/jwks", listener.local_addr().unwrap());
+        let app = axum::Router::new().route(
+            "/jwks",
+            axum::routing::get(move || {
+                let fetches = Arc::clone(&fetches);
+                async move {
+                    let kid = match fetches.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                        0 => "a",
+                        _ => "b",
+                    };
+                    axum::Json(JwkSet {
+                        keys: vec![rsa_jwk(kid)],
+                    })
+                }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        url
+    }
+
+    fn token_signed_with(kid: &str) -> String {
+        use base64::Engine;
+        let encode =
+            |bytes: Vec<u8>| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let mut header = jsonwebtoken::Header::new(Algorithm::RS256);
+        header.kid = Some(kid.to_string());
+        let claims = HashMap::from([("sub".to_string(), "u1".to_string())]);
+        format!(
+            "{}.{}.{}",
+            encode(serde_json::to_vec(&header).unwrap()),
+            encode(serde_json::to_vec(&claims).unwrap()),
+            encode(b"signature".to_vec())
+        )
+    }
+
+    #[tokio::test]
+    async fn a_token_signed_with_a_new_key_fetches_the_keys_again_at_most_once_per_refresh() {
+        let fetches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let url = rotating_jwks(Arc::clone(&fetches)).await;
+        let provider = |jwks_refresh| {
+            JwtProvider::new(JwtConfig {
+                secret: None,
+                jwks_url: Some(url.clone()),
+                audience: None,
+                issuer: None,
+                user_id_claim: "sub".to_string(),
+                jwks_refresh,
+            })
+        };
+
+        let refreshing = provider(Duration::ZERO).await.unwrap();
+        let rotated = refreshing.validate(&token_signed_with("b")).await;
+        assert!(
+            matches!(rotated, Err(AuthError::InvalidToken { .. })),
+            "{rotated:?}"
+        );
+        assert_eq!(fetches.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+        let recent = provider(Duration::from_secs(3600)).await.unwrap();
+        let unknown = recent.validate(&token_signed_with("c")).await;
+        assert!(
+            matches!(unknown, Err(AuthError::UnknownKeyId { .. })),
+            "{unknown:?}"
+        );
+        assert_eq!(fetches.load(std::sync::atomic::Ordering::SeqCst), 3);
     }
 }

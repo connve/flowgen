@@ -150,11 +150,11 @@ pub enum LoginError {
     InvalidNonce,
     #[error("ID token failed validation: {0}")]
     InvalidIdToken(#[source] flowgen_core::auth::AuthError),
-    #[error("Failed to load `web.auth.credentials_path`: {0}")]
+    #[error("Failed to load `auth.credentials_path`: {0}")]
     Credentials(#[source] flowgen_core::credentials::Error),
     #[error(
-        "No OIDC client secret. Set `web.auth.client_secret`, or `client_secret` in the JSON \
-         file at `web.auth.credentials_path`."
+        "No OIDC client secret. Set `auth.client_secret`, or `client_secret` in the JSON \
+         file at `auth.credentials_path`."
     )]
     MissingClientSecret,
 }
@@ -168,7 +168,7 @@ struct Discovery {
     token_endpoint: String,
 }
 
-/// Config for interactive browser login — the `web.auth` field. Distinct
+/// Config for interactive browser login — the top-level `auth` field. Distinct
 /// from `flowgen_core::auth::oidc::OidcConfig`, which only carries what's
 /// needed to validate a token someone else already has (issuer, audience,
 /// claim name); this needs OAuth2 client credentials and a redirect URI to
@@ -208,18 +208,36 @@ pub struct LoginConfig {
     /// flowgen only, leaving the provider's session intact.
     #[serde(default)]
     pub signout_redirect_url: Option<String>,
+    /// The `aud` of the tokens the servers accept, such as `api://example`,
+    /// the audience of an authorization server whose access tokens don't
+    /// carry `client_id`. Defaults to `client_id`.
+    #[serde(default)]
+    pub audience: Option<String>,
 }
 
-/// The secrets behind `web.auth`, resolved from `credentials_path` and the
+/// The secrets behind `auth`, resolved from `credentials_path` and the
 /// inline fields.
 pub struct ResolvedSecrets {
     pub client_secret: secrecy::SecretString,
     /// `None` leaves the caller on `web.cookie_secret`, which has no
-    /// equivalent under `web.auth` to read instead.
+    /// equivalent under `auth` to read instead.
     pub cookie_secret: Option<secrecy::SecretString>,
 }
 
 impl LoginConfig {
+    /// Validates the tokens this provider issues, for the servers without
+    /// their own `auth`.
+    pub fn bearer_auth(&self) -> flowgen_core::auth::AuthConfig {
+        let audience = match &self.audience {
+            Some(audience) => audience.clone(),
+            None => self.client_id.clone(),
+        };
+        flowgen_core::auth::AuthConfig::Oidc(OidcConfig::new(
+            self.issuer_url.clone(),
+            Some(audience),
+        ))
+    }
+
     /// Reads `credentials_path`, falling back to the inline fields per key.
     pub async fn resolve_secrets(&self) -> Result<ResolvedSecrets, LoginError> {
         let from_file = match &self.credentials_path {
@@ -254,6 +272,7 @@ impl PartialEq for LoginConfig {
             && self.redirect_uri == other.redirect_uri
             && self.extra_scopes == other.extra_scopes
             && self.signout_redirect_url == other.signout_redirect_url
+            && self.audience == other.audience
     }
 }
 
@@ -286,6 +305,7 @@ pub struct LoginState {
 pub struct LoginResult {
     pub user: UserContext,
     pub id_token: String,
+    pub access_token: String,
     pub refresh_token: Option<String>,
     pub expires_in: Option<u64>,
 }
@@ -325,7 +345,7 @@ pub struct LoginClient {
     /// JWKS-backed path used for bearer-token validation on the other
     /// servers, rather than reimplementing JWT verification here.
     id_token_validator: OidcProvider,
-    /// From `web.auth.signout_redirect_url`, parsed at startup so a malformed
+    /// From `auth.signout_redirect_url`, parsed at startup so a malformed
     /// URL fails there rather than on someone's first sign-out.
     signout_redirect_url: Option<url::Url>,
     /// Shares one refresh per refresh token between concurrent requests.
@@ -422,11 +442,10 @@ impl LoginClient {
             .set_token_uri(token_url)
             .set_redirect_uri(redirect_url);
 
-        let id_token_validator = OidcProvider::new(OidcConfig {
-            issuer_url: config.issuer_url.clone(),
-            audience: Some(config.client_id.clone()),
-            user_id_claim: "sub".to_string(),
-        })
+        let id_token_validator = OidcProvider::new(OidcConfig::new(
+            config.issuer_url.clone(),
+            Some(config.client_id.clone()),
+        ))
         .await
         .map_err(LoginError::Validator)?;
 
@@ -535,6 +554,7 @@ impl LoginClient {
         Ok(LoginResult {
             user,
             id_token,
+            access_token: token_response.access_token().secret().clone(),
             refresh_token: token_response.refresh_token().map(|t| t.secret().clone()),
             expires_in: token_response.expires_in().map(|d| d.as_secs()),
         })
@@ -579,6 +599,7 @@ impl LoginClient {
         Ok(LoginResult {
             user,
             id_token,
+            access_token: token_response.access_token().secret().clone(),
             refresh_token: token_response.refresh_token().map(|t| t.secret().clone()),
             expires_in: token_response.expires_in().map(|d| d.as_secs()),
         })
@@ -616,6 +637,7 @@ mod tests {
             extract_id_token(&response).as_deref(),
             Some("header.payload.signature")
         );
+        assert_eq!(response.access_token().secret(), "at");
     }
 
     #[test]

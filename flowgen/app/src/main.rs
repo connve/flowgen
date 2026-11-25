@@ -331,7 +331,11 @@ fn colored_logs() -> bool {
     std::io::stdout().is_terminal() && !no_color
 }
 
-fn init_tracing(metrics_store: Arc<dyn MetricsStore>, logs_writer: Option<MemoryLogsStoreWriter>) {
+fn init_tracing(
+    metrics_store: Arc<dyn MetricsStore>,
+    logs_writer: Option<MemoryLogsStoreWriter>,
+    tracer: Option<flowgen_core::telemetry::Tracer>,
+) {
     let format = determine_log_format();
 
     let env_filter = match tracing_subscriber::EnvFilter::try_from_default_env() {
@@ -343,6 +347,7 @@ fn init_tracing(metrics_store: Arc<dyn MetricsStore>, logs_writer: Option<Memory
     // Memory backend gets its own JSON fmt layer feeding the in-process
     // ring buffer. Absent on remote backends.
     let memory_layer = logs_writer.map(|w| tracing_subscriber::fmt::layer().json().with_writer(w));
+    let spans_layer = tracer.map(flowgen_core::telemetry::spans_layer);
 
     match format {
         LogFormat::Compact => {
@@ -353,6 +358,7 @@ fn init_tracing(metrics_store: Arc<dyn MetricsStore>, logs_writer: Option<Memory
                 .with(env_filter)
                 .with(activity_layer)
                 .with(memory_layer)
+                .with(spans_layer)
                 .with(fmt_layer)
                 .init();
         }
@@ -362,6 +368,7 @@ fn init_tracing(metrics_store: Arc<dyn MetricsStore>, logs_writer: Option<Memory
                 .with(env_filter)
                 .with(activity_layer)
                 .with(memory_layer)
+                .with(spans_layer)
                 .with(fmt_layer)
                 .init();
         }
@@ -572,6 +579,7 @@ async fn run(mode: Mode) {
     init_tracing(
         Arc::clone(&metrics_store) as Arc<dyn MetricsStore>,
         telemetry.logs_writer.clone(),
+        telemetry.tracer.clone(),
     );
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();

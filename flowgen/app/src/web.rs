@@ -107,7 +107,7 @@ pub struct WebState {
     pub system_bucket_present: bool,
     /// From `web.agents`; `None` disables `/api/agents`.
     pub agents: Option<crate::config::AgentsOptions>,
-    /// OIDC login client, built from `web.auth` at startup. `None` leaves
+    /// OIDC login client, built from `auth` at startup. `None` leaves
     /// the web UI unauthenticated.
     pub login_client: Option<Arc<crate::login::LoginClient>>,
     /// Key encrypting the browser session cookie — see `crate::login` for
@@ -133,7 +133,7 @@ pub struct WebState {
     pub latest_release: crate::releases::Latest,
 }
 
-/// Who an `/api/*` request authenticated as, when `web.auth` is set.
+/// Who an `/api/*` request authenticated as, when `auth` is set.
 #[derive(Clone, Debug)]
 pub(crate) enum Caller {
     /// A signed-in user, through the session cookie.
@@ -157,9 +157,6 @@ impl Caller {
         }
     }
 }
-
-/// Shortest machine key `/api/*` accepts; shorter keys in the file are ignored.
-pub(crate) const MIN_API_KEY_LEN: usize = 32;
 
 /// Routes a machine key may call: reading flows, resources, logs and changes,
 /// validating files, testing scripts, and proposing and editing changes; the authoring handlers
@@ -216,7 +213,8 @@ fn matching_key<'a>(
     let token = flowgen_core::auth::extract_bearer_token(header)?;
     keys.iter().find(|key| {
         let key = key.key.expose_secret().as_bytes();
-        key.len() >= MIN_API_KEY_LEN && bool::from(key.ct_eq(token.as_bytes()))
+        key.len() >= flowgen_core::credentials::MIN_API_KEY_LEN
+            && bool::from(key.ct_eq(token.as_bytes()))
     })
 }
 
@@ -588,12 +586,22 @@ fn session_cookie(secure: bool) -> &'static str {
 /// store — this struct only ever exists serialized inside the cookie.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct AuthSession {
-    user: flowgen_core::auth::UserContext,
     id_token: String,
+    /// Forwarded as the user's bearer; the ID token never leaves flowgen.
+    access_token: String,
     refresh_token: Option<String>,
-    /// Unix seconds, as reported by the provider. Informational: expiry is
-    /// decided by validating `id_token`, not by reading this.
+    /// Unix seconds when `access_token` expires, as reported by the provider.
     expires_at: Option<i64>,
+}
+
+impl AuthSession {
+    /// Whether `access_token` can still be forwarded at `now`, in Unix seconds.
+    fn access_token_live(&self, now: i64) -> bool {
+        match self.expires_at {
+            Some(expires_at) => now < expires_at,
+            None => true,
+        }
+    }
 }
 
 /// Builds a login cookie: `HttpOnly`, `SameSite=Lax`, `Path=/`, and `Secure`
@@ -768,8 +776,8 @@ async fn auth_callback(
     };
 
     let session = AuthSession {
-        user: result.user,
         id_token: result.id_token,
+        access_token: result.access_token,
         refresh_token: result.refresh_token,
         expires_at: result
             .expires_in
@@ -812,7 +820,7 @@ fn ui_url(prefix: &str) -> String {
 
 /// `GET /auth/logout` — clears the session cookie, then hands the browser to
 /// the provider's logout URL so its session ends too. Falls back to the web
-/// UI when `web.auth.signout_redirect_url` is unset.
+/// UI when `auth.signout_redirect_url` is unset.
 ///
 /// Navigated to rather than fetched, so the browser follows the cross-origin
 /// redirect itself.
@@ -850,7 +858,7 @@ async fn auth_logout(State(state): State<Arc<WebState>>, jar: AuthJar) -> impl I
 }
 
 /// `GET /auth/me` — the logged-in user, 401 if not logged in, or 404 if
-/// `web.auth` isn't configured (matching `auth_login`/`auth_callback`'s
+/// `auth` isn't configured (matching `auth_login`/`auth_callback`'s
 /// existing convention) — the frontend uses the 404 case to tell "no login
 /// offered" apart from "not logged in yet" before deciding whether a 401
 /// elsewhere means "go log in".
@@ -862,8 +870,8 @@ async fn auth_me(State(state): State<Arc<WebState>>, jar: AuthJar) -> impl IntoR
         return StatusCode::UNAUTHORIZED.into_response();
     };
     let mut response = Json(api::UserContext {
-        user_id: resolved.session.user.user_id,
-        claims: resolved.session.user.claims.into_iter().collect(),
+        user_id: resolved.user.user_id,
+        claims: resolved.user.claims.into_iter().collect(),
     })
     .into_response();
     if let Some(jar) = resolved.refreshed {
@@ -880,12 +888,14 @@ fn read_session(state: &WebState, jar: &AuthJar) -> Option<AuthSession> {
 /// A session that is good to serve, plus the cookie to reissue when it was
 /// refreshed on the way through.
 struct ResolvedSession {
+    user: flowgen_core::auth::UserContext,
     session: AuthSession,
     refreshed: Option<AuthJar>,
 }
 
 /// Validates the session cookie, silently refreshing it against the identity
-/// provider once past `exp`. `None` means the caller must answer 401.
+/// provider once the ID token or the access token expires. `None` means the
+/// caller must answer 401.
 ///
 /// Shared by `/auth/me` and the `/api/*` middleware so both agree on whether a
 /// session is still good — the UI gates its first render on the former and
@@ -894,15 +904,14 @@ async fn resolve_session(state: &WebState, jar: &AuthJar) -> Option<ResolvedSess
     let login_client = state.login_client.as_ref()?;
     let session = read_session(state, jar)?;
 
-    if login_client
-        .validate_id_token(&session.id_token)
-        .await
-        .is_ok()
-    {
-        return Some(ResolvedSession {
-            session,
-            refreshed: None,
-        });
+    if session.access_token_live(chrono::Utc::now().timestamp()) {
+        if let Ok(user) = login_client.validate_id_token(&session.id_token).await {
+            return Some(ResolvedSession {
+                user,
+                session,
+                refreshed: None,
+            });
+        }
     }
 
     let Some(refresh_token) = session.refresh_token.clone() else {
@@ -917,8 +926,8 @@ async fn resolve_session(state: &WebState, jar: &AuthJar) -> Option<ResolvedSess
         }
     };
     let session = AuthSession {
-        user: refreshed.user,
         id_token: refreshed.id_token,
+        access_token: refreshed.access_token,
         refresh_token: refreshed.refresh_token.or(session.refresh_token),
         expires_at: refreshed
             .expires_in
@@ -932,6 +941,7 @@ async fn resolve_session(state: &WebState, jar: &AuthJar) -> Option<ResolvedSess
         }
     };
     Some(ResolvedSession {
+        user: refreshed.user,
         refreshed: Some(jar.clone().add(auth_cookie(
             session_cookie(state.cookie_secure),
             encoded,
@@ -960,9 +970,9 @@ fn apply_refreshed_cookies(response: &mut axum::response::Response, jar: AuthJar
     }
 }
 
-/// Protects `/api/*` when `web.auth` is configured, on the session
+/// Protects `/api/*` when `auth` is configured, on the session
 /// [`resolve_session`] resolves or else a machine key. Not layered at all
-/// when `web.auth` is unset.
+/// when `auth` is unset.
 async fn auth_middleware(
     State(state): State<Arc<WebState>>,
     jar: AuthJar,
@@ -974,13 +984,13 @@ async fn auth_middleware(
     }
     match resolve_session(&state, &jar).await {
         Some(resolved) => {
-            let user = resolved.session.user.clone();
+            let user = resolved.user;
             request.extensions_mut().insert(Caller::User(user.clone()));
             request
                 .extensions_mut()
                 .insert(Arc::new(flowgen_core::auth::UserSession::with_token(
                     user.clone(),
-                    &resolved.session.id_token,
+                    &resolved.session.access_token,
                 )));
             request.extensions_mut().insert(user);
             let mut response = next.run(request).await;
@@ -1372,13 +1382,24 @@ async fn list_resources(State(state): State<Arc<WebState>>) -> Json<Vec<api::Res
     match loader.cached_keys().await {
         Ok(keys) => {
             for key in keys {
-                entries
-                    .entry(key.clone())
-                    .or_insert_with(|| api::ResourceSummary {
+                if entries.contains_key(&key) {
+                    continue;
+                }
+                let size = match loader.load(&key).await {
+                    Ok(content) => Some(content.len() as i64),
+                    Err(error) => {
+                        warn!(key = %key, error = %error, "Failed to read a cached resource");
+                        None
+                    }
+                };
+                entries.insert(
+                    key.clone(),
+                    api::ResourceSummary {
                         extension: extension_of(&key),
                         key,
-                        size: None,
-                    });
+                        size,
+                    },
+                );
             }
         }
         Err(error) => warn!(error = %error, "Failed to list the cached resources"),
@@ -1715,7 +1736,7 @@ pub(crate) fn valid_session_id(id: &str) -> bool {
 
 /// The signed-in user's key segment: the hex SHA-256 of their id, so a flow
 /// can derive it from `event.meta.auth.user_id` with the script `sha256` and
-/// keys don't show who the user is. Without `web.auth`, or for a machine key,
+/// keys don't show who the user is. Without `auth`, or for a machine key,
 /// there is none and sessions are shared.
 pub(crate) fn session_owner(
     user: Option<&axum::Extension<flowgen_core::auth::UserContext>>,
@@ -1764,7 +1785,7 @@ fn session_id_of<'a>(prefix: &str, key: &'a str) -> Option<&'a str> {
 }
 
 /// `<prefix><user>.<id>` for a signed-in user's own key, `<prefix><id>`
-/// without `web.auth`, where everyone shares one.
+/// without `auth`, where everyone shares one.
 fn user_key(prefix: &str, owner: Option<&str>, id: &str) -> String {
     match owner {
         Some(owner) => format!("{prefix}{owner}.{id}"),
@@ -2447,6 +2468,7 @@ pub(crate) mod tests {
             mcp_server: None,
             ai_gateway: None,
             web: None,
+            auth: None,
             health: Default::default(),
             retry: None,
             telemetry: None,
@@ -2595,6 +2617,7 @@ pub(crate) mod tests {
                 redirect_uri: "http://localhost/flowgen/auth/callback".to_string(),
                 extra_scopes: Vec::new(),
                 signout_redirect_url: None,
+                audience: None,
             },
             &secrecy::SecretString::from("client-secret"),
         )
@@ -2624,6 +2647,7 @@ pub(crate) mod tests {
                 redirect_uri: "http://localhost/flowgen/auth/callback".to_string(),
                 extra_scopes: Vec::new(),
                 signout_redirect_url: None,
+                audience: None,
             },
             &secrecy::SecretString::from("client-secret"),
         )
@@ -2760,6 +2784,7 @@ pub(crate) mod tests {
                 redirect_uri: "http://localhost/flowgen/auth/callback".to_string(),
                 extra_scopes: Vec::new(),
                 signout_redirect_url: None,
+                audience: None,
             },
             &secrecy::SecretString::from("client-secret"),
         )
@@ -3559,10 +3584,7 @@ pub(crate) mod tests {
             .filter(|(_, status)| *status == 401)
             .collect();
 
-        assert!(
-            rejected.is_empty(),
-            "rejected without web.auth: {rejected:?}"
-        );
+        assert!(rejected.is_empty(), "rejected without auth: {rejected:?}");
     }
 
     fn agents_options() -> crate::config::AgentsOptions {
@@ -4556,7 +4578,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn cached_resources_are_listed_with_files_winning() {
+    async fn cached_resources_are_listed_with_their_size_and_files_winning() {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("a.txt"), "file").unwrap();
         let cache: Arc<dyn flowgen_core::cache::Cache> =
@@ -4579,7 +4601,7 @@ pub(crate) mod tests {
 
         let listed: Vec<(&str, Option<i64>)> =
             resources.iter().map(|r| (r.key.as_str(), r.size)).collect();
-        assert_eq!(listed, vec![("a.txt", Some(4)), ("nested/b.txt", None)]);
+        assert_eq!(listed, vec![("a.txt", Some(4)), ("nested/b.txt", Some(6))]);
     }
 
     #[tokio::test]
@@ -4887,6 +4909,20 @@ pub(crate) mod tests {
         assert!(state_cookie(true).starts_with("__Host-"));
         assert!(!session_cookie(false).starts_with("__Host-"));
         assert!(!state_cookie(false).starts_with("__Host-"));
+    }
+
+    #[test]
+    fn a_session_refreshes_once_its_access_token_expires() {
+        let session = |expires_at: Option<i64>| AuthSession {
+            id_token: "id".to_string(),
+            access_token: "access".to_string(),
+            refresh_token: None,
+            expires_at,
+        };
+
+        assert!(session(Some(1_000)).access_token_live(999));
+        assert!(!session(Some(1_000)).access_token_live(1_000));
+        assert!(session(None).access_token_live(i64::MAX));
     }
 
     #[test]

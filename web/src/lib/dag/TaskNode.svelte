@@ -83,7 +83,7 @@
 		<div
 			class={[
 				'truncate text-sm leading-tight font-medium',
-				data.mark === 'removed' && 'line-through decoration-error/60'
+				data.mark === 'removed' && 'text-error line-through decoration-error'
 			]}
 		>
 			{data.name}

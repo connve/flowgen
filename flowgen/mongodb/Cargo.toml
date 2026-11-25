@@ -22,15 +22,12 @@ bytes = { workspace = true }
 arrow = { workspace = true }
 apache-avro = { workspace = true }
 url = { workspace = true }
-object_store = { workspace = true }
 futures = { workspace = true }
 async-trait = { workspace = true }
 tokio-retry = { workspace = true }
 humantime-serde = { workspace = true }
 mongodb = { workspace = true }
 tokio-stream = { workspace = true }
-async-nats = { workspace = true }
-bincode = { workspace = true }
 bson = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 futures-util = { workspace = true }

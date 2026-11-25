@@ -198,7 +198,7 @@ export type ResourceSummary = {
      */
     extension: string | null;
     /**
-     * File size in bytes; null for cache-backed entries.
+     * Size in bytes; null when the resource could not be read.
      */
     size: number | null;
 };
